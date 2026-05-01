@@ -14,14 +14,19 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.media3.common.util.UnstableApi
 import com.smartech.screens.player.PlayerController
 import com.smartech.screens.player.PlayerScreen
+import com.smartech.screens.staff.HoldProgressIndicator
 import com.smartech.screens.staff.OnboardingScreen
 import com.smartech.screens.staff.StaffOverlay
 import com.smartech.screens.util.InputMode
 import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 @OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
@@ -38,6 +43,16 @@ class MainActivity : ComponentActivity() {
      * the collector hasn't subscribed yet on first composition.
      */
     private val unlockBus = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /**
+     * The wall-clock timestamp at which the current hold-OK gesture began,
+     * or null when no hold is in progress. Drives the visual fill indicator
+     * in the top-right of the player screen — Compose collects this and
+     * animates a ring from 0% to 100% over [HOLD_THRESHOLD_MS]. Cleared on
+     * release (early or successful) and on activity pause.
+     */
+    private val _holdStartedAtFlow = MutableStateFlow<Long?>(null)
+    private val holdStartedAtFlow: StateFlow<Long?> = _holdStartedAtFlow.asStateFlow()
 
     /**
      * Hold detection runs off a posted Runnable rather than counting
@@ -59,6 +74,9 @@ class MainActivity : ComponentActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private val unlockRunnable = Runnable {
         unlockFiredThisHold = true
+        // Indicator stops feeding new frames; the staff overlay is about to
+        // cover the player anyway so it disappears with the rest.
+        _holdStartedAtFlow.value = null
         Log.i(TAG, "Hold-OK staff unlock fired (held ≥${HOLD_THRESHOLD_MS}ms)")
         LogBuffer.i(TAG, "Hold-OK staff unlock fired")
         unlockBus.tryEmit(Unit)
@@ -128,6 +146,17 @@ class MainActivity : ComponentActivity() {
                     if (!onboarded) {
                         OnboardingScreen(repository = repo, onDone = { /* state flow flips automatically */ })
                     }
+
+                    // Visual feedback for the hold-OK gesture. Renders a
+                    // small filling ring in the top-right while the user
+                    // holds an OK-like key; vanishes on release. Painted
+                    // last so it sits above the player but below any modal
+                    // staff stage that opens on completion.
+                    HoldProgressIndicator(
+                        holdStartedAtFlow = holdStartedAtFlow,
+                        durationMs = HOLD_THRESHOLD_MS,
+                        modifier = Modifier.align(Alignment.TopEnd),
+                    )
                 }
             }
         }
@@ -162,6 +191,10 @@ class MainActivity : ComponentActivity() {
                     if (event.repeatCount == 0 && holdKeyCode == 0) {
                         holdKeyCode = k
                         unlockFiredThisHold = false
+                        // Surface the hold start to Compose so the indicator
+                        // can paint a filling ring. Same timestamp drives both
+                        // the visual and the unlock-firing Runnable below.
+                        _holdStartedAtFlow.value = System.currentTimeMillis()
                         handler.postDelayed(unlockRunnable, HOLD_THRESHOLD_MS)
                     }
                 }
@@ -171,6 +204,9 @@ class MainActivity : ComponentActivity() {
                         val fired = unlockFiredThisHold
                         holdKeyCode = 0
                         unlockFiredThisHold = false
+                        // Hide the indicator on release whether or not the
+                        // user crossed the threshold.
+                        _holdStartedAtFlow.value = null
                         // Consume the UP so the focused view doesn't also
                         // receive a click — the user was holding to unlock,
                         // not tapping.
@@ -193,6 +229,7 @@ class MainActivity : ComponentActivity() {
         handler.removeCallbacks(unlockRunnable)
         holdKeyCode = 0
         unlockFiredThisHold = false
+        _holdStartedAtFlow.value = null
     }
 
     override fun onDestroy() {
