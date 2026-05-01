@@ -1,6 +1,9 @@
 package com.smartech.screens
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -26,28 +29,46 @@ class MainActivity : ComponentActivity() {
     private lateinit var controller: PlayerController
 
     /**
-     * D-pad unlock bus. We emit a Unit on this flow when the staff-unlock
-     * gesture fires on a TV-class device — which is "hold OK / Select for
+     * Staff-unlock event bus. Emits Unit every time the unlock gesture
+     * fires — on TV-class devices that's "hold OK / Select for
      * [HOLD_THRESHOLD_MS]". [StaffOverlay] collects it and pops the staff
      * PIN screen, mirroring the four-corner gesture used on touchscreens.
      *
-     * Buffer capacity 1 so we never lose an emission in the (unlikely) case
-     * the collector hasn't subscribed yet at the moment the user holds OK
-     * on first boot.
+     * Buffer capacity 1 keeps the (theoretical) early-press case safe if
+     * the collector hasn't subscribed yet on first composition.
      */
     private val unlockBus = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     /**
-     * State for the hold-to-unlock gesture. We start the clock on the first
-     * ACTION_DOWN of OK/Select, ignore the auto-repeats until enough wall
-     * time has passed, then fire the unlock once and swallow the eventual
-     * ACTION_UP so the focused view's click handler doesn't also run.
+     * Hold detection runs off a posted Runnable rather than counting
+     * ACTION_DOWN auto-repeats. Why: on Android TV / Fire TV the input
+     * flinger only auto-repeats keys that some view has "claimed" via
+     * `event.startTracking()`. When the player is showing a video with
+     * no focused element, there's nothing claiming the key — you get
+     * one DOWN, silence, then one UP when the user releases. Counting
+     * repeats produces zero events and the unlock never fires.
      *
-     * `holdKeyCode == 0` means "no hold in progress".
+     * The posted-Runnable approach sidesteps that entirely: on the first
+     * ACTION_DOWN we schedule [unlockRunnable] for HOLD_THRESHOLD_MS in
+     * the future. If the matching ACTION_UP arrives before the runnable
+     * runs, we cancel it (the user just tapped). If the user keeps the
+     * key held, the runnable fires on the main thread, emits on the bus,
+     * and flips [unlockFiredThisHold] so the eventual UP can suppress
+     * the focused view's click.
      */
-    private var holdStartedAt = 0L
-    private var holdKeyCode = 0
+    private val handler = Handler(Looper.getMainLooper())
+    private val unlockRunnable = Runnable {
+        unlockFiredThisHold = true
+        Log.i(TAG, "Hold-OK staff unlock fired (held ≥${HOLD_THRESHOLD_MS}ms)")
+        LogBuffer.i(TAG, "Hold-OK staff unlock fired")
+        unlockBus.tryEmit(Unit)
+    }
+
+    /** True between unlock-firing and the matching ACTION_UP. */
     private var unlockFiredThisHold = false
+
+    /** The keycode that started the current hold; 0 when no hold in progress. */
+    private var holdKeyCode = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,8 +89,13 @@ class MainActivity : ComponentActivity() {
         val repo = (application as ScreensApp).repository
 
         val tvLike = InputMode.isTvLike(this)
+        Log.i(
+            TAG,
+            "Input mode: tvLike=$tvLike hasTouch=${InputMode.hasTouch(this)} " +
+                "isTelevision=${InputMode.isTelevision(this)}",
+        )
         LogBuffer.i(
-            "MainActivity",
+            TAG,
             "Input mode: tvLike=$tvLike hasTouch=${InputMode.hasTouch(this)} " +
                 "isTelevision=${InputMode.isTelevision(this)}",
         )
@@ -108,76 +134,97 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Watch for the hold-OK / hold-Select unlock on TV-class devices.
+     * Watch for the hold-OK / hold-Select staff unlock on TV-class devices.
      *
      * We hook at the Activity level rather than inside Compose because
      * key events on a leanback device dispatch to the focused view first;
-     * if the focused view consumes the OK key on ACTION_DOWN to do its own
-     * thing (Material buttons trigger their click on UP, but a long-press-
-     * aware element like a TextField could absorb intermediate events),
-     * we'd never see it inside an in-tree handler. `dispatchKeyEvent` runs
-     * before any focus traversal, so we can time the hold reliably.
+     * `dispatchKeyEvent` runs before any focus traversal, so we can time
+     * the hold reliably regardless of which (if any) view has focus.
      *
      * Behaviour:
-     *   • Tap (down → up under the threshold)  → not consumed; the focused
-     *     view gets its normal click. Same as today's TV UX.
-     *   • Hold (down ≥ HOLD_THRESHOLD_MS)      → fire unlock once on the
-     *     auto-repeat that crosses the line, then consume ACTION_UP so the
-     *     focused view does NOT also receive a click. Without this the
+     *   • Tap (down → up under the threshold)   → not consumed; the focused
+     *     view gets its normal click. Tablet four-corner tap and the staff
+     *     UI's button presses still work.
+     *   • Hold (down ≥ HOLD_THRESHOLD_MS)        → posted Runnable fires the
+     *     unlock at threshold, then the matching UP is consumed so the
+     *     focused view does NOT also receive a click. Without this, the
      *     button under the cursor would activate the moment the user lets
-     *     go after unlocking.
+     *     go.
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val k = event.keyCode
-        val isOkLike =
-            k == KeyEvent.KEYCODE_DPAD_CENTER ||
-                k == KeyEvent.KEYCODE_ENTER ||
-                k == KeyEvent.KEYCODE_NUMPAD_ENTER ||
-                // Some Android TV / Fire TV remotes report SELECT as BUTTON_A.
-                k == KeyEvent.KEYCODE_BUTTON_A
-
-        if (isOkLike) {
+        if (isOkLikeKey(k)) {
             when (event.action) {
                 KeyEvent.ACTION_DOWN -> {
-                    if (event.repeatCount == 0) {
-                        // First ACTION_DOWN of a fresh press — start the clock.
-                        holdStartedAt = System.currentTimeMillis()
+                    // Only the *first* DOWN starts a fresh timer. Auto-repeat
+                    // DOWNs (repeatCount > 0) are ignored — the timer is
+                    // already running.
+                    if (event.repeatCount == 0 && holdKeyCode == 0) {
                         holdKeyCode = k
                         unlockFiredThisHold = false
-                    } else if (!unlockFiredThisHold && holdKeyCode == k) {
-                        // We're inside the auto-repeat stream of an ongoing hold.
-                        // Fire exactly once when the threshold is crossed.
-                        if (System.currentTimeMillis() - holdStartedAt >= HOLD_THRESHOLD_MS) {
-                            unlockFiredThisHold = true
-                            LogBuffer.i("MainActivity", "Hold-OK staff unlock fired")
-                            unlockBus.tryEmit(Unit)
-                            return true
-                        }
+                        handler.postDelayed(unlockRunnable, HOLD_THRESHOLD_MS)
                     }
                 }
                 KeyEvent.ACTION_UP -> {
-                    val fired = unlockFiredThisHold
-                    holdStartedAt = 0L
-                    holdKeyCode = 0
-                    unlockFiredThisHold = false
-                    // Suppress the click that would otherwise fire on the
-                    // focused view — user was holding to unlock, not tapping.
-                    if (fired) return true
+                    if (k == holdKeyCode) {
+                        handler.removeCallbacks(unlockRunnable)
+                        val fired = unlockFiredThisHold
+                        holdKeyCode = 0
+                        unlockFiredThisHold = false
+                        // Consume the UP so the focused view doesn't also
+                        // receive a click — the user was holding to unlock,
+                        // not tapping.
+                        if (fired) return true
+                    }
+                }
+                KeyEvent.ACTION_MULTIPLE -> {
+                    // Some old Android TV remotes batch repeats into MULTIPLE.
+                    // Treat the same as DOWN: don't restart the timer.
                 }
             }
         }
         return super.dispatchKeyEvent(event)
     }
 
+    override fun onPause() {
+        super.onPause()
+        // If the user backgrounds the app mid-hold, drop the pending unlock
+        // and reset state so a stray UP after foregrounding can't fire it.
+        handler.removeCallbacks(unlockRunnable)
+        holdKeyCode = 0
+        unlockFiredThisHold = false
+    }
+
     override fun onDestroy() {
+        handler.removeCallbacks(unlockRunnable)
         controller.release()
         super.onDestroy()
     }
 
     private companion object {
-        // 1.5 seconds — long enough that you can't trigger it by accident
-        // while clicking through the staff UI, short enough that staff
-        // members won't dismiss it as broken.
+        const val TAG = "MainActivity"
+
+        /**
+         * 1.5 seconds — long enough that you can't trigger it by accident
+         * while clicking through the staff UI, short enough that staff
+         * members won't dismiss it as broken.
+         */
         const val HOLD_THRESHOLD_MS = 1_500L
+
+        /**
+         * Every keycode we treat as "OK / Select" across the various TV
+         * remotes. Most send DPAD_CENTER; some Fire TV remotes send
+         * BUTTON_A; air mice + Bluetooth keyboards send ENTER /
+         * NUMPAD_ENTER. KEYCODE_BUTTON_SELECT is included because a few
+         * generic gamepad-style remotes use it for the centre key.
+         */
+        fun isOkLikeKey(k: Int): Boolean = when (k) {
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_BUTTON_A,
+            KeyEvent.KEYCODE_BUTTON_SELECT -> true
+            else -> false
+        }
     }
 }
