@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 96" width="360" height="96">
+  <title>Screens — lockup · white</title>
+  <g>
+    <rect x="10" y="6" width="76" height="14" fill="#F7F6F2"></rect>
+    <circle cx="48" cy="42" r="6" fill="#F7F6F2"></circle>
+    <circle cx="48" cy="54" r="6" fill="#F7F6F2"></circle>
+    <rect x="10" y="76" width="76" height="14" fill="#F7F6F2"></rect>
+  </g>
+  <text x="120" y="65" font-family="&#39;PP Neue Montreal&#39;,&#39;Space Grotesk&#39;,&#39;Inter&#39;,sans-serif" font-weight="700" font-size="62" letter-spacing="-2.5" fill="#F7F6F2" textLength="230" lengthAdjust="spacingAndGlyphs">screens</text>
+</svg>

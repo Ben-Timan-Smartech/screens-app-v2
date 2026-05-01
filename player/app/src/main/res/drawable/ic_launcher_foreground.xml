@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Screens mark — bars + colon, from brand/screens-mark.svg.
+  Adaptive-icon canvas is 108dp; safe zone is the centre 72dp (18dp inset
+  on every edge). Mark is the original 96-unit grid scaled by 72/96 = 0.75
+  and centred inside the safe zone, so it survives the launcher applying
+  any of its mask shapes (square / round / squircle).
+
+  Bone (#F7F6F2) on the @color/ic_launcher_background ink slab.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Top bar — was rect(10,6,76,14) in the 96-grid -->
+    <path
+        android:fillColor="#F7F6F2"
+        android:pathData="M25.5,22.5 h57 v10.5 h-57 Z" />
+    <!-- Upper colon dot — was circle(cx=48,cy=42,r=6) -->
+    <path
+        android:fillColor="#F7F6F2"
+        android:pathData="M54,49.5 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0 Z" />
+    <!-- Lower colon dot — was circle(cx=48,cy=54,r=6) -->
+    <path
+        android:fillColor="#F7F6F2"
+        android:pathData="M54,58.5 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0 Z" />
+    <!-- Bottom bar — was rect(10,76,76,14) -->
+    <path
+        android:fillColor="#F7F6F2"
+        android:pathData="M25.5,75 h57 v10.5 h-57 Z" />
+</vector>

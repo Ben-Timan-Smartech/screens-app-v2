@@ -1,0 +1,10 @@
+{
+  "_comment": "Replace this with your real google-services.json from the Firebase console.",
+  "_instructions": [
+    "1. Firebase console → project settings → add Android app",
+    "2. Package name: com.smartech.screens",
+    "3. Download google-services.json",
+    "4. Rename from .example to .json and drop it in player/app/",
+    "5. Rebuild"
+  ]
+}

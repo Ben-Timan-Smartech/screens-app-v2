@@ -1,0 +1,237 @@
+package com.smartech.screens.data
+
+import android.content.Context
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import java.util.UUID
+
+private val Context.dataStore by preferencesDataStore(name = "screens_device")
+
+/**
+ * Persistent device-local state. Small — token, deviceId, last-applied settings,
+ * playlist ETag. Anything bigger (videos, playlist JSON) lives on disk as files.
+ */
+class DeviceStore(private val context: Context) {
+
+    private object Keys {
+        val DeviceId = stringPreferencesKey("device_id")
+        val DeviceToken = stringPreferencesKey("device_token")
+        val ScreenId = stringPreferencesKey("screen_id")
+        val PlaylistEtag = stringPreferencesKey("playlist_etag")
+        val SettingsEtag = stringPreferencesKey("settings_etag")
+        val LastFcmToken = stringPreferencesKey("last_fcm_token")
+        val CacheCapBytes = longPreferencesKey("cache_cap_bytes")
+        val PollIntervalSec = longPreferencesKey("poll_interval_sec")
+        val OrientationOverride = stringPreferencesKey("orientation_override")
+
+        // Structured location — set via the cascading dropdowns in Device admin.
+        val LocRegion     = stringPreferencesKey("loc_region")       // "USA" | "UK" | "EU"
+        val LocCity       = stringPreferencesKey("loc_city")         // "NYC" | "LDN" | …
+        val LocStoreId    = stringPreferencesKey("loc_store_id")     // taxonomy store id
+        val LocConcept    = stringPreferencesKey("loc_concept")      // "Smartech" | "Playhouse" | …
+        val LocFloor      = stringPreferencesKey("loc_floor")        // "GF" | "MEZ" | "TF"
+        val LocTable      = stringPreferencesKey("loc_table")        // "GF.A" | …
+        val LocScreenCode = stringPreferencesKey("loc_screen_code")  // free text, e.g. "GF.A.1"
+
+        // Live demo server (laptop running serve.py on the same LAN). When set,
+        // the player polls /api/state from this URL instead of the demo Cloudflare
+        // playlist. Settable via Device admin → Configuration.
+        val LiveServerUrl = stringPreferencesKey("live_server_url")
+    }
+
+    /** Ensures a stable per-install device id. Called exactly once at first launch. */
+    suspend fun ensureDeviceId(): String {
+        val existing = context.dataStore.data.map { it[Keys.DeviceId] }.first()
+        if (existing != null) return existing
+        val id = UUID.randomUUID().toString()
+        context.dataStore.edit { it[Keys.DeviceId] = id }
+        return id
+    }
+
+    val deviceId: Flow<String?> = context.dataStore.data.map { it[Keys.DeviceId] }
+    val screenId: Flow<String?> = context.dataStore.data.map { it[Keys.ScreenId] }
+    val deviceToken: Flow<String?> = context.dataStore.data.map { it[Keys.DeviceToken] }
+    val playlistEtag: Flow<String?> = context.dataStore.data.map { it[Keys.PlaylistEtag] }
+    val settingsEtag: Flow<String?> = context.dataStore.data.map { it[Keys.SettingsEtag] }
+    val orientationOverride: Flow<String?> = context.dataStore.data.map { it[Keys.OrientationOverride] }
+
+    // Structured location flows
+    val locRegion: Flow<String?>     = context.dataStore.data.map { it[Keys.LocRegion] }
+    val locCity: Flow<String?>       = context.dataStore.data.map { it[Keys.LocCity] }
+    val locStoreId: Flow<String?>    = context.dataStore.data.map { it[Keys.LocStoreId] }
+    val locConcept: Flow<String?>    = context.dataStore.data.map { it[Keys.LocConcept] }
+    val locFloor: Flow<String?>      = context.dataStore.data.map { it[Keys.LocFloor] }
+    val locTable: Flow<String?>      = context.dataStore.data.map { it[Keys.LocTable] }
+    val locScreenCode: Flow<String?> = context.dataStore.data.map { it[Keys.LocScreenCode] }
+    val liveServerUrl: Flow<String?> = context.dataStore.data.map { it[Keys.LiveServerUrl] }
+
+    /**
+     * `true` once the screen has been through first-run setup. Required fields:
+     * region, city, store, concept, and screen code. Floor and table are optional.
+     * Used by [com.smartech.screens.MainActivity] to gate the onboarding screen.
+     */
+    val isOnboarded: Flow<Boolean> = combine(
+        locRegion, locCity, locStoreId, locConcept, locScreenCode,
+    ) { region, city, store, concept, code ->
+        !region.isNullOrBlank() && !city.isNullOrBlank() &&
+            !store.isNullOrBlank() && !concept.isNullOrBlank() &&
+            !code.isNullOrBlank()
+    }
+
+    val cacheCapBytes: Flow<Long> =
+        context.dataStore.data.map { it[Keys.CacheCapBytes] ?: (8L * 1024 * 1024 * 1024) }
+
+    val pollIntervalSec: Flow<Long> =
+        context.dataStore.data.map { it[Keys.PollIntervalSec] ?: 60 }
+
+    suspend fun setOrientationOverride(value: String?) {
+        context.dataStore.edit { prefs ->
+            if (value == null) prefs.remove(Keys.OrientationOverride)
+            else prefs[Keys.OrientationOverride] = value
+        }
+    }
+
+    /**
+     * Setters for each location level. When a parent level changes, descendant
+     * levels that no longer make sense are cleared automatically. Callers don't
+     * need to remember the cascade rules.
+     */
+    suspend fun setLocRegion(value: String?) {
+        context.dataStore.edit { prefs ->
+            putOrRemove(prefs, Keys.LocRegion, value)
+            // Clear cascade — any city/store/etc. assumed under the old region.
+            prefs.remove(Keys.LocCity); prefs.remove(Keys.LocStoreId)
+        }
+    }
+
+    suspend fun setLocCity(value: String?) {
+        context.dataStore.edit { prefs ->
+            putOrRemove(prefs, Keys.LocCity, value)
+            prefs.remove(Keys.LocStoreId)
+        }
+    }
+
+    suspend fun setLocStoreId(value: String?)    { editStr(Keys.LocStoreId, value) }
+    suspend fun setLocConcept(value: String?)    { editStr(Keys.LocConcept, value) }
+
+    /**
+     * Atomic store-pick. Picking a store implies its city and region; this
+     * helper writes all three keys in a single DataStore transaction so the
+     * cascade-clear logic in [setLocRegion] / [setLocCity] doesn't wipe the
+     * child fields between writes. Optionally clears `concept` when the
+     * picked store's city has no in-store concepts (BER, ROM).
+     */
+    suspend fun setLocStoreCascade(
+        storeId: String?,
+        cityCode: String?,
+        regionName: String?,
+        clearConcept: Boolean,
+        clearFloorTable: Boolean = false,
+    ) {
+        context.dataStore.edit { prefs ->
+            putOrRemove(prefs, Keys.LocStoreId, storeId)
+            putOrRemove(prefs, Keys.LocCity, cityCode)
+            putOrRemove(prefs, Keys.LocRegion, regionName)
+            if (clearConcept) prefs.remove(Keys.LocConcept)
+            if (clearFloorTable) {
+                prefs.remove(Keys.LocFloor)
+                prefs.remove(Keys.LocTable)
+            }
+        }
+    }
+
+    suspend fun setLocFloor(value: String?) {
+        context.dataStore.edit { prefs ->
+            putOrRemove(prefs, Keys.LocFloor, value)
+            // Tables are namespaced by floor; clearing floor invalidates table.
+            prefs.remove(Keys.LocTable)
+        }
+    }
+
+    suspend fun setLocTable(value: String?)      { editStr(Keys.LocTable, value) }
+    suspend fun setLocScreenCode(value: String?) { editStr(Keys.LocScreenCode, value) }
+
+    suspend fun setLiveServerUrl(value: String?) {
+        // Normalise — strip trailing slashes and prepend http:// if missing.
+        val cleaned = value?.trim()?.takeIf { it.isNotBlank() }?.let {
+            val withScheme = if (it.startsWith("http://") || it.startsWith("https://")) it else "http://$it"
+            withScheme.trimEnd('/')
+        }
+        editStr(Keys.LiveServerUrl, cleaned)
+    }
+
+    private suspend fun editStr(
+        key: androidx.datastore.preferences.core.Preferences.Key<String>,
+        value: String?,
+    ) {
+        context.dataStore.edit { prefs -> putOrRemove(prefs, key, value) }
+    }
+
+    private fun putOrRemove(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        key: androidx.datastore.preferences.core.Preferences.Key<String>,
+        value: String?,
+    ) {
+        if (value.isNullOrBlank()) prefs.remove(key) else prefs[key] = value
+    }
+
+    suspend fun setCacheCapBytes(bytes: Long) {
+        context.dataStore.edit { it[Keys.CacheCapBytes] = bytes }
+    }
+
+    suspend fun setPollIntervalSec(sec: Long) {
+        context.dataStore.edit { it[Keys.PollIntervalSec] = sec }
+    }
+
+    /** Wipe registration only — keeps cache + log. Used by "Re-register" admin action. */
+    suspend fun clearRegistration() {
+        context.dataStore.edit { prefs ->
+            prefs.remove(Keys.DeviceToken)
+            prefs.remove(Keys.ScreenId)
+            prefs.remove(Keys.PlaylistEtag)
+            prefs.remove(Keys.SettingsEtag)
+        }
+    }
+
+    suspend fun saveRegistration(token: String, screenId: String) {
+        context.dataStore.edit {
+            it[Keys.DeviceToken] = token
+            it[Keys.ScreenId] = screenId
+        }
+    }
+
+    suspend fun savePlaylistEtag(etag: String) {
+        context.dataStore.edit { it[Keys.PlaylistEtag] = etag }
+    }
+
+    suspend fun saveSettings(settings: SettingsResponse, etag: String?) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.CacheCapBytes] = settings.cacheCapBytes
+            prefs[Keys.PollIntervalSec] = settings.pollIntervalSec.toLong()
+            if (settings.orientation != null) {
+                prefs[Keys.OrientationOverride] = settings.orientation
+            } else {
+                prefs.remove(Keys.OrientationOverride)
+            }
+            if (etag != null) prefs[Keys.SettingsEtag] = etag
+        }
+    }
+
+    suspend fun saveFcmToken(token: String) {
+        context.dataStore.edit { it[Keys.LastFcmToken] = token }
+    }
+
+    suspend fun lastFcmToken(): String? =
+        context.dataStore.data.map { it[Keys.LastFcmToken] }.first()
+
+    /** Bearer-token getter used by [ApiClient]'s interceptor. Blocking on purpose — runs once per request. */
+    fun tokenBlocking(): String? = runCatching {
+        kotlinx.coroutines.runBlocking { deviceToken.first() }
+    }.getOrNull()
+}

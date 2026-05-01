@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android TV / Fire TV launcher banner. Required at 320×180 (16:9) per
+  Google's TV app guidelines — leanback launchers refuse to render an
+  app without one. Drawn as a vector so it scales cleanly to whichever
+  density the TV launcher actually consumes.
+
+  Brand mark (bone bars + colon dots) on the ink slab, slightly inset
+  from the right with the wordmark, so it reads at thumbnail size on a
+  TV home row.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <!-- Ink background slab. -->
+    <path
+        android:fillColor="#141414"
+        android:pathData="M0,0 h320 v180 h-320 Z" />
+
+    <!-- Brand mark on the left, sized 96×96 inside a 116×116 padded box. -->
+    <!-- Top bar — was rect(10,6,76,14) on the 96-grid, offset by (40, 42). -->
+    <path
+        android:fillColor="#F7F6F2"
+        android:pathData="M50,48 h76 v14 h-76 Z" />
+    <!-- Upper colon dot — circle(cx=48,cy=42,r=6) → (88, 84). -->
+    <path
+        android:fillColor="#F7F6F2"
+        android:pathData="M88,84 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0 Z" />
+    <!-- Lower colon dot — circle(cx=48,cy=54,r=6) → (88, 96). -->
+    <path
+        android:fillColor="#F7F6F2"
+        android:pathData="M88,96 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0 Z" />
+    <!-- Bottom bar — was rect(10,76,76,14) → offset (40, 118). -->
+    <path
+        android:fillColor="#F7F6F2"
+        android:pathData="M50,118 h76 v14 h-76 Z" />
+
+    <!-- Wordmark right of the mark.  Approximate "SCREENS" via filled
+         bars; we don't have a font baked into a vector drawable, so a
+         bar pattern is the readable-at-thumbnail compromise. -->
+    <path
+        android:fillColor="#F7F6F2"
+        android:pathData="M150,82 h140 v6 h-140 Z" />
+    <path
+        android:fillColor="#8C8C8C"
+        android:pathData="M150,96 h100 v3 h-100 Z" />
+</vector>

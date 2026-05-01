@@ -1,0 +1,766 @@
+"""
+Demo server for the Screens CMS.
+
+Serves two trees:
+    /            → app/                              (the CMS)
+    /media/...   → G:\\Shared drives\\Smartech\\Screens\\Brand Content\\... (videos)
+
+Why custom: the standard `python -m http.server` doesn't support HTTP Range
+requests, and HTML5 `<video>` issues range fetches when seeking. Without
+range support, seek bars don't work and large files re-download from byte 0
+on every interaction. The `serve_media` path below handles 200/206 properly.
+
+Run from the project root:
+    python serve.py
+"""
+
+from __future__ import annotations
+
+import http.server
+import json
+import os
+import re
+import socket
+import socketserver
+import sys
+import threading
+import time
+import urllib.parse
+from pathlib import Path
+
+PROJECT = Path(__file__).resolve().parent
+APP_DIR = PROJECT / "app"
+BRAND_DIR = PROJECT / "brand"           # logos, favicons, wordmark
+MEDIA_DIR = Path(r"G:\Shared drives\Smartech\Screens\Brand Content")
+SPLASH_DIR = Path(r"G:\Shared drives\Smartech\Screens")  # parent of "Splash - X" folders
+LIBRARY_JSON = APP_DIR / "components" / "library.json"
+
+PORT = 8765
+BIND = "0.0.0.0"   # Listen on all interfaces so the tablet can reach us on LAN.
+
+RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
+
+# ── In-memory live state ────────────────────────────────────────────
+# Per-screen playlist + commands. Each registered tablet (keyed by deviceId)
+# has its own state so the CMS can push to one or many independently.
+#
+# State model (per device):
+#   revision, items, pushedAt, mixSplash, pendingCommands
+
+_STATE_LOCK = threading.RLock()
+_per_screen: dict[str, dict] = {}   # deviceId -> {revision, items, pushedAt, mixSplash, pendingCommands}
+_screens: dict[str, dict] = {}      # deviceId -> registry (last heartbeat, device info, etc.)
+
+
+def _ensure_screen_state(device_id: str) -> dict:
+    """Lazily create a per-screen state record. Caller must hold _STATE_LOCK."""
+    s = _per_screen.get(device_id)
+    if s is None:
+        s = {
+            "revision": 0,
+            "items": [],
+            "pushedAt": None,
+            "mixSplash": True,                    # bundled splash mixed in by default
+            "pendingCommands": [],                 # list of pending commands for this screen
+        }
+        _per_screen[device_id] = s
+    return s
+
+
+# Library cache. scan-videos.py writes app/components/library.json; we read
+# it on demand and serve via /api/library so the tablet's staff overlay can
+# list the same brands and videos as the CMS.
+_LIBRARY_CACHE: dict = {"mtime": 0.0, "data": None}
+
+
+def _load_library() -> dict:
+    """Cached library read. Re-loads only when the file's mtime bumps."""
+    if not LIBRARY_JSON.is_file():
+        return {"brands": [], "videos": []}
+    mtime = LIBRARY_JSON.stat().st_mtime
+    if _LIBRARY_CACHE["mtime"] != mtime or _LIBRARY_CACHE["data"] is None:
+        with open(LIBRARY_JSON, "r", encoding="utf-8") as f:
+            _LIBRARY_CACHE["data"] = json.load(f)
+        _LIBRARY_CACHE["mtime"] = mtime
+    return _LIBRARY_CACHE["data"]
+
+
+# ── Splash registry ──────────────────────────────────────────────────
+# Folders on Drive named `Splash - <Brand>` or `Splash - <Concept>`. The
+# server scans for the first MP4 in each on startup and exposes them via
+# `/api/splashes`. Resolution: concept overrides brand; brand picked by
+# city (NYC/ROM → tm:rw, LDN/BER → Smartech).
+SPLASH_FOLDERS = [
+    # (kind, name, folder_name)
+    ("brand",   "tmrw",       "Splash - tmrw"),
+    ("brand",   "smartech",   "Splash - Smartech"),
+    ("concept", "Smartech",   "Splash - Smartech"),
+    ("concept", "Bikeshop",   "Splash - Bike Shop"),
+    ("concept", "7EVN",       "Splash - 7EVN"),
+    ("concept", "Playhouse",  "Splash - Playhouse"),
+    ("concept", "Sanctuary",  "Splash - Sanctuary"),
+    ("concept", "The Track",  "Splash - The Track"),
+    ("concept", "Cornershop", "Splash - Cornershop"),
+    ("concept", "tm:rw Cafe", "Splash - tm-rw Cafe"),
+]
+
+# Default city → brand mapping. NYC and ROM run tm:rw; LDN and BER run
+# Smartech. Editable at runtime via /api/splashes/mapping.
+DEFAULT_CITY_BRAND: dict = {
+    "NYC": "tmrw",
+    "ROM": "tmrw",
+    "LDN": "smartech",
+    "BER": "smartech",
+}
+
+_splash_registry: dict = {}     # key "brand:tmrw" / "concept:7EVN" -> meta
+_city_brand: dict = {}          # mutable copy of DEFAULT_CITY_BRAND
+
+# ── Library sync (scan-videos.py runner) ────────────────────────────
+# The CMS doesn't keep its own copy of any video — `/media/...` streams
+# them in place from the local Drive Desktop sync at
+# `G:\Shared drives\Smartech\Screens\Brand Content`. The "Drive sync"
+# UI re-runs scan-videos.py to refresh `library.json` (titles, brands,
+# durations, dimensions). Auto-runs once a day in a background thread.
+
+import subprocess
+
+_SYNC_LOCK = threading.RLock()
+_sync_state: dict = {
+    "lastRunAt":       None,    # epoch seconds of the last scan completion
+    "lastSuccess":     None,    # bool
+    "lastCount":       None,    # int videos
+    "lastError":       None,    # error string when lastSuccess=False
+    "running":         False,
+    "progressCurrent": None,    # int — folders processed so far this run
+    "progressTotal":   None,    # int — total folders in this run
+    "progressLabel":   None,    # str — current brand folder name
+}
+
+_PROGRESS_RE = re.compile(r"^PROGRESS:\s+(\d+)/(\d+)\s+(.*)$")
+
+
+def run_library_scan() -> dict:
+    """Synchronously re-run scan-videos.py. Streams progress lines into
+    _sync_state so the Drive Sync UI can render a live count."""
+    with _SYNC_LOCK:
+        if _sync_state["running"]:
+            return {"ok": False, "error": "already running"}
+        _sync_state["running"] = True
+        _sync_state["progressCurrent"] = None
+        _sync_state["progressTotal"] = None
+        _sync_state["progressLabel"] = None
+    tail: list[str] = []        # last few lines for error reporting
+    try:
+        scan_script = PROJECT / "scan-videos.py"
+        proc = subprocess.Popen(
+            [sys.executable, "-u", str(scan_script)],   # -u = unbuffered stdout
+            cwd=str(PROJECT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,                                  # line-buffered
+            encoding="utf-8",
+            errors="replace",
+        )
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip()
+            if not line:
+                continue
+            m = _PROGRESS_RE.match(line)
+            if m:
+                with _SYNC_LOCK:
+                    _sync_state["progressCurrent"] = int(m.group(1))
+                    _sync_state["progressTotal"] = int(m.group(2))
+                    _sync_state["progressLabel"] = m.group(3)
+                continue
+            # Keep a rolling tail of regular log lines so we can surface
+            # the script's stderr if something goes wrong.
+            tail.append(line)
+            if len(tail) > 30:
+                tail.pop(0)
+        proc.wait(timeout=900)
+        ok = proc.returncode == 0
+
+        count = None
+        if ok:
+            try:
+                with open(LIBRARY_JSON, "r", encoding="utf-8") as f:
+                    count = len(json.load(f).get("videos", []))
+            except Exception:
+                count = None
+            _LIBRARY_CACHE["mtime"] = 0.0    # force reload on next /api/library
+
+        err = None if ok else "\n".join(tail[-15:]) or f"scan failed (exit {proc.returncode})"
+
+        with _SYNC_LOCK:
+            _sync_state["lastRunAt"] = time.time()
+            _sync_state["lastSuccess"] = ok
+            _sync_state["lastCount"] = count
+            _sync_state["lastError"] = err
+            _sync_state["running"] = False
+            _sync_state["progressCurrent"] = None
+            _sync_state["progressTotal"] = None
+            _sync_state["progressLabel"] = None
+        if ok:
+            print(f"[sync] scan-videos.py OK - {count} videos", file=sys.stderr)
+        else:
+            print(f"[sync] scan-videos.py FAILED - exit {proc.returncode}", file=sys.stderr)
+        return {"ok": ok, "count": count, "error": err}
+    except Exception as e:
+        with _SYNC_LOCK:
+            _sync_state["running"] = False
+            _sync_state["lastSuccess"] = False
+            _sync_state["lastError"] = str(e)
+            _sync_state["lastRunAt"] = time.time()
+            _sync_state["progressCurrent"] = None
+            _sync_state["progressTotal"] = None
+            _sync_state["progressLabel"] = None
+        return {"ok": False, "error": str(e)}
+
+
+def daily_sync_loop() -> None:
+    """Re-run the library scan every 24 hours. Designed to run in a daemon
+    thread so it dies with the server."""
+    while True:
+        time.sleep(24 * 60 * 60)
+        try:
+            run_library_scan()
+        except Exception as e:
+            print(f"[sync] daily failure: {e}", file=sys.stderr)
+
+
+def _build_splash_registry() -> None:
+    """Scan SPLASH_DIR for the configured folders. Pick the largest MP4
+    that isn't tucked under an "Old" / "Compressed" / etc subfolder."""
+    skip_segments = ("/old/", "/compressed/", "/nologo/", "/portrait/")
+    out: dict = {}
+    for kind, name, folder_name in SPLASH_FOLDERS:
+        folder = SPLASH_DIR / folder_name
+        if not folder.is_dir():
+            continue
+        candidates = []
+        for ext in ("*.mp4", "*.mov"):
+            for f in folder.rglob(ext):
+                rel = str(f).lower().replace("\\", "/")
+                if any(seg in rel for seg in skip_segments):
+                    continue
+                candidates.append(f)
+        if not candidates:
+            continue
+        # Prefer files at the top level of the folder; fall back to deepest
+        # filesystem find. Then largest by size.
+        top = [c for c in candidates if c.parent == folder]
+        chosen = (sorted(top, key=lambda p: p.stat().st_size, reverse=True)
+                  or sorted(candidates, key=lambda p: p.stat().st_size, reverse=True))[0]
+        rel_path = chosen.relative_to(SPLASH_DIR)
+        url = "/splash/" + "/".join(urllib.parse.quote(p) for p in rel_path.parts)
+        meta = {
+            "kind":     kind,
+            "name":     name,
+            "filename": chosen.name,
+            "url":      url,
+            "sizeMb":   round(chosen.stat().st_size / (1024 * 1024), 1),
+        }
+        out[f"{kind}:{name}"] = meta
+    _splash_registry.clear()
+    _splash_registry.update(out)
+    _city_brand.clear()
+    _city_brand.update(DEFAULT_CITY_BRAND)
+
+
+def resolve_splash_for(city: str | None, concept: str | None) -> dict | None:
+    """Return splash meta for a screen at (city, concept). Concept overrides brand."""
+    if concept:
+        m = _splash_registry.get(f"concept:{concept}")
+        if m:
+            return m
+    if city:
+        brand = _city_brand.get(city)
+        if brand:
+            m = _splash_registry.get(f"brand:{brand}")
+            if m:
+                return m
+    return None
+
+
+def lan_ip() -> str:
+    """Best-guess LAN IP — the address that would reach 8.8.8.8."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    """Routes / under app/ and /media/ under the Drive's Brand Content folder."""
+
+    # `directory=` on the constructor is honoured by Python's stdlib but we want
+    # a per-request decision, so we override translate_path entirely.
+    def translate_path(self, path: str) -> str:
+        # Strip query / fragment, then percent-decode.
+        path = path.split("?", 1)[0].split("#", 1)[0]
+        path = urllib.parse.unquote(path)
+        path = path.lstrip("/")
+
+        if path.startswith("media/"):
+            sub = path[len("media/") :]
+            full = (MEDIA_DIR / sub).resolve()
+            try:
+                full.relative_to(MEDIA_DIR)
+            except ValueError:
+                return str(MEDIA_DIR)
+            return str(full)
+
+        if path.startswith("splash/"):
+            sub = path[len("splash/"):]
+            full = (SPLASH_DIR / sub).resolve()
+            try:
+                full.relative_to(SPLASH_DIR)
+            except ValueError:
+                return str(SPLASH_DIR)
+            return str(full)
+
+        if path.startswith("brand/"):
+            sub = path[len("brand/"):]
+            full = (BRAND_DIR / sub).resolve()
+            try:
+                full.relative_to(BRAND_DIR)
+            except ValueError:
+                return str(BRAND_DIR)
+            return str(full)
+
+        if not path:
+            return str(APP_DIR / "index.html")
+        return str((APP_DIR / path).resolve())
+
+    # ── /media/ gets range support; /api/ goes to JSON handlers ──
+
+    def do_GET(self) -> None:
+        if self.path.startswith("/api/"):
+            self._serve_api_get()
+            return
+        if self.path.startswith("/media/") or self.path.startswith("/splash/"):
+            self._serve_media(head_only=False)
+            return
+        super().do_GET()
+
+    def do_HEAD(self) -> None:
+        if self.path.startswith("/media/") or self.path.startswith("/splash/"):
+            self._serve_media(head_only=True)
+            return
+        super().do_HEAD()
+
+    def do_POST(self) -> None:
+        if self.path.startswith("/api/"):
+            self._serve_api_post()
+            return
+        self.send_error(405)
+
+    def do_OPTIONS(self) -> None:
+        # Permissive CORS — browser preflights for /api/push from the CMS,
+        # and the tablet cares less but it doesn't hurt.
+        self.send_response(204)
+        self._cors_headers()
+        self.end_headers()
+
+    # ── API handlers ──────────────────────────────────────────────
+
+    def _cors_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def _send_json(self, payload: dict, status: int = 200) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except Exception:
+            return {}
+
+    def _serve_api_get(self) -> None:
+        url = urllib.parse.urlparse(self.path)
+        path = url.path
+        params = urllib.parse.parse_qs(url.query)
+
+        if path == "/api/state":
+            # Per-screen state when ?screenId=<deviceId>; otherwise return a
+            # synthetic "default" state (used by the CMS to show "current
+            # global push" and by tablets that haven't picked their id yet).
+            screen_id = (params.get("screenId") or [None])[0]
+            with _STATE_LOCK:
+                if screen_id:
+                    s = _ensure_screen_state(screen_id)
+                    # Drain pending commands as part of the response so the
+                    # tablet sees them in one round-trip.
+                    commands = list(s["pendingCommands"])
+                    s["pendingCommands"] = []
+                    # Per-screen splash resolution from the device's location.
+                    screen_meta = _screens.get(screen_id, {})
+                    location = screen_meta.get("location") or {}
+                    splash = resolve_splash_for(location.get("city"), location.get("concept"))
+                    payload = {
+                        "screenId":    screen_id,
+                        "revision":    s["revision"],
+                        "items":       s["items"],
+                        "pushedAt":    s["pushedAt"],
+                        "mixSplash":   s["mixSplash"],
+                        "commands":    commands,
+                        "splashUrl":   splash["url"] if splash else None,
+                        "splashName":  splash["name"] if splash else None,
+                    }
+                else:
+                    # Aggregate view for the CMS: sum across all screens.
+                    revisions = [s["revision"] for s in _per_screen.values()]
+                    items_any = next((s["items"] for s in _per_screen.values() if s["items"]), [])
+                    payload = {
+                        "revision": max(revisions) if revisions else 0,
+                        "items":    items_any,
+                        "screensWithContent": sum(1 for s in _per_screen.values() if s["items"]),
+                    }
+            self._send_json(payload)
+            return
+
+        if path == "/api/screens":
+            now = time.time()
+            with _STATE_LOCK:
+                screens = []
+                for device_id, s in _screens.items():
+                    state = _per_screen.get(device_id, {})
+                    last = s.get("lastHeartbeat") or 0
+                    record = {
+                        **s,
+                        "online":                (now - last) < 15,
+                        "secondsSinceHeartbeat": round(now - last, 1) if last else None,
+                        "currentRevision":       state.get("revision", 0),
+                        "currentItems":          state.get("items", []),
+                        "mixSplash":             state.get("mixSplash", True),
+                    }
+                    screens.append(record)
+            self._send_json({"screens": screens})
+            return
+
+        if path == "/api/library":
+            self._send_json(_load_library())
+            return
+
+        if path == "/api/library/info":
+            # Sync metadata for the Drive Sync settings tab.
+            with _SYNC_LOCK:
+                state = dict(_sync_state)
+            # Library file mtime as a fallback "last refreshed" indicator —
+            # useful when the server has just started and lastRunAt is None.
+            try:
+                state["fileMtime"] = LIBRARY_JSON.stat().st_mtime if LIBRARY_JSON.is_file() else None
+            except Exception:
+                state["fileMtime"] = None
+            state["folder"] = str(MEDIA_DIR)
+            self._send_json(state)
+            return
+
+        if path == "/api/splashes":
+            # Sorted lists make the CMS UI deterministic.
+            brands = sorted(
+                [v for k, v in _splash_registry.items() if k.startswith("brand:")],
+                key=lambda m: m["name"],
+            )
+            concepts = sorted(
+                [v for k, v in _splash_registry.items() if k.startswith("concept:")],
+                key=lambda m: m["name"],
+            )
+            self._send_json({
+                "brands":   brands,
+                "concepts": concepts,
+                "cityBrand": dict(_city_brand),  # current city → brand mapping
+            })
+            return
+
+        self.send_error(404, "Unknown API endpoint")
+
+    def _serve_api_post(self) -> None:
+        path = self.path.split("?", 1)[0]
+        body = self._read_json()
+
+        # ── Push to one or more screens ──────────────────────────
+        # body: { deviceIds: [...], items: [...], mode: "replace"|"append" }
+        # If deviceIds is empty/missing, push to every registered screen.
+        if path == "/api/push":
+            items = body.get("items") or []
+            mode = body.get("mode") or "replace"
+            requested = body.get("deviceIds") or []
+            with _STATE_LOCK:
+                targets = [d for d in requested if d in _screens] or list(_screens.keys())
+                pushed = 0
+                for device_id in targets:
+                    s = _ensure_screen_state(device_id)
+                    if mode == "append":
+                        # Dedupe by id when appending so the same clip can't
+                        # show up twice in a row.
+                        existing_ids = {x.get("id") for x in s["items"]}
+                        for v in items:
+                            if v.get("id") not in existing_ids:
+                                s["items"].append(v)
+                    else:
+                        s["items"] = list(items)
+                    s["revision"] += 1
+                    s["pushedAt"] = time.time()
+                    pushed += 1
+                top_rev = max((s["revision"] for s in _per_screen.values()), default=0)
+            print(f"[push] mode={mode} items={len(items)} -> {pushed} screens", file=sys.stderr)
+            self._send_json({"ok": True, "screensTargeted": pushed, "revision": top_rev, "items": len(items)})
+            return
+
+        if path == "/api/screens/register":
+            device_id = body.get("deviceId") or "unknown"
+            name = body.get("name") or device_id
+            with _STATE_LOCK:
+                _screens[device_id] = {
+                    **_screens.get(device_id, {}),
+                    "deviceId":        device_id,
+                    "name":            name,
+                    "location":        body.get("location"),
+                    "registeredAt":    time.time(),
+                    "lastHeartbeat":   time.time(),
+                    "appVersion":      body.get("appVersion"),
+                    "deviceModel":     body.get("deviceModel"),
+                    "ramMb":           body.get("ramMb"),
+                    "screenWidth":     body.get("screenWidth"),
+                    "screenHeight":    body.get("screenHeight"),
+                    "orientation":     body.get("orientation"),
+                }
+                _ensure_screen_state(device_id)
+            print(f"[register] {device_id} ({name})", file=sys.stderr)
+            self._send_json({"ok": True, "screenId": device_id})
+            return
+
+        if path == "/api/screens/heartbeat":
+            # Rich heartbeat — tablet streams device info every tick so the
+            # CMS can render a true "Status" panel on screen detail.
+            device_id = body.get("deviceId") or "unknown"
+            with _STATE_LOCK:
+                s = _screens.get(device_id)
+                if not s:
+                    s = {
+                        "deviceId": device_id,
+                        "name": body.get("name") or device_id,
+                        "registeredAt": time.time(),
+                    }
+                    _screens[device_id] = s
+                # Merge anything the tablet sent. None values mean "no change".
+                for key in (
+                    "name", "location", "appVersion", "deviceModel",
+                    "ramMb", "screenWidth", "screenHeight", "orientation",
+                    "tier", "cachedVideoIds", "cacheBytes", "freeStorageBytes",
+                    "currentRevision", "status",
+                ):
+                    val = body.get(key)
+                    if val is not None:
+                        s[key] = val
+                s["lastHeartbeat"] = time.time()
+                state = _ensure_screen_state(device_id)
+            self._send_json({
+                "ok":          True,
+                "revision":    state["revision"],
+                "mixSplash":   state["mixSplash"],
+            })
+            return
+
+        # ── Manually trigger a library scan (Drive Sync → Sync now) ─
+        if path == "/api/library/refresh":
+            # Run on a background thread so the HTTP request doesn't hold up
+            # the response. The UI polls /api/library/info to see when it's done.
+            threading.Thread(target=run_library_scan, daemon=True).start()
+            self._send_json({"ok": True, "queued": True})
+            return
+
+        # ── Splash mapping update ────────────────────────────────
+        # POST /api/splashes/mapping  { city: "NYC", brand: "tmrw"|"smartech"|null }
+        if path == "/api/splashes/mapping":
+            city = (body.get("city") or "").strip()
+            brand = body.get("brand")
+            if not city:
+                self.send_error(400, "Missing city"); return
+            with _STATE_LOCK:
+                if brand is None or brand == "":
+                    _city_brand.pop(city, None)
+                else:
+                    _city_brand[city] = brand
+                # Bump revisions on every screen so they re-fetch and pick up
+                # the new splash without needing a poll-induced delay.
+                for s in _per_screen.values():
+                    s["revision"] += 1
+            self._send_json({"ok": True, "cityBrand": dict(_city_brand)})
+            return
+
+        # ── Per-screen controls ──────────────────────────────────
+        # POST /api/screens/<deviceId>/command   { command: "reboot"|"clearCache"|"unregister" }
+        # POST /api/screens/<deviceId>/playlist  { items: [...], mode: "replace"|"append" }
+        # POST /api/screens/<deviceId>/mix-splash { mixSplash: bool }
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash)$", path)
+        if m:
+            device_id = urllib.parse.unquote(m.group(1))
+            action = m.group(2)
+            with _STATE_LOCK:
+                if action == "command":
+                    cmd = body.get("command")
+                    if cmd not in ("reboot", "clearCache", "unregister"):
+                        self.send_error(400, "Unknown command"); return
+                    state = _ensure_screen_state(device_id)
+                    state["pendingCommands"].append({"command": cmd, "at": time.time()})
+                    print(f"[command] {device_id} -> {cmd}", file=sys.stderr)
+                    self._send_json({"ok": True, "queued": cmd})
+                    return
+                if action == "playlist":
+                    items = body.get("items") or []
+                    mode = body.get("mode") or "replace"
+                    state = _ensure_screen_state(device_id)
+                    if mode == "append":
+                        existing = {x.get("id") for x in state["items"]}
+                        for v in items:
+                            if v.get("id") not in existing:
+                                state["items"].append(v)
+                    else:
+                        state["items"] = list(items)
+                    state["revision"] += 1
+                    state["pushedAt"] = time.time()
+                    self._send_json({"ok": True, "revision": state["revision"]})
+                    return
+                if action == "mix-splash":
+                    state = _ensure_screen_state(device_id)
+                    state["mixSplash"] = bool(body.get("mixSplash", True))
+                    state["revision"] += 1                  # bump so player picks up flag change
+                    self._send_json({"ok": True, "mixSplash": state["mixSplash"]})
+                    return
+
+        self.send_error(404, "Unknown API endpoint")
+
+    def _serve_media(self, head_only: bool) -> None:
+        path = Path(self.translate_path(self.path))
+        if not path.is_file():
+            self.send_error(404, "Media file not found")
+            return
+
+        size = path.stat().st_size
+        ctype = self.guess_type(str(path))
+
+        range_header = self.headers.get("Range")
+        start, end = 0, size - 1
+        partial = False
+        if range_header:
+            m = RANGE_RE.match(range_header)
+            if m:
+                start = int(m.group(1))
+                if m.group(2):
+                    end = int(m.group(2))
+                end = min(end, size - 1)
+                if start > end:
+                    self.send_error(416, "Requested range not satisfiable")
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    return
+                partial = True
+
+        if partial:
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        else:
+            self.send_response(200)
+
+        length = end - start + 1
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+
+        if head_only:
+            return
+
+        try:
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                chunk = 64 * 1024
+                while remaining > 0:
+                    buf = f.read(min(chunk, remaining))
+                    if not buf:
+                        break
+                    try:
+                        self.wfile.write(buf)
+                    except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
+                        # Browser/tablet cancelled the range — normal during
+                        # seek, hover-then-leave, and tablet polling. Don't
+                        # spam the log with tracebacks.
+                        return
+                    remaining -= len(buf)
+        except FileNotFoundError:
+            # Race with file deletion. Already sent headers, nothing else to do.
+            pass
+
+    # Quieter than the default stdlib log line.
+    def log_message(self, fmt: str, *args) -> None:
+        sys.stderr.write(f"{self.address_string()} - {fmt % args}\n")
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            # Peer dropped mid-response (tablet poll, browser hover, etc.).
+            # Don't bubble — would otherwise dump a multi-line traceback into
+            # the demo console for every cancelled request.
+            self.close_connection = True
+
+
+class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def main() -> None:
+    if not APP_DIR.is_dir():
+        sys.exit(f"App folder missing: {APP_DIR}")
+    if not MEDIA_DIR.is_dir():
+        print(f"Warning: media folder not found at {MEDIA_DIR}", file=sys.stderr)
+
+    _build_splash_registry()
+    # Daily re-scan in a background thread. Doesn't run on boot — the
+    # existing library.json from the last run is used; Drive Sync UI lets
+    # the user trigger an on-demand scan if needed.
+    threading.Thread(target=daily_sync_loop, daemon=True).start()
+    httpd = ThreadedServer((BIND, PORT), Handler)
+    ip = lan_ip()
+    # Stick to ASCII in console output — Windows cp1252 chokes on arrows.
+    print(f"Screens CMS demo")
+    print(f"  CMS (this laptop):  http://localhost:{PORT}/#/dashboard")
+    print(f"  Tablet should use:  http://{ip}:{PORT}")
+    print(f"  app      = {APP_DIR}")
+    print(f"  media    = {MEDIA_DIR}")
+    print(f"  splash   = {SPLASH_DIR}  ({len(_splash_registry)} splashes loaded)")
+    print(f"  library  = {LIBRARY_JSON.name}  (re-scans every 24h, on-demand via Drive Sync)")
+    print("Ctrl+C to stop.\n")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down.")
+        httpd.shutdown()
+
+
+if __name__ == "__main__":
+    main()

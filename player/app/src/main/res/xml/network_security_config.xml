@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Demo build: cleartext allowed everywhere so the tablet can reach a laptop
+     running serve.py at http://192.168.x.x. For production, flip
+     cleartextTrafficPermitted to false and add explicit <domain> entries for
+     any backend endpoints. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

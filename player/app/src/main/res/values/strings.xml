@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Screens</string>
+
+    <!-- Staff flow -->
+    <string name="staff_pin_heading">Enter PIN to continue</string>
+    <string name="staff_pin_sub">Last 4 digits of your staff ID</string>
+    <string name="staff_brand_heading">Which brand?</string>
+    <string name="staff_brand_sub">Search or tap a brand</string>
+    <string name="staff_video_heading">Pick a video</string>
+    <string name="staff_video_sub">Tap any video and it starts on the screen</string>
+    <string name="staff_success_heading">Now playing</string>
+    <string name="staff_success_sub">Session ends in 15s</string>
+    <string name="staff_back">Back</string>
+    <string name="staff_cancel">Cancel</string>
+
+    <!-- Registration -->
+    <string name="registering">Registering screen…</string>
+    <string name="register_failed">Couldn’t register. Retrying.</string>
+    <string name="waiting_for_content">Waiting for content</string>
+    <string name="offline">Offline</string>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backups are off on this device: tablets register themselves to a
+     specific screen and don't roam. -->
+<full-backup-content>
+    <exclude domain="root" />
+</full-backup-content>
