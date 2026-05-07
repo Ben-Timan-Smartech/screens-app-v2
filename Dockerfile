@@ -1,56 +1,70 @@
 # ─────────────────────────────────────────────────────────────
 # Screens CMS backend container.
 #
-# What's running: serve.py — a stdlib-only Python HTTP server that
-# both serves the React/Babel CMS at / and exposes the /api/* endpoints
-# the player APK talks to. No third-party Python deps; no requirements.txt
-# needed.
+# What's running: serve.py — a stdlib HTTP server that serves the React/
+# Babel CMS at /, exposes /api/* for the player APK, and (in cloud mode)
+# pipes media through the Drive API.
 #
-# Cloud Run injects $PORT (defaults to 8080). serve.py reads it via
-# os.environ["PORT"] — see the PORT line in serve.py.
+# Two modes, picked at runtime by env:
 #
-# Things to be aware of when deploying to Cloud Run / similar:
+#   • LOCAL  — no Drive vars set. Reads media from SCREENS_MEDIA_DIR /
+#              SCREENS_SPLASH_DIR on the local filesystem (the
+#              Drive-for-Desktop mount on a dev laptop).
 #
-#   • State is in-memory only. Every container restart wipes the registered
-#     tablets, queued commands, and per-screen playlists. Run with
-#     --min-instances=1 --max-instances=1 to avoid the worst of this; for
-#     real persistence, swap _per_screen / _screens for a Cloud SQL or
-#     Firestore-backed store.
+#   • CLOUD  — GOOGLE_APPLICATION_CREDENTIALS + at least one of
+#              SCREENS_DRIVE_BRANDS_ID / SCREENS_DRIVE_SPLASHES_ID set.
+#              The container hits Drive directly via service account,
+#              streams brand videos through /media/<drive_id>, and
+#              caches splashes into /tmp at boot so /splash/<name>
+#              serves from local disk.
 #
-#   • Media isn't bundled. The Drive-mounted Brand Content/ folder doesn't
-#     exist inside the container, so the content library will be empty
-#     until SCREENS_MEDIA_DIR / SCREENS_SPLASH_DIR point at a Cloud Storage
-#     mount or similar. The CMS UI loads fine without it; pushes from CMS
-#     to tablets just won't have anything to push.
+# What you must set on Cloud Run for cloud mode:
+#   • Mount Secret `drive-credentials` at /secrets/drive-credentials.json
+#   • GOOGLE_APPLICATION_CREDENTIALS=/secrets/drive-credentials.json
+#   • SCREENS_DRIVE_BRANDS_ID=<Brand Content folder ID>
+#   • SCREENS_DRIVE_SPLASHES_ID=<splash root folder ID>
+#   • Deploy with --min-instances=1 --max-instances=1 (state is in-memory)
+#
+# In-memory state caveat (still): tablet registry, command queue, and
+# per-screen playlist live in Python dicts. Restart wipes them. Pin to
+# one instance until that's swapped for Firestore / Cloud SQL.
 # ─────────────────────────────────────────────────────────────
 
 FROM python:3.11-slim
 
-# Curl is handy for Cloud Run's startup probe and for debugging from the
-# container; tiny in the slim image. Skip if you're size-sensitive.
+# curl is convenient for Cloud Run startup probes and ad-hoc debugging.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy the parts the server actually needs at runtime. Player source,
-# build output, and IDE noise are excluded via .dockerignore.
+# Install Drive API client up front — these are the only third-party
+# Python deps. requirements.txt is intentionally tiny.
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy what serve.py + scan-videos.py actually need at runtime. Player
+# source, build output, and IDE noise are excluded via .dockerignore.
 COPY serve.py        /app/serve.py
 COPY scan-videos.py  /app/scan-videos.py
+COPY drive_client.py /app/drive_client.py
 COPY app/            /app/app/
 COPY brand/          /app/brand/
 
-# Cloud Run sets PORT to 8080 by default. Expose for documentation —
-# Cloud Run ignores EXPOSE but it helps when running locally.
+# Cloud Run sets PORT to 8080 by default. EXPOSE is documentation only —
+# Cloud Run ignores it, but it's useful when running the container
+# locally (`docker run -p 8080:8080 ...`).
 ENV PORT=8080
 EXPOSE 8080
 
-# The defaults inside MEDIA_DIR / SPLASH_DIR point at G:\… (Windows dev
-# paths). In the container we overwrite them with paths that don't exist
-# yet — serve.py prints a warning and keeps booting. Mount real paths in
-# at deploy time when you have somewhere to put the media.
+# Default media dirs to placeholder paths inside the container. These
+# only matter in LOCAL mode (filesystem reads). In CLOUD mode the
+# Drive-API code paths bypass them entirely. serve.py prints a warning
+# if MEDIA_DIR doesn't exist but boots regardless.
 ENV SCREENS_MEDIA_DIR=/app/media
 ENV SCREENS_SPLASH_DIR=/app/splash
 
+# `-u` flushes stdout immediately so Cloud Run's log stream picks up
+# every line without buffering.
 CMD ["python", "-u", "serve.py"]

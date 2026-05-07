@@ -1,0 +1,8 @@
+# Cloud-mode dependencies. Local dev mode has zero Python deps — these
+# are only needed when running against Drive (cloud deploy). The
+# DriveClient module imports them lazily so a local laptop without
+# them still runs fine; the imports only fire when SCREENS_DRIVE_*
+# env vars trigger cloud mode.
+
+google-api-python-client>=2.120
+google-auth>=2.30

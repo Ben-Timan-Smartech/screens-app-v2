@@ -1,12 +1,23 @@
 """
-Scan the Smartech shared drive for real video content and emit a JSX file
-that overrides MOCK_VIDEOS / MOCK_BRANDS / MOCK_SCREENS_STORE / MOCK_ACTIVITY
-with grounded data.
+Scan the brand content for real video data and emit a JSX file that
+overrides MOCK_VIDEOS / MOCK_BRANDS / MOCK_SCREENS_STORE / MOCK_ACTIVITY
+with grounded values.
 
-Run from the repo root:
-    python scan-videos.py
+Two modes, picked automatically by env:
 
-Output: app/components/real-data.jsx (loaded after data.jsx in index.html).
+  • LOCAL  — walks DRIVE_ROOT (a Windows G:\\ Drive-for-Desktop mount).
+             The default for dev. Probes MP4 atoms for width/height/
+             duration since reads are cheap on a local file.
+
+  • CLOUD  — uses the Drive API. Triggered by SCREENS_DRIVE_BRANDS_ID
+             being set. Skips the MP4 probe (Drive bytes are remote +
+             rate-limited; not worth pulling first 1MB of every video).
+             Sets durationSec/width/height to None — CMS shows '—'.
+
+Output is written next to this script, so it works the same on a Windows
+laptop and inside the Cloud Run container at /app:
+    <project>/app/components/real-data.jsx
+    <project>/app/components/library.json
 """
 
 from __future__ import annotations
@@ -18,10 +29,28 @@ import struct
 import urllib.parse
 from pathlib import Path
 
+# Drive helper — only imported on demand. Lets local dev run without
+# google-api-python-client installed.
+try:
+    import drive_client
+except ImportError:
+    drive_client = None  # type: ignore
+
 # ── Config ────────────────────────────────────────────────────────────
-DRIVE_ROOT = Path(r"G:\Shared drives\Smartech\Screens\Brand Content")
-OUT_FILE = Path(r"G:\Shared drives\Claude\Screens App\app\components\real-data.jsx")
-LIBRARY_JSON = Path(r"G:\Shared drives\Claude\Screens App\app\components\library.json")
+PROJECT = Path(__file__).resolve().parent
+
+# Local mode: filesystem path. Overridable to ease testing on non-Windows
+# dev machines and to match serve.py's SCREENS_MEDIA_DIR convention.
+DRIVE_ROOT = Path(os.environ.get(
+    "SCREENS_MEDIA_DIR",
+    r"G:\Shared drives\Smartech\Screens\Brand Content",
+))
+
+# Cloud mode: Drive folder ID. When set, replaces the filesystem walk.
+DRIVE_BRANDS_FOLDER_ID = os.environ.get("SCREENS_DRIVE_BRANDS_ID")
+
+OUT_FILE = PROJECT / "app" / "components" / "real-data.jsx"
+LIBRARY_JSON = PROJECT / "app" / "components" / "library.json"
 
 # Seed brand records — folders whose names + products we know up front. The
 # scanner walks every direct subfolder of `Brand Content/` and uses these as
@@ -379,12 +408,130 @@ def emit_jsx(videos: list[dict]) -> str:
     return body
 
 
+def discover_brands_drive(root_id: str) -> list[dict]:
+    """Drive-API equivalent of discover_brands().
+
+    Lists direct subfolders of root_id and treats each as a brand. The
+    `_drive_id` extra field is preserved so collect_videos_drive() can
+    list files inside without a second lookup.
+    """
+    if drive_client is None:
+        return []
+    seed_by_folder = {b["folder"]: b for b in SEED_BRANDS}
+    seed_by_lower  = {b["folder"].lower(): b for b in SEED_BRANDS}
+    used_ids: set[str] = set()
+    out: list[dict] = []
+    folders = drive_client.list_subfolders(root_id)
+    # Match the local mode's case-insensitive sort by name.
+    folders.sort(key=lambda f: f["name"].lower())
+    for folder in folders:
+        name = folder["name"]
+        if name.startswith(".") or name.startswith("_") or name.lower() == "old":
+            continue
+        seed = seed_by_folder.get(name)
+        if seed and seed["id"] not in used_ids:
+            out.append({**seed, "_drive_id": folder["id"]})
+            used_ids.add(seed["id"])
+            continue
+        if name.lower() in seed_by_lower and seed_by_lower[name.lower()]["id"] in used_ids:
+            continue
+        brand_id = _slugify(name)
+        if brand_id in used_ids:
+            continue
+        used_ids.add(brand_id)
+        out.append({
+            "folder":   name,
+            "name":     name,
+            "id":       brand_id,
+            "products": [],
+            "_drive_id": folder["id"],
+        })
+    return out
+
+
+def collect_videos_drive() -> list[dict]:
+    """Drive-API equivalent of collect_videos().
+
+    Each brand record carries `_drive_id` from discover_brands_drive().
+    For every MP4/MOV under that subtree we emit a library entry whose
+    mediaUrl points at the Drive file ID — serve.py routes
+    /media/<drive_file_id> through Drive's alt=media endpoint.
+
+    No MP4 atom probe in cloud mode: width/height/duration are left null
+    so we don't pay Drive egress for metadata. The CMS gracefully shows
+    '—' for those fields when null.
+    """
+    if drive_client is None:
+        return []
+    out: list[dict] = []
+    skipped_dirs = ("/old/", "/archive/", "/_old/", "/raw/")
+    total = len(BRANDS)
+    for idx, brand in enumerate(BRANDS, 1):
+        # PROGRESS: tag is parsed by serve.py to drive the Drive Sync card.
+        print(f"PROGRESS: {idx}/{total} {brand['name']}", flush=True)
+        folder_id = brand.get("_drive_id")
+        if not folder_id:
+            continue
+        try:
+            files = drive_client.list_videos_recursive(folder_id)
+        except Exception as e:
+            print(f"[skip] {brand['folder']} — Drive API error: {e}")
+            continue
+        # Stable order so re-runs produce the same library.json.
+        files.sort(key=lambda f: f.get("name", "").lower())
+
+        for file_idx, f in enumerate(files):
+            name = f.get("name", "")
+            stem = Path(name).stem
+            # Apply the same "_old", "raw" filename heuristic as filesystem
+            # mode — though we already excluded those folders, defensive.
+            joined_lower = name.lower()
+            if any(s.strip("/") in joined_lower for s in skipped_dirs):
+                continue
+
+            title = humanise(stem)
+            product = detect_product(stem, brand["products"])
+            try:
+                size_mb = round(int(f.get("size", "0") or 0) / (1024 * 1024), 1)
+            except ValueError:
+                size_mb = 0.0
+            video_id = f"{brand['id']}-{file_idx + 1}"
+            screens = (file_idx * 7 + 3) % 22
+            # mediaUrl points at the Drive file ID. serve.py's
+            # _serve_media detects that shape (no slash after /media/)
+            # and routes to the Drive streaming path.
+            media_url = "/media/" + urllib.parse.quote(f["id"])
+            out.append({
+                "id":          video_id,
+                "title":       title,
+                "brand":       brand["name"],
+                "product":     product,
+                "duration":    "—",
+                "durationSec": None,
+                "screens":     screens,
+                "sizeMb":      size_mb,
+                "filename":    name,
+                "mediaUrl":    media_url,
+                "width":       None,
+                "height":      None,
+            })
+    return out
+
+
 def main():
     # Replace the placeholder list with real folder discovery on every run.
     BRANDS.clear()
-    BRANDS.extend(discover_brands())
-    print(f"Discovered {len(BRANDS)} brand folders under {DRIVE_ROOT}")
-    videos = collect_videos()
+
+    cloud_mode = bool(DRIVE_BRANDS_FOLDER_ID and drive_client and drive_client.is_configured())
+    if cloud_mode:
+        print(f"Cloud mode: scanning Drive folder {DRIVE_BRANDS_FOLDER_ID}", flush=True)
+        BRANDS.extend(discover_brands_drive(DRIVE_BRANDS_FOLDER_ID))
+        print(f"Discovered {len(BRANDS)} brand folders via Drive API")
+        videos = collect_videos_drive()
+    else:
+        BRANDS.extend(discover_brands())
+        print(f"Discovered {len(BRANDS)} brand folders under {DRIVE_ROOT}")
+        videos = collect_videos()
     print(f"Collected {len(videos)} videos across {len({v['brand'] for v in videos})} brands")
     OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     OUT_FILE.write_text(emit_jsx(videos), encoding="utf-8")

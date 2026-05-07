@@ -79,8 +79,41 @@ See `player/README.md` for the full build / install / firebase notes.
 
 Either gesture pops the staff PIN screen.
 
+## Cloud deploy (Cloud Run + Drive API)
+
+The CMS backend can run two ways:
+
+- **Local**: `python serve.py` reads media from a Google Drive for Desktop mount on `G:\`. Tablets connect over LAN.
+- **Cloud**: Cloud Run container, talks to Google Drive over the Drive API via a service account. No Drive mount needed; tablets connect over the public Cloud Run URL.
+
+### One-time GCP setup for cloud mode
+
+1. **Service account**: GCP Console → IAM & Admin → Service Accounts → Create. Name it something like `screens-cms-drive`. No GCP roles needed.
+2. **Generate JSON key**: open the service account → Keys → Add Key → JSON. Download the file.
+3. **Share the Drive folders** with the service account email (looks like `screens-cms-drive@<project>.iam.gserviceaccount.com`):
+   - The `Brand Content` folder — Viewer access.
+   - The folder containing all the `Splash - <Brand>` subfolders — Viewer access.
+4. **Find the folder IDs**: open each folder in Drive in a browser. The URL ends with `…/folders/<long_id>`. Copy each.
+5. **Store the JSON key as a Secret**: GCP Console → Secret Manager → Create Secret named `drive-credentials`, paste the JSON contents.
+6. **Deploy** to Cloud Run (via `gcloud run deploy` or the Console):
+   - Mount the secret at `/secrets/drive-credentials.json`
+   - Set env vars:
+     - `GOOGLE_APPLICATION_CREDENTIALS=/secrets/drive-credentials.json`
+     - `SCREENS_DRIVE_BRANDS_ID=<Brand Content folder ID>`
+     - `SCREENS_DRIVE_SPLASHES_ID=<splash root folder ID>`
+   - Min instances **1**, Max instances **1** (state is in-memory; pinning to one instance prevents auto-scaling from fragmenting the registry).
+
+### How the modes differ
+
+| | Local | Cloud |
+|---|---|---|
+| Brand videos | Streamed from `G:\…\Brand Content` | Streamed from Drive on demand via `/media/<drive_file_id>`. Player APK caches client-side, so it's a one-time hit per video per device. |
+| Splashes | Read from `G:\…\Screens` | Downloaded from Drive into `/tmp` at server boot, then served from local disk. |
+| `library.json` | Built by `python scan-videos.py` walking the filesystem | Same `scan-videos.py`, auto-detects cloud mode via `SCREENS_DRIVE_BRANDS_ID` and uses Drive API instead. Triggered on demand from the CMS Drive Sync card. |
+
 ## Things that aren't shipped
 
 - Tests — this is still scaffold-stage code
 - A real `google-services.json` (only the `.example` is in the tree)
 - A signing config for release builds — drop a `keystore.properties` in `player/app/` before shipping
+- Persistent state — registry / command queue / per-screen playlist all in-memory; restart wipes them. SQLite swap-in is the next obvious step.

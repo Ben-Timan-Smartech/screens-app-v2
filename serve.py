@@ -20,6 +20,7 @@ import http.server
 import json
 import os
 import re
+import shutil
 import socket
 import socketserver
 import sys
@@ -27,6 +28,15 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
+
+# Drive integration is import-guarded — local dev without google libs
+# installed still runs. drive_client.is_configured() returns false when
+# the env doesn't ask for cloud mode, in which case nothing in this
+# module's code paths actually calls Drive.
+try:
+    import drive_client
+except ImportError:
+    drive_client = None  # type: ignore
 
 PROJECT = Path(__file__).resolve().parent
 APP_DIR = PROJECT / "app"
@@ -282,6 +292,98 @@ def _build_splash_registry() -> None:
     _splash_registry.update(out)
     _city_brand.clear()
     _city_brand.update(DEFAULT_CITY_BRAND)
+
+
+def _hydrate_splashes_from_drive() -> Path | None:
+    """If we're in Drive cloud mode, download splash files into a local
+    cache once at boot. Returns the cache directory, which the caller
+    points SPLASH_DIR at so the existing filesystem-based registry-build
+    logic walks the cache as if it were the local Drive mount.
+
+    Why bake them in via cache rather than streaming on demand:
+      • Splashes are small (1–80 MB total across all brands/concepts).
+      • They're hit on every screen, every loop — streaming through
+        Drive on every request would be wasteful and rate-limited.
+      • Once cached they "live in the system" — `/splash/<file>` is
+        served from local disk with full Range support, identical to
+        baked-into-image performance.
+
+    Cache layout mirrors the upstream Drive structure:
+        <cache_dir>/Splash - tmrw/tmrw_logoanimation.mp4
+        <cache_dir>/Splash - Smartech/Smartech_vid4web.mp4
+        ...
+
+    Errors here don't crash the server — splashes will just be missing
+    until the next restart.
+    """
+    if drive_client is None or not drive_client.is_configured():
+        return None
+    splash_root_id = os.environ.get("SCREENS_DRIVE_SPLASHES_ID")
+    if not splash_root_id:
+        return None
+
+    # /tmp on Cloud Run is a tmpfs (in-memory). For a few dozen MB of
+    # splash MP4s that's fine and survives the lifetime of the instance.
+    cache_dir = Path("/tmp/screens-splash-cache")
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"[splash] couldn't create cache dir: {e}", file=sys.stderr)
+        return None
+
+    # Names of the splash subfolders we care about, from SPLASH_FOLDERS.
+    wanted = {f[2] for f in SPLASH_FOLDERS}
+
+    try:
+        subfolders = drive_client.list_subfolders(splash_root_id)
+    except Exception as e:
+        print(f"[splash] Drive listSubfolders failed: {e}", file=sys.stderr)
+        return None
+
+    cached_count = 0
+    for folder in subfolders:
+        if folder["name"] not in wanted:
+            continue
+        local_subdir = cache_dir / folder["name"]
+        local_subdir.mkdir(exist_ok=True)
+        try:
+            files = drive_client.list_files_in(folder["id"])
+        except Exception as e:
+            print(f"[splash] list {folder['name']} failed: {e}", file=sys.stderr)
+            continue
+        for f in files:
+            if f.get("mimeType") == "application/vnd.google-apps.folder":
+                continue
+            name = f.get("name", "")
+            if not (name.lower().endswith(".mp4") or name.lower().endswith(".mov")):
+                continue
+            local_path = local_subdir / name
+            # Skip if already cached this run (idempotent restart).
+            expected_size = int(f.get("size", "0") or 0)
+            if local_path.is_file() and (
+                expected_size == 0 or local_path.stat().st_size == expected_size
+            ):
+                cached_count += 1
+                continue
+            # Download. Buffered through drive_client.stream_file —
+            # acceptable for splash-sized files; brand content goes
+            # through a different streaming path.
+            try:
+                with open(local_path, "wb") as out:
+                    for status, _, _, chunk in drive_client.stream_file(f["id"]):
+                        if status >= 400:
+                            raise RuntimeError(f"HTTP {status}")
+                        out.write(chunk)
+                cached_count += 1
+                print(f"[splash] cached {folder['name']}/{name}", flush=True)
+            except Exception as e:
+                print(f"[splash] download {name} failed: {e}", file=sys.stderr)
+                # Leave a partial file alone — next boot will retry.
+
+    if cached_count == 0:
+        print("[splash] no splashes cached from Drive", file=sys.stderr)
+        return None
+    return cache_dir
 
 
 def resolve_splash_for(city: str | None, concept: str | None) -> dict | None:
@@ -667,6 +769,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_error(404, "Unknown API endpoint")
 
     def _serve_media(self, head_only: bool) -> None:
+        # Cloud mode: /media/<drive_file_id> means stream from Drive API.
+        # Local mode: /media/<brand>/<file.mp4> is a filesystem path.
+        # Detection: a Drive file ID has no slashes after /media/ and
+        # matches the alphanumeric/underscore/hyphen alphabet — see
+        # drive_client.looks_like_drive_id.
+        if self.path.startswith("/media/"):
+            seg = self.path[len("/media/"):].split("?", 1)[0].split("#", 1)[0].rstrip("/")
+            if (
+                drive_client is not None
+                and drive_client.is_configured()
+                and "/" not in seg
+                and drive_client.looks_like_drive_id(seg)
+            ):
+                self._serve_media_from_drive(seg, head_only)
+                return
+
         path = Path(self.translate_path(self.path))
         if not path.is_file():
             self.send_error(404, "Media file not found")
@@ -728,6 +846,76 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # Race with file deletion. Already sent headers, nothing else to do.
             pass
 
+    def _serve_media_from_drive(self, file_id: str, head_only: bool) -> None:
+        """Stream a Drive file out via /media/<file_id>.
+
+        Forwards the client's Range header to Drive's alt=media endpoint
+        and pipes the response back to the HTTP socket. The drive_client
+        download is buffered server-side (acceptable for typical brand
+        videos under ~100MB; the player APK caches client-side on first
+        download anyway, so it's a one-time hit per video per device).
+        """
+        if drive_client is None:
+            self.send_error(500, "Drive client unavailable")
+            return
+        try:
+            meta = drive_client.get_metadata(file_id)
+        except Exception as e:
+            self.send_error(404, f"Drive file not found: {e}")
+            return
+
+        size = int(meta.get("size") or 0)
+        ctype = meta.get("mimeType") or "video/mp4"
+        range_header = self.headers.get("Range")
+
+        # HEAD doesn't transfer bytes — just respond with metadata.
+        if head_only:
+            if range_header and size:
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes 0-{size - 1}/{size}")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Accept-Ranges", "bytes")
+            if size:
+                self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            return
+
+        # GET: stream the body. Headers go out on the first chunk so we
+        # can echo the actual status (206 vs 200) Drive returned.
+        headers_sent = False
+        try:
+            for status, start, end, chunk in drive_client.stream_file(
+                file_id, range_header=range_header
+            ):
+                if not headers_sent:
+                    if status == 206:
+                        self.send_response(206)
+                        self.send_header("Content-Range", f"bytes {start}-{end}/{size or (end + 1)}")
+                        self.send_header("Content-Length", str(end - start + 1))
+                    else:
+                        self.send_response(200)
+                        if size:
+                            self.send_header("Content-Length", str(size))
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.send_header("Cache-Control", "public, max-age=3600")
+                    self.end_headers()
+                    headers_sent = True
+                try:
+                    self.wfile.write(chunk)
+                except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
+                    # Client cancelled (seek, navigation, polling reset).
+                    return
+        except Exception as e:
+            if not headers_sent:
+                self.send_error(500, f"Drive stream failed: {e}")
+            else:
+                # Already started writing body — can't change status. Just drop.
+                return
+
     # Quieter than the default stdlib log line.
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write(f"{self.address_string()} - {fmt % args}\n")
@@ -748,10 +936,21 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def main() -> None:
+    global SPLASH_DIR
+
     if not APP_DIR.is_dir():
         sys.exit(f"App folder missing: {APP_DIR}")
     if not MEDIA_DIR.is_dir():
         print(f"Warning: media folder not found at {MEDIA_DIR}", file=sys.stderr)
+
+    # Cloud mode: pull the splash MP4s from Drive into a local cache so
+    # /splash/<file> serves from disk with proper Range support. Repoint
+    # SPLASH_DIR at the cache so _build_splash_registry walks it.
+    if drive_client and drive_client.is_configured():
+        cache = _hydrate_splashes_from_drive()
+        if cache:
+            SPLASH_DIR = cache
+            print(f"[splash] hydrated from Drive into {cache}")
 
     _build_splash_registry()
     # Daily re-scan in a background thread. Doesn't run on boot — the
