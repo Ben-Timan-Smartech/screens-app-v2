@@ -31,11 +31,25 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parent
 APP_DIR = PROJECT / "app"
 BRAND_DIR = PROJECT / "brand"           # logos, favicons, wordmark
-MEDIA_DIR = Path(r"G:\Shared drives\Smartech\Screens\Brand Content")
-SPLASH_DIR = Path(r"G:\Shared drives\Smartech\Screens")  # parent of "Splash - X" folders
+
+# MEDIA_DIR / SPLASH_DIR are overridable via environment so the same code
+# runs on a dev laptop (default Windows G:\ path) and inside a container
+# where the Drive mount doesn't exist (e.g. Cloud Run). The defaults work
+# locally; override SCREENS_MEDIA_DIR and SCREENS_SPLASH_DIR in deploy
+# environments. If the path doesn't exist at startup, the server still
+# boots — splash registry will just be empty until media is mounted.
+MEDIA_DIR = Path(os.environ.get(
+    "SCREENS_MEDIA_DIR",
+    r"G:\Shared drives\Smartech\Screens\Brand Content",
+))
+SPLASH_DIR = Path(os.environ.get(
+    "SCREENS_SPLASH_DIR",
+    r"G:\Shared drives\Smartech\Screens",
+))
 LIBRARY_JSON = APP_DIR / "components" / "library.json"
 
-PORT = 8765
+# Cloud Run injects $PORT (defaults to 8080); on a laptop we keep 8765.
+PORT = int(os.environ.get("PORT", "8765"))
 BIND = "0.0.0.0"   # Listen on all interfaces so the tablet can reach us on LAN.
 
 RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
