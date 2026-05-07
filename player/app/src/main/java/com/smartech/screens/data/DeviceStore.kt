@@ -158,12 +158,49 @@ class DeviceStore(private val context: Context) {
     suspend fun setLocScreenCode(value: String?) { editStr(Keys.LocScreenCode, value) }
 
     suspend fun setLiveServerUrl(value: String?) {
-        // Normalise — strip trailing slashes and prepend http:// if missing.
+        // Normalise — strip trailing slashes, prepend a scheme if missing,
+        // and upgrade http:// to https:// for any host that isn't a private
+        // LAN address. The reason: hosts behind Cloud Run / Cloudflare / any
+        // managed TLS terminator force-redirect HTTP to HTTPS with a 301.
+        // OkHttp follows the redirect but downgrades POST to GET — so the
+        // tablet's heartbeat / register / playlist POSTs silently arrive as
+        // GETs, fail with 404, and the screen never appears in the CMS.
+        // We can't disable the platform redirect; safer to ensure we never
+        // ship http:// to a public-looking host in the first place. LAN
+        // addresses (private IPs, localhost) still allow http for dev rigs.
         val cleaned = value?.trim()?.takeIf { it.isNotBlank() }?.let {
             val withScheme = if (it.startsWith("http://") || it.startsWith("https://")) it else "http://$it"
-            withScheme.trimEnd('/')
+            val trimmed = withScheme.trimEnd('/')
+            if (trimmed.startsWith("http://") && !looksLikeLanHost(trimmed)) {
+                "https://" + trimmed.removePrefix("http://")
+            } else {
+                trimmed
+            }
         }
         editStr(Keys.LiveServerUrl, cleaned)
+    }
+
+    /**
+     * Heuristic for "is this URL pointed at a LAN device where http is
+     * fine?" — covers the common dev cases (private IPv4 ranges, loopback,
+     * `.local` mDNS) and intentionally errs on the side of upgrading to
+     * https. False positives mean a dev's LAN URL gets upgraded and fails;
+     * false negatives mean a public URL stays on http and gets redirect-
+     * downgraded. We optimise for the latter not happening.
+     */
+    private fun looksLikeLanHost(url: String): Boolean {
+        val host = url.removePrefix("http://").substringBefore('/').substringBefore(':')
+        if (host == "localhost" || host == "127.0.0.1" || host.endsWith(".local")) return true
+        val parts = host.split('.')
+        if (parts.size != 4 || parts.any { it.toIntOrNull() == null }) return false
+        val (a, b, _, _) = parts.map { it.toInt() }.let { listOf(it[0], it[1], it[2], it[3]) }
+        return when {
+            a == 10 -> true                                    // 10.0.0.0/8
+            a == 192 && b == 168 -> true                       // 192.168.0.0/16
+            a == 172 && b in 16..31 -> true                    // 172.16.0.0/12
+            a == 169 && b == 254 -> true                       // link-local
+            else -> false
+        }
     }
 
     private suspend fun editStr(
