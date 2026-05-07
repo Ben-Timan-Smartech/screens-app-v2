@@ -53,16 +53,17 @@ private class TvFocusIndicationInstance(
         // an overlay border, not a replacement.
         drawContent()
         val strokeWidth = when {
-            focused.value -> 4.dp.toPx()
-            pressed.value || hovered.value -> 2.dp.toPx()
+            focused.value -> 6.dp.toPx()
+            pressed.value || hovered.value -> 3.dp.toPx()
             else -> 0f
         }
         if (strokeWidth > 0f) {
-            // Bone (#F7F6F2) — same colour the brand uses for primary
-            // marks on dark backgrounds. Stands out on Ink and on most
-            // splash thumbnails.
+            // Amber (#E8A33D) — the brand accent colour. High contrast on
+            // both the Ink left-rail (dark slab) and the Bone main area
+            // (off-white form fields). Bone-on-Bone (the previous default)
+            // was invisible on the form pane, which made focus untrackable.
             drawRect(
-                color = Color(0xFFF7F6F2),
+                color = Color(0xFFE8A33D),
                 style = Stroke(width = strokeWidth),
             )
         }

@@ -76,6 +76,47 @@ _per_screen: dict[str, dict] = {}   # deviceId -> {revision, items, pushedAt, mi
 _screens: dict[str, dict] = {}      # deviceId -> registry (last heartbeat, device info, etc.)
 
 
+# ── Activity log ─────────────────────────────────────────────────────
+# In-memory ring buffer of API events for the CMS Activity page and the
+# Dashboard's recent-activity panel. Keeps the last N entries; oldest fall
+# off the back when the deque hits its cap. State is non-persistent — a
+# server restart clears the log. Acceptable for a demo; replace with a
+# proper store when persistence lands.
+import collections  # local-scope to keep the imports section above untouched
+
+_ACTIVITY_LOG: collections.deque = collections.deque(maxlen=200)
+
+
+def _log_activity(
+    kind: str,
+    text: str,
+    *,
+    who: str | None = None,
+    icon: str | None = None,
+    tone: str | None = None,
+    target: str | None = None,
+) -> None:
+    """Append a single event to the in-memory activity log.
+
+    `kind` is the canonical event type the frontend keys icon/tone off
+    (push, register, command, sync, splash, settings, etc.). `text` is
+    the human-readable line shown in the UI. `who` defaults to "system"
+    for events not associated with a CMS user — registration, heartbeat
+    timeouts, scheduled syncs.
+    """
+    entry = {
+        "id":     f"act-{int(time.time() * 1000)}-{len(_ACTIVITY_LOG)}",
+        "kind":   kind,
+        "text":   text,
+        "who":    who or "system",
+        "icon":   icon or kind,
+        "tone":   tone,
+        "target": target,
+        "at":     time.time(),
+    }
+    _ACTIVITY_LOG.append(entry)
+
+
 def _ensure_screen_state(device_id: str) -> dict:
     """Lazily create a per-screen state record. Caller must hold _STATE_LOCK."""
     s = _per_screen.get(device_id)
@@ -229,8 +270,20 @@ def run_library_scan() -> dict:
             _sync_state["progressLabel"] = None
         if ok:
             print(f"[sync] scan-videos.py OK - {count} videos", file=sys.stderr)
+            _log_activity(
+                kind="sync",
+                text=f"Drive sync complete · {count} video{'' if count == 1 else 's'}",
+                icon="sync",
+                tone="ok",
+            )
         else:
             print(f"[sync] scan-videos.py FAILED - exit {proc.returncode}", file=sys.stderr)
+            _log_activity(
+                kind="sync",
+                text=f"Drive sync failed (exit {proc.returncode})",
+                icon="warning",
+                tone="err",
+            )
         return {"ok": ok, "count": count, "error": err}
     except Exception as e:
         with _SYNC_LOCK:
@@ -241,6 +294,12 @@ def run_library_scan() -> dict:
             _sync_state["progressCurrent"] = None
             _sync_state["progressTotal"] = None
             _sync_state["progressLabel"] = None
+        _log_activity(
+            kind="sync",
+            text=f"Drive sync errored: {e}",
+            icon="warning",
+            tone="err",
+        )
         return {"ok": False, "error": str(e)}
 
 
@@ -609,6 +668,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             })
             return
 
+        if path == "/api/activity":
+            # Newest first so the CMS doesn't have to reverse client-side.
+            with _STATE_LOCK:
+                items = list(_ACTIVITY_LOG)
+            items.reverse()
+            self._send_json({"items": items})
+            return
+
         self.send_error(404, "Unknown API endpoint")
 
     def _serve_api_post(self) -> None:
@@ -641,6 +708,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     pushed += 1
                 top_rev = max((s["revision"] for s in _per_screen.values()), default=0)
             print(f"[push] mode={mode} items={len(items)} -> {pushed} screens", file=sys.stderr)
+            verb = "Replaced playlist on" if mode == "replace" else "Added to"
+            _log_activity(
+                kind="push",
+                text=f"{verb} {pushed} screen{'' if pushed == 1 else 's'} · {len(items)} video{'' if len(items) == 1 else 's'}",
+                icon="upload",
+            )
             self._send_json({"ok": True, "screensTargeted": pushed, "revision": top_rev, "items": len(items)})
             return
 
@@ -662,8 +735,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "screenHeight":    body.get("screenHeight"),
                     "orientation":     body.get("orientation"),
                 }
+                is_new = "registeredAt" not in (_screens.get(device_id, {}))
                 _ensure_screen_state(device_id)
             print(f"[register] {device_id} ({name})", file=sys.stderr)
+            _log_activity(
+                kind="register",
+                text=f"{name} {'registered' if is_new else 're-registered'}",
+                icon="check",
+                tone="ok",
+                target=device_id,
+            )
             self._send_json({"ok": True, "screenId": device_id})
             return
 
@@ -704,6 +785,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # Run on a background thread so the HTTP request doesn't hold up
             # the response. The UI polls /api/library/info to see when it's done.
             threading.Thread(target=run_library_scan, daemon=True).start()
+            _log_activity(
+                kind="sync",
+                text="Drive sync started",
+                icon="sync",
+            )
             self._send_json({"ok": True, "queued": True})
             return
 
@@ -742,6 +828,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state = _ensure_screen_state(device_id)
                     state["pendingCommands"].append({"command": cmd, "at": time.time()})
                     print(f"[command] {device_id} -> {cmd}", file=sys.stderr)
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    label = {
+                        "reboot":     "Rebooted",
+                        "clearCache": "Cleared cache on",
+                        "unregister": "Unregistered",
+                    }[cmd]
+                    _log_activity(
+                        kind="command",
+                        text=f"{label} {screen_name}",
+                        icon="schedule" if cmd == "reboot" else "trash" if cmd == "clearCache" else "close",
+                        tone="err" if cmd == "unregister" else None,
+                        target=device_id,
+                    )
                     self._send_json({"ok": True, "queued": cmd})
                     return
                 if action == "playlist":
@@ -757,6 +856,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         state["items"] = list(items)
                     state["revision"] += 1
                     state["pushedAt"] = time.time()
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    verb = "Replaced playlist on" if mode == "replace" else "Added to"
+                    _log_activity(
+                        kind="push",
+                        text=f"{verb} {screen_name} · {len(items)} video{'' if len(items) == 1 else 's'}",
+                        icon="upload",
+                        target=device_id,
+                    )
                     self._send_json({"ok": True, "revision": state["revision"]})
                     return
                 if action == "mix-splash":

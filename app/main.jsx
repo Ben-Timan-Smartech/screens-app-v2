@@ -7,11 +7,19 @@ const { useState, useEffect } = React;
 // Activity log — simple long-form view of all activity
 // ─────────────────────────────────────────────────────────────
 const ActivityLog = () => {
-  const items = [...MOCK_ACTIVITY, ...MOCK_ACTIVITY.map((a, i) => ({ ...a, id: a.id + '_b' + i, time: 'Earlier' }))];
+  // Live events from /api/activity — server's in-memory ring buffer.
+  // Empty on a freshly-booted server with no events yet; we show an
+  // explicit empty state below rather than falling back to fake data.
+  const items = useActivity();
   return (
     <AppShell current="activity">
       <PageHeader title="Activity log" subtitle="Every change, every screen event. Newest first." actions={<Button variant="secondary" size="sm" icon={<Icon.filter size={12} />}>Filter</Button>} />
       <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 40px' }}>
+        {items.length === 0 ? (
+          <div style={{ border: 'var(--border)', borderRadius: 12, background: 'var(--ink-10)', padding: 32, textAlign: 'center', color: 'var(--ink-4)', fontSize: 13 }}>
+            No activity yet. Push some content, register a screen, or trigger a sync to see events here.
+          </div>
+        ) : (
         <div style={{ border: 'var(--border)', borderRadius: 12, background: 'var(--ink-10)' }}>
           {items.map((item) => {
             const iconMap = { upload: Icon.upload, schedule: Icon.schedule, offline: Icon.offline, check: Icon.check, sync: Icon.sync };
@@ -31,6 +39,7 @@ const ActivityLog = () => {
             );
           })}
         </div>
+        )}
       </div>
     </AppShell>
   );
@@ -104,6 +113,13 @@ const NotFound = () => (
 const Router = () => {
   const route = useRoute();
   const [section, ...rest] = route.parts;
+  // Subscribe globally to /api/library so MOCK_VIDEOS / MOCK_BRANDS stay
+  // in sync with the server's view (which scan-videos.py rewrites after
+  // a Drive sync). Called once at the router level so re-mounts of the
+  // page-level components keep seeing the latest snapshot. The version
+  // counter that comes back is unused here — its job is to force a
+  // re-render when the underlying globals change.
+  useLibrary();
 
   switch (section) {
     case undefined:

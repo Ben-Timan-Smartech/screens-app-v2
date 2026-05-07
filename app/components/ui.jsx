@@ -165,6 +165,97 @@ const useLiveScreens = () => {
   return data;
 };
 
+// useActivity — polls /api/activity every 5s. Server keeps an in-memory
+// ring buffer (last 200 events) populated by registration / push /
+// command / sync handlers; this hook reads them, decorates with a
+// human-readable relative `time`, and exposes to the activity log + the
+// dashboard's recent-activity panel. Empty array on first call means
+// the server is up but hasn't recorded anything yet.
+// ─────────────────────────────────────────────────────────────
+const formatAt = (atSeconds) => {
+  if (!atSeconds) return '';
+  const diff = Math.max(0, Date.now() / 1000 - atSeconds);
+  if (diff < 5) return 'just now';
+  if (diff < 60) return `${Math.round(diff)}s ago`;
+  if (diff < 3600) return `${Math.round(diff / 60)} min ago`;
+  if (diff < 86400) return `${Math.round(diff / 3600)} hr ago`;
+  return `${Math.round(diff / 86400)} d ago`;
+};
+const useActivity = () => {
+  const [items, setItems] = React.useState([]);
+  React.useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch('/api/activity', { cache: 'no-store' });
+        const body = await res.json();
+        if (!cancelled) {
+          // Decorate with a relative time string using the server's `at`
+          // (unix seconds). Re-rendered every poll so 'just now' decays
+          // to '5s ago' to '1 min ago' without manual refresh.
+          setItems((body.items || []).map((it) => ({ ...it, time: formatAt(it.at) })));
+        }
+      } catch (_) {
+        if (!cancelled) setItems((cur) => cur);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  return items;
+};
+
+// useLibrary — keeps the in-memory MOCK_VIDEOS / MOCK_BRANDS globals
+// in sync with /api/library. The CMS originally loaded library.json
+// once at page boot via a <script> tag (real-data.jsx), so a Drive
+// sync that wrote a new library.json wouldn't reflect until the user
+// reloaded the tab. This hook polls /api/library every 10s and, when
+// the response shape changes, mutates the existing arrays in place
+// AND increments a version counter that subscribers can return as
+// state to trigger re-renders.
+//
+// Call this once near the top of the app (the Router) so the
+// mutations are global, then any component that reads MOCK_VIDEOS
+// will pick up new data on its next render.
+// ─────────────────────────────────────────────────────────────
+const useLibrary = () => {
+  const [version, setVersion] = React.useState(0);
+  const lastSigRef = React.useRef('');
+  React.useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch('/api/library', { cache: 'no-store' });
+        const body = await res.json();
+        const videos = Array.isArray(body.videos) ? body.videos : [];
+        const brands = Array.isArray(body.brands) ? body.brands : [];
+        // Lightweight signature — count + first/last id. Catches grow,
+        // shrink, and reorder without diffing the whole array.
+        const sig = `${videos.length}:${brands.length}:${videos[0]?.id || ''}:${videos[videos.length - 1]?.id || ''}`;
+        if (sig !== lastSigRef.current && !cancelled) {
+          lastSigRef.current = sig;
+          if (videos.length > 0 && Array.isArray(window.MOCK_VIDEOS)) {
+            window.MOCK_VIDEOS.length = 0;
+            window.MOCK_VIDEOS.push(...videos);
+          }
+          if (brands.length > 0 && Array.isArray(window.MOCK_BRANDS)) {
+            window.MOCK_BRANDS.length = 0;
+            window.MOCK_BRANDS.push(...brands);
+          }
+          setVersion((v) => v + 1);
+        }
+      } catch (_) {
+        /* keep last */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 10000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  return version;
+};
+
 // useFleet — derived screen rows from /api/screens. The CMS no longer
 // keeps offline placeholders; everything in the screen list is a real
 // registered tablet (online or recently disconnected).
@@ -897,6 +988,6 @@ Object.assign(window, {
   Icon, StatusDot, Chip, Button, Input, BrandMark, Thumbnail,
   Sidebar, SidebarItem, PageHeader, AppShell, Card, StatCard,
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
-  showToast, ToastHost, useLiveScreens, useFleet, pushToScreens, sendScreenCommand, setMixSplash,
+  showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
   setScreenPlaylist, PushPicker,
 });

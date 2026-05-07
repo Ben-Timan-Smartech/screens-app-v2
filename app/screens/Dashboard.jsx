@@ -101,6 +101,9 @@ const useFleetRollup = () => {
 const Dashboard = () => {
   const { stores, total, online, warn, offline, live } = useFleetRollup();
   const liveScreen = live.screens.find((s) => s.online);
+  // Live activity from /api/activity. Empty list when nothing's happened
+  // since boot — we render an empty-state row instead of fake data.
+  const activity = useActivity();
 
   return (
     <AppShell current="dashboard">
@@ -185,7 +188,13 @@ const Dashboard = () => {
               <Button variant="ghost" size="sm" iconRight={<Icon.chevR size={12} />}>Log</Button>
             </div>
             <div>
-              {MOCK_ACTIVITY.slice(0, 8).map((a) => <ActivityRow key={a.id} item={a} />)}
+              {activity.length === 0 ? (
+                <div style={{ padding: '20px', textAlign: 'center', fontSize: 12, color: 'var(--ink-4)' }}>
+                  No activity yet · push content or register a screen to populate this
+                </div>
+              ) : (
+                activity.slice(0, 8).map((a) => <ActivityRow key={a.id} item={a} />)
+              )}
             </div>
           </div>
         </div>
