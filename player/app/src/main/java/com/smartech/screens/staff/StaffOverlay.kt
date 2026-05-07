@@ -1,10 +1,12 @@
 package com.smartech.screens.staff
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -133,6 +135,11 @@ fun StaffOverlay(
         }
     }
 
+    // Replace the default ripple Indication with the TV-friendly border
+    // for everything inside the staff overlay. Every `Modifier.clickable`
+    // in the staff tree picks this up automatically — no per-element
+    // wiring needed.
+    CompositionLocalProvider(LocalIndication provides TvFocusIndication) {
     Box(
         Modifier
             .fillMaxSize()
@@ -232,4 +239,5 @@ fun StaffOverlay(
             )
         }
     }
+    } // close CompositionLocalProvider for TvFocusIndication
 }
