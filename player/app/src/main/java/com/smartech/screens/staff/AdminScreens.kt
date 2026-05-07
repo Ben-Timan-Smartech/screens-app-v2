@@ -286,8 +286,12 @@ fun DeviceAdminScreen(
                 CardSection("Live demo server") {
                     LpEditableRow(
                         label = "Server URL",
-                        value = liveServerUrl.orEmpty(),
-                        placeholder = "http://192.168.1.42:8765",
+                        // Default to the build's API_BASE (Cloud Run by default,
+                        // overridable at build time via -PapiBase=…) so admins
+                        // see the canonical URL without retyping. Strip the
+                        // /api convention suffix — this field expects bare URL.
+                        value = liveServerUrl ?: BuildConfig.API_BASE.removeSuffix("/api"),
+                        placeholder = "https://screens-app-v2-962486680568.europe-west1.run.app",
                         onSave = { v ->
                             scope.launch {
                                 store.setLiveServerUrl(v.takeIf { it.isNotBlank() })

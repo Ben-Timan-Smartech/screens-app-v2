@@ -159,8 +159,14 @@ fun OnboardingScreen(
                 ) {
                     LpEditableRow(
                         label = "Server URL",
-                        value = serverUrl.orEmpty(),
-                        placeholder = "http://192.168.1.42:8765",
+                        // Prefill from BuildConfig (which the build pins to the
+                        // hosted demo deploy by default) so a fresh-install
+                        // tablet talks to the cloud without the user having
+                        // to type anything. The /api suffix from API_BASE is
+                        // stripped because this field is the bare URL — the
+                        // player appends /api/... to paths itself.
+                        value = serverUrl ?: BuildConfig.API_BASE.removeSuffix("/api"),
+                        placeholder = "https://screens-app-v2-962486680568.europe-west1.run.app",
                         onSave = { v ->
                             scope.launch { store.setLiveServerUrl(v.takeIf { it.isNotBlank() }) }
                         },

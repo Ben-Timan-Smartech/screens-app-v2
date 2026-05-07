@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 // Apply the google-services plugin only if you've dropped google-services.json
@@ -24,7 +25,14 @@ android {
 
         // Backend base URL — overridable at build time.
         //   ./gradlew assembleRelease -PapiBase=https://api.smartech.group/api
-        val apiBase = providers.gradleProperty("apiBase").getOrElse("https://api.example.com/api")
+        // The default points at the demo Cloud Run deploy. Convention is the
+        // value ends in `/api` (matches Retrofit baseUrl + DeviceApi paths).
+        // OnboardingScreen strips the `/api` suffix when prefilling its
+        // bare-URL field. Demo mode (PlayerRepository.DemoMode) auto-disables
+        // whenever this doesn't contain "example.com".
+        val apiBase = providers.gradleProperty("apiBase").getOrElse(
+            "https://screens-app-v2-962486680568.europe-west1.run.app/api"
+        )
         buildConfigField("String", "API_BASE", "\"${apiBase}\"")
 
         // Join code used when registering against an org.
@@ -56,10 +64,6 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
-    }
-
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.11"
     }
 
     compileOptions {
