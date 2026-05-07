@@ -1,5 +1,6 @@
 package com.smartech.screens.staff
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -58,10 +59,23 @@ fun StaffOverlay(
      * corner taps on TV hosts; safe to leave null on touch devices.
      */
     externalUnlock: Flow<Unit>? = null,
+    /**
+     * Notifies the host whenever the staff overlay opens or closes. The
+     * activity uses this to gate the hold-OK unlock — once the overlay is
+     * up, OK presses should behave normally (selecting buttons in the
+     * staff UI), not re-trigger the unlock.
+     */
+    onVisibilityChange: ((Boolean) -> Unit)? = null,
 ) {
     var visible by remember { mutableStateOf(false) }
     var stage by remember { mutableStateOf<Stage>(Stage.Pin) }
     val scope = rememberCoroutineScope()
+
+    // Mirror the visibility flag back to the host. LaunchedEffect re-fires
+    // whenever `visible` changes; idempotent if the host doesn't care.
+    LaunchedEffect(visible) {
+        onVisibilityChange?.invoke(visible)
+    }
 
     // Touch path — invisible four-corner-tap unlock. Skip on TV-class
     // devices: the overlay would still attach pointer-input handlers but
@@ -85,6 +99,27 @@ fun StaffOverlay(
     }
 
     if (!visible) return
+
+    // Back-button handling — TV remotes have a Back key that, by default,
+    // exits the activity (= relaunches the home screen, since we're set as
+    // HOME). Within the staff overlay we want it to navigate back through
+    // stages instead. Outside the overlay, Back is a no-op (the kiosk app
+    // shouldn't expose any "leave the app" path; staff exit by completing
+    // their flow). BackHandler only registers while this composable is in
+    // the tree — i.e. while the overlay is visible — so the player loop
+    // outside still sees default Back behaviour.
+    BackHandler {
+        when (val s = stage) {
+            Stage.Pin                 -> visible = false
+            is Stage.Playlist         -> visible = false
+            is Stage.Home             -> visible = false
+            is Stage.Brands           -> stage = Stage.Playlist(s.user)
+            is Stage.Videos           -> stage = Stage.Brands(s.user)
+            is Stage.Success          -> stage = Stage.Videos(s.user, s.video.brand ?: "")
+            is Stage.Admin            -> stage = Stage.Playlist(s.user)
+            is Stage.Diagnostics      -> stage = Stage.Admin(s.user)
+        }
+    }
 
     // Auto-dismiss after 10s on the success screen — long enough to read,
     // short enough that the customer-facing player isn't stuck on it.

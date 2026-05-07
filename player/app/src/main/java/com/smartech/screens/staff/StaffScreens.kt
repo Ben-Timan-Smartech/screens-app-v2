@@ -38,6 +38,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
+import com.smartech.screens.ScreensApp
+import com.smartech.screens.data.LocationTaxonomy
 import com.smartech.screens.data.UserDirectory
 import com.smartech.screens.data.VideoItem
 import kotlinx.coroutines.delay
@@ -55,6 +58,16 @@ private val Ok = Color(0xFF3D8C4B)
 // ─────────────────────────────────────────────────────────────
 @Composable
 private fun Rail(title: String, sub: String, step: Int) {
+    // Look up the store this device is registered to so the rail subtitle
+    // names where it actually lives, rather than a copy-paste string. Falls
+    // back to "Smartech Group" until onboarding has set a storeId.
+    val app = LocalContext.current.applicationContext as? ScreensApp
+    val storeId by (app?.repository?.store?.locStoreId
+        ?: kotlinx.coroutines.flow.flowOf(null)).collectAsState(initial = null)
+    val storeSubtitle = remember(storeId) {
+        LocationTaxonomy.stores.firstOrNull { it.id == storeId }?.name ?: "Smartech Group"
+    }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -73,7 +86,7 @@ private fun Rail(title: String, sub: String, step: Int) {
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text("Screens", color = Bone, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                    Text("Saks Fifth Avenue", color = Color(0x8CFFFFFF), fontSize = 13.sp)
+                    Text(storeSubtitle, color = Color(0x8CFFFFFF), fontSize = 13.sp)
                 }
             }
             Spacer(Modifier.weight(1f))

@@ -7,6 +7,7 @@ import android.util.Log
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -88,6 +89,16 @@ class MainActivity : ComponentActivity() {
     /** The keycode that started the current hold; 0 when no hold in progress. */
     private var holdKeyCode = 0
 
+    /**
+     * True while the staff overlay is on screen (PIN, playlist, brand picker,
+     * etc.). When the overlay is up, the OK key needs to behave normally —
+     * pressing buttons in the staff UI — instead of re-triggering the
+     * hold-to-unlock gesture. dispatchKeyEvent reads this flag and skips the
+     * hold-detection logic when it's true. Updated by StaffOverlay via the
+     * onVisibilityChange callback wired in setContent below.
+     */
+    private val staffOverlayVisible = MutableStateFlow(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -126,6 +137,14 @@ class MainActivity : ComponentActivity() {
                 val onboarded by repo.store.isOnboarded.collectAsState(initial = true)
 
                 Box(Modifier.fillMaxSize()) {
+                    // Catch-all Back interceptor. By default the TV remote's
+                    // Back button finishes the activity, which on a HOME app
+                    // re-spawns it (looking like a "go home" jump). For a
+                    // kiosk we never want Back to leave the player loop —
+                    // the staff overlay registers its own BackHandler when
+                    // it's visible and takes precedence over this no-op.
+                    BackHandler(enabled = true) { /* swallow */ }
+
                     PlayerScreen(controller = controller, repository = repo)
 
                     // Staff overlay sits on top — invisible unless either the
@@ -141,6 +160,12 @@ class MainActivity : ComponentActivity() {
                         onPickVideo = onPick,
                         tvLike = tvLike,
                         externalUnlock = unlockBus,
+                        // Track overlay visibility so dispatchKeyEvent can
+                        // gate the hold-OK detection — see the property
+                        // declaration up top.
+                        onVisibilityChange = { visible ->
+                            staffOverlayVisible.value = visible
+                        },
                     )
 
                     if (!onboarded) {
@@ -185,10 +210,18 @@ class MainActivity : ComponentActivity() {
         if (isOkLikeKey(k)) {
             when (event.action) {
                 KeyEvent.ACTION_DOWN -> {
-                    // Only the *first* DOWN starts a fresh timer. Auto-repeat
-                    // DOWNs (repeatCount > 0) are ignored — the timer is
-                    // already running.
-                    if (event.repeatCount == 0 && holdKeyCode == 0) {
+                    // Only START a new hold-timer when (a) it's the very first
+                    // DOWN of a press (not an auto-repeat), (b) we don't have
+                    // a hold already running, and (c) the staff overlay isn't
+                    // up. The third gate is what makes OK presses inside the
+                    // staff UI behave normally — they fall straight through
+                    // to the focused view without spinning up a re-unlock
+                    // timer underneath.
+                    if (
+                        event.repeatCount == 0
+                        && holdKeyCode == 0
+                        && !staffOverlayVisible.value
+                    ) {
                         holdKeyCode = k
                         unlockFiredThisHold = false
                         // Surface the hold start to Compose so the indicator
@@ -199,6 +232,12 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 KeyEvent.ACTION_UP -> {
+                    // Cleanup is NOT gated — if we have a hold in progress we
+                    // need to finish it regardless of overlay visibility (the
+                    // overlay may have just opened because the unlock fired).
+                    // Without this branch, the eventual UP after a successful
+                    // hold would fall through to the focused view in the new
+                    // staff UI and click whatever button happens to be there.
                     if (k == holdKeyCode) {
                         handler.removeCallbacks(unlockRunnable)
                         val fired = unlockFiredThisHold
