@@ -25,13 +25,14 @@ android {
 
         // Backend base URL — overridable at build time.
         //   ./gradlew assembleRelease -PapiBase=https://api.smartech.group/api
-        // The default points at the demo Cloud Run deploy. Convention is the
-        // value ends in `/api` (matches Retrofit baseUrl + DeviceApi paths).
-        // OnboardingScreen strips the `/api` suffix when prefilling its
-        // bare-URL field. Demo mode (PlayerRepository.DemoMode) auto-disables
-        // whenever this doesn't contain "example.com".
+        // Default is the production custom domain mapped at Cloud Run.
+        // Convention: the value ends in `/api` (matches Retrofit's baseUrl
+        // and the DeviceApi path declarations). OnboardingScreen and the
+        // admin Reinitialize field strip the `/api` suffix when prefilling
+        // their bare-URL inputs. Demo mode (PlayerRepository.DemoMode)
+        // auto-disables whenever this doesn't contain "example.com".
         val apiBase = providers.gradleProperty("apiBase").getOrElse(
-            "https://screens-app-v2-962486680568.europe-west1.run.app/api"
+            "https://screens.smartechworld.com/api"
         )
         buildConfigField("String", "API_BASE", "\"${apiBase}\"")
 

@@ -291,7 +291,7 @@ fun DeviceAdminScreen(
                         // see the canonical URL without retyping. Strip the
                         // /api convention suffix — this field expects bare URL.
                         value = liveServerUrl ?: BuildConfig.API_BASE.removeSuffix("/api"),
-                        placeholder = "https://screens-app-v2-962486680568.europe-west1.run.app",
+                        placeholder = "https://screens.smartechworld.com",
                         onSave = { v ->
                             scope.launch {
                                 store.setLiveServerUrl(v.takeIf { it.isNotBlank() })

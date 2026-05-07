@@ -166,7 +166,7 @@ fun OnboardingScreen(
                         // stripped because this field is the bare URL — the
                         // player appends /api/... to paths itself.
                         value = serverUrl ?: BuildConfig.API_BASE.removeSuffix("/api"),
-                        placeholder = "https://screens-app-v2-962486680568.europe-west1.run.app",
+                        placeholder = "https://screens.smartechworld.com",
                         onSave = { v ->
                             scope.launch { store.setLiveServerUrl(v.takeIf { it.isNotBlank() }) }
                         },
