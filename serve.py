@@ -353,6 +353,38 @@ def _build_splash_registry() -> None:
     _city_brand.update(DEFAULT_CITY_BRAND)
 
 
+# Cached Drive folder name lookup. The /api/library/info endpoint shows
+# the brand-content folder's display name in the Drive Sync settings
+# card, but Drive's files().get() call costs a quota unit per request —
+# the UI polls library/info every 2-30s, so we cache the resolved name
+# in module state and re-fetch only on miss / failure.
+_drive_folder_name_cache: dict[str, str | None] = {}
+
+
+def _drive_folder_name_cached(folder_id: str) -> str | None:
+    """Resolve a Drive folder ID to its human-readable name, with cache.
+
+    Returns the cached name if known, otherwise hits the Drive API and
+    stores the result. Failures cache `None` so we don't keep retrying
+    a broken lookup on every poll — set _drive_folder_name_cache to
+    {} explicitly to force a refresh.
+    """
+    if folder_id in _drive_folder_name_cache:
+        return _drive_folder_name_cache[folder_id]
+    if drive_client is None:
+        _drive_folder_name_cache[folder_id] = None
+        return None
+    try:
+        meta = drive_client.get_metadata(folder_id)
+        name = meta.get("name")
+        _drive_folder_name_cache[folder_id] = name
+        return name
+    except Exception as e:
+        print(f"[drive] folder-name lookup failed for {folder_id}: {e}", file=sys.stderr)
+        _drive_folder_name_cache[folder_id] = None
+        return None
+
+
 def _hydrate_splashes_from_drive() -> Path | None:
     """If we're in Drive cloud mode, download splash files into a local
     cache once at boot. Returns the cache directory, which the caller
@@ -647,7 +679,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 state["fileMtime"] = LIBRARY_JSON.stat().st_mtime if LIBRARY_JSON.is_file() else None
             except Exception:
                 state["fileMtime"] = None
-            state["folder"] = str(MEDIA_DIR)
+
+            # Source identity differs by mode. The Drive Sync UI keys its
+            # copy off `mode`:
+            #   • drive-api  — cloud deploy, content fetched via Drive API
+            #     using a service account. driveFolderId is the configured
+            #     Brand Content folder; driveFolderName is fetched once on
+            #     demand from the API for nicer display, falls back to id.
+            #   • filesystem — dev laptop with a Drive-for-Desktop mount.
+            #     `folder` is the local path serve.py walks.
+            cloud = drive_client is not None and drive_client.is_configured()
+            brands_id = os.environ.get("SCREENS_DRIVE_BRANDS_ID") if cloud else None
+            if cloud and brands_id:
+                state["mode"] = "drive-api"
+                state["driveFolderId"] = brands_id
+                # Best-effort folder name. Cached to avoid hitting Drive on
+                # every poll (the UI hits /api/library/info every 2-30s).
+                state["driveFolderName"] = _drive_folder_name_cached(brands_id)
+                # Keep `folder` populated as a human-readable label so any
+                # caller that just shows "folder" gets something sane.
+                state["folder"] = state["driveFolderName"] or brands_id
+            else:
+                state["mode"] = "filesystem"
+                state["folder"] = str(MEDIA_DIR)
             self._send_json(state)
             return
 

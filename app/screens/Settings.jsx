@@ -447,25 +447,38 @@ const DriveSyncTab = () => {
   const running = info?.running;
   const success = info?.lastSuccess;
   const count = info?.lastCount;
+  // Mode determines copy + chips. drive-api = cloud deploy reading Drive
+  // via service account; filesystem = local dev with a Drive-for-Desktop
+  // mount. Default to filesystem if the field is missing (older server).
+  const cloud = info?.mode === 'drive-api';
+  const sourceLabel = cloud
+    ? (info?.driveFolderName
+        ? `${info.driveFolderName} · folder ID ${info.driveFolderId}`
+        : `Drive folder · ${info?.driveFolderId || 'unknown'}`)
+    : (info?.folder || 'G:\\Shared drives\\Smartech\\Screens\\Brand Content');
 
   return (
     <>
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 16, fontWeight: 500, color: 'var(--ink-1)' }}>Drive sync</div>
         <div style={{ fontSize: 12, color: 'var(--ink-4)', marginTop: 2 }}>
-          Re-scans the brand content folder on this machine's Google Drive sync. Auto-runs every 24 hours.
+          {cloud
+            ? 'Re-scans the brand content folder on Google Drive via the Drive API. Auto-runs every 24 hours.'
+            : "Re-scans the brand content folder on this machine's Google Drive sync. Auto-runs every 24 hours."}
         </div>
       </div>
 
       <div style={{ border: 'var(--border)', borderRadius: 10, background: 'var(--ink-10)', marginBottom: 16 }}>
         <SettingsRow
           label={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><Icon.drive size={14} /> Source folder</span>}
-          sub={info?.folder || 'G:\\Shared drives\\Smartech\\Screens\\Brand Content'}>
-          <Chip tone="ok">Mounted</Chip>
+          sub={sourceLabel}>
+          <Chip tone={cloud ? 'info' : 'ok'}>{cloud ? 'Drive API' : 'Mounted'}</Chip>
         </SettingsRow>
         <SettingsRow
           label="Storage"
-          sub="Videos stream in place from Drive — the CMS server keeps no copies of its own.">
+          sub={cloud
+            ? 'Videos stream from Drive on demand and cache on each tablet — the CMS server keeps no copies of its own.'
+            : 'Videos stream in place from Drive — the CMS server keeps no copies of its own.'}>
           <Chip tone="outline">Zero-copy</Chip>
         </SettingsRow>
         <SettingsRow
@@ -498,7 +511,9 @@ const DriveSyncTab = () => {
         )}
         <SettingsRow
           label="Auto-sync"
-          sub="Every 24 hours while the server is running. Restart serve.py to trigger one immediately." />
+          sub={cloud
+            ? 'Every 24 hours while the Cloud Run instance is up. Click Sync now to trigger one on demand.'
+            : 'Every 24 hours while the server is running. Restart serve.py to trigger one immediately.'} />
       </div>
 
       {info?.lastError && (
