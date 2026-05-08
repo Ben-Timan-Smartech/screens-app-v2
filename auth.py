@@ -204,7 +204,9 @@ def login_with_google_credential(credential: str, user_agent: str | None) -> tup
     if not email_domain_allowed(email):
         raise ValueError("domain_blocked")
 
+    print(f"[auth] login: looking up email={email}", flush=True)
     user = db.find_user_by_email(email)
+    print(f"[auth] login: user_lookup={'HIT' if user else 'MISS'} id={user.get('id') if user else None}", flush=True)
     if not user:
         # Owner-only invitation model: unknown emails can't sign up.
         raise ValueError("not_invited")
@@ -225,7 +227,9 @@ def login_with_google_credential(credential: str, user_agent: str | None) -> tup
     user = db.update_user(user["id"], patch) or user
 
     token = _new_session_token()
+    print(f"[auth] login: inserting session token_prefix={token[:8]}... user_id={user['id']}", flush=True)
     db.insert_session(token, user["id"], SESSION_TTL, user_agent)
+    print(f"[auth] login: session inserted; total_sessions_on_disk={db._sessions_count_for_debug()}", flush=True)
     return user, token
 
 
@@ -250,12 +254,15 @@ def current_user_for_token(token: str | None) -> Optional[dict]:
     """Resolve a session cookie to a user row (or None). Bumps last_seen_at
     so we can prune long-idle sessions in the future."""
     if not token:
+        print("[auth] me: no_token", flush=True)
         return None
     sess = db.get_session(token)
+    print(f"[auth] me: token_prefix={token[:8]}... session_found={sess is not None} sessions_on_disk={db._sessions_count_for_debug()} db_path={db.USERS_PATH}", flush=True)
     if not sess:
         return None
     user = db.find_user_by_id(sess["user_id"])
     if not user or user.get("status") != "active":
+        print(f"[auth] me: user_lookup_failed user_id={sess['user_id']} found={user is not None}", flush=True)
         return None
     db.touch_session(token)
     return user
