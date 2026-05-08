@@ -123,24 +123,25 @@ def role_can_be_assigned_by(actor_role: str, target_role: str) -> bool:
 
 def ensure_owner_seeded() -> None:
     """Create the singular Owner row if no Owner exists. Idempotent."""
-    row = db.query_one("SELECT id FROM users WHERE role='owner' LIMIT 1")
-    if row:
+    if db.has_role("owner"):
         return
     # Don't clobber an existing row with the same email — promote it.
-    existing = db.query_one("SELECT id FROM users WHERE email=?", (OWNER_EMAIL,))
-    now = int(time.time())
+    existing = db.find_user_by_email(OWNER_EMAIL)
     if existing:
-        db.execute(
-            "UPDATE users SET role='owner', status='active' WHERE id=?",
-            (existing["id"],),
-        )
+        db.update_user(existing["id"], {"role": "owner", "status": "active"})
         return
-    db.execute(
-        """INSERT INTO users
-           (id, email, display_name, role, status, created_at)
-           VALUES (?, ?, ?, 'owner', 'active', ?)""",
-        (_new_id(), OWNER_EMAIL, OWNER_NAME, now),
-    )
+    db.insert_user({
+        "id":           _new_id(),
+        "email":        OWNER_EMAIL,
+        "display_name": OWNER_NAME,
+        "role":         "owner",
+        "status":       "active",
+        "created_at":   int(time.time()),
+        "google_sub":   None,
+        "picture_url":  None,
+        "last_login_at": None,
+        "invited_by":   None,
+    })
 
 
 # ── ID generation ────────────────────────────────────────────────────
@@ -203,40 +204,33 @@ def login_with_google_credential(credential: str, user_agent: str | None) -> tup
     if not email_domain_allowed(email):
         raise ValueError("domain_blocked")
 
-    user = db.query_one("SELECT * FROM users WHERE email=?", (email,))
+    user = db.find_user_by_email(email)
     if not user:
         # Owner-only invitation model: unknown emails can't sign up.
         raise ValueError("not_invited")
-    if user["status"] != "active":
+    if user.get("status") != "active":
         raise ValueError("disabled")
 
     now = int(time.time())
     google_sub = claims.get("sub")
     picture = claims.get("picture")
     # First sign-in: bind the google sub + picture to this user row.
-    db.execute(
-        """UPDATE users
-           SET google_sub = COALESCE(google_sub, ?),
-               picture_url = COALESCE(?, picture_url),
-               last_login_at = ?
-           WHERE id = ?""",
-        (google_sub, picture, now, user["id"]),
-    )
+    # update_user skips None values, so we only stamp google_sub if the
+    # user doesn't already have one (mimics the SQL COALESCE).
+    patch = {"last_login_at": now}
+    if not user.get("google_sub") and google_sub:
+        patch["google_sub"] = google_sub
+    if picture:
+        patch["picture_url"] = picture
+    user = db.update_user(user["id"], patch) or user
 
     token = _new_session_token()
-    db.execute(
-        """INSERT INTO sessions
-           (id, user_id, created_at, expires_at, last_seen_at, user_agent)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (token, user["id"], now, now + SESSION_TTL, now, (user_agent or "")[:500]),
-    )
-    # Re-read so caller sees the freshly-updated last_login_at + picture_url.
-    user = db.query_one("SELECT * FROM users WHERE id=?", (user["id"],))
-    return dict(user), token
+    db.insert_session(token, user["id"], SESSION_TTL, user_agent)
+    return user, token
 
 
 def logout(session_token: str) -> None:
-    db.execute("DELETE FROM sessions WHERE id=?", (session_token,))
+    db.delete_session(session_token)
 
 
 # ── Session lookup ───────────────────────────────────────────────────
@@ -257,18 +251,14 @@ def current_user_for_token(token: str | None) -> Optional[dict]:
     so we can prune long-idle sessions in the future."""
     if not token:
         return None
-    now = int(time.time())
-    sess = db.query_one(
-        "SELECT user_id, expires_at FROM sessions WHERE id=?",
-        (token,),
-    )
-    if not sess or sess["expires_at"] < now:
+    sess = db.get_session(token)
+    if not sess:
         return None
-    user = db.query_one("SELECT * FROM users WHERE id=?", (sess["user_id"],))
-    if not user or user["status"] != "active":
+    user = db.find_user_by_id(sess["user_id"])
+    if not user or user.get("status") != "active":
         return None
-    db.execute("UPDATE sessions SET last_seen_at=? WHERE id=?", (now, token))
-    return dict(user)
+    db.touch_session(token)
+    return user
 
 
 # ── Cookie helpers (used by serve.py to set/clear) ───────────────────

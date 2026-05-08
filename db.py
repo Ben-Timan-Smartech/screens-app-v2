@@ -1,178 +1,207 @@
 """
-SQLite persistence layer.
+Tiny persistence layer.
 
-Single-file DB at $SCREENS_DB_PATH (defaults to ./screens.db locally, or
-/data/screens.db inside Cloud Run when a Cloud Storage FUSE volume is
-mounted at /data). Stdlib sqlite3 only — no ORM.
+- Users: durable, persisted to a JSON file at $SCREENS_USERS_PATH
+  (defaults to /data/users.json on Cloud Run, ./users.json locally).
+  In-memory cache mirrors disk; reads come from cache, writes update
+  cache + atomically replace the file.
+- Sessions: in-memory dict only. Container restart wipes them; users
+  re-sign-in (one Google click — not worth persisting through restarts).
 
-Concurrency model: ONE process-wide connection, every operation
-serialised under a single RLock. Why: Cloud Storage FUSE doesn't
-provide read-after-write consistency across separate file handles —
-two threads each opening their own SQLite connection see different
-cached views of the same .db file, so writes on one thread are
-invisible to reads on another. A single shared handle sidesteps that
-entirely, at the cost of some throughput. Fine for our scale; the
-auth / users tables see at most a few QPS.
+Why not SQLite: this used to be a SQLite layer, but Cloud Storage FUSE
+doesn't honour SQLite's locking + journal lifecycle reliably. Sessions
+written by one request weren't visible on the next, so the CMS never
+moved past the login screen. JSON-file writes use the
+write-temp-then-rename pattern which FUSE handles atomically per object,
+and in-memory caching means reads don't depend on FUSE consistency at
+all once the process is up.
 
-This also rules out WAL mode (which keeps separate -wal/-shm files
-that FUSE caches independently) — we use journal_mode=DELETE so the
-on-disk state after every commit is a single self-contained .db file
-that FUSE can flush atomically.
-
-Schema migrations are forward-only and run on import. Each migration is
-idempotent (CREATE TABLE IF NOT EXISTS, etc.).
+Concurrency: the HTTP server is multi-threaded so all access is
+serialised under module-level locks. Single Cloud Run instance
+(min/max-instances=1) means this lock is sufficient — we'd swap to a
+proper backend (Firestore / Cloud SQL) before scaling out.
 """
 
 from __future__ import annotations
 
-import contextlib
+import json
 import os
-import sqlite3
 import threading
+import time
 from pathlib import Path
-from typing import Iterator
 
-# Default to a sibling file in dev. On Cloud Run we mount a GCS bucket
-# at /data and point this env var at /data/screens.db so the file
-# survives container restarts.
-DB_PATH = Path(os.environ.get(
-    "SCREENS_DB_PATH",
-    str(Path(__file__).resolve().parent / "screens.db"),
-))
-
-# Single global lock for all DB access (reads and writes). Re-entrant so
-# nested calls (e.g. transaction() that uses execute() internally) don't
-# self-deadlock.
-_db_lock = threading.RLock()
-_conn: sqlite3.Connection | None = None
+# Path resolution. SCREENS_USERS_PATH is the new explicit knob;
+# SCREENS_DB_PATH is the legacy one (the SQLite file path) — we still
+# honour its parent directory so existing deploys with /data mounted at
+# SCREENS_DB_PATH=/data/screens.db get users.json sitting next to it.
+def _default_users_path() -> str:
+    explicit = os.environ.get("SCREENS_USERS_PATH")
+    if explicit:
+        return explicit
+    legacy = os.environ.get("SCREENS_DB_PATH")
+    if legacy:
+        return str(Path(legacy).parent / "users.json")
+    return str(Path(__file__).resolve().parent / "users.json")
 
 
-def _connect() -> sqlite3.Connection:
-    """Lazy-init the single shared connection. Caller must hold _db_lock."""
-    global _conn
-    if _conn is not None:
-        return _conn
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(
-        str(DB_PATH),
-        timeout=10.0,
-        isolation_level=None,             # autocommit; we manage txns explicitly
-        check_same_thread=False,          # we serialise via _db_lock instead
-    )
-    conn.row_factory = sqlite3.Row
-    # journal_mode=DELETE: stick to the classic rollback journal. FUSE
-    # handles "write file, sync, close" atomically per file; WAL's
-    # auxiliary -wal/-shm files don't survive that pattern reliably.
-    # synchronous=FULL: every commit fsyncs before returning. On FUSE,
-    # this makes the local cache flush to GCS so writes are durable
-    # across container restarts. Slow, but correct.
-    conn.execute("PRAGMA journal_mode=DELETE")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA synchronous=FULL")
-    _conn = conn
-    return conn
+USERS_PATH = Path(_default_users_path())
+
+_lock = threading.RLock()
+_users_cache: list[dict] | None = None  # None until first load
 
 
-def query(sql: str, params: tuple | dict = ()) -> list[sqlite3.Row]:
-    with _db_lock:
-        cur = _connect().execute(sql, params)
-        return cur.fetchall()
+# ── Disk I/O ────────────────────────────────────────────────────────
 
-
-def query_one(sql: str, params: tuple | dict = ()) -> sqlite3.Row | None:
-    with _db_lock:
-        cur = _connect().execute(sql, params)
-        return cur.fetchone()
-
-
-def execute(sql: str, params: tuple | dict = ()) -> sqlite3.Cursor:
-    """Single statement, autocommit."""
-    with _db_lock:
-        return _connect().execute(sql, params)
-
-
-@contextlib.contextmanager
-def transaction() -> Iterator[sqlite3.Connection]:
-    """Bracket a block of statements in BEGIN/COMMIT under the shared lock."""
-    with _db_lock:
-        conn = _connect()
-        conn.execute("BEGIN")
-        try:
-            yield conn
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        else:
-            conn.execute("COMMIT")
-
-
-# ── Schema migrations ────────────────────────────────────────────────
-# Forward-only. Each entry is a (version, sql) tuple. On import we check
-# schema_meta('version') and apply anything newer. To add a migration:
-# bump the version number, append the SQL, and ship — old DBs auto-upgrade.
-
-_MIGRATIONS: list[tuple[int, str]] = [
-    (1, """
-        CREATE TABLE IF NOT EXISTS schema_meta (
-            key   TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS users (
-            id            TEXT PRIMARY KEY,
-            email         TEXT NOT NULL UNIQUE,
-            display_name  TEXT NOT NULL,
-            role          TEXT NOT NULL,
-            status        TEXT NOT NULL DEFAULT 'active',
-            scope_json    TEXT,
-            google_sub    TEXT UNIQUE,
-            picture_url   TEXT,
-            created_at    INTEGER NOT NULL,
-            last_login_at INTEGER,
-            invited_by    TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-        CREATE INDEX IF NOT EXISTS idx_users_role  ON users(role);
-
-        CREATE TABLE IF NOT EXISTS sessions (
-            id           TEXT PRIMARY KEY,
-            user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            created_at   INTEGER NOT NULL,
-            expires_at   INTEGER NOT NULL,
-            last_seen_at INTEGER NOT NULL,
-            user_agent   TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_sessions_user    ON sessions(user_id);
-        CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
-    """),
-]
-
-
-def _current_version(conn: sqlite3.Connection) -> int:
+def _load() -> list[dict]:
+    """Return the user list, loading from disk on first call. Caller
+    must hold _lock before mutating the returned list."""
+    global _users_cache
+    if _users_cache is not None:
+        return _users_cache
+    if not USERS_PATH.exists():
+        _users_cache = []
+        return _users_cache
     try:
-        row = conn.execute(
-            "SELECT value FROM schema_meta WHERE key='version'"
-        ).fetchone()
-    except sqlite3.OperationalError:
-        return 0
-    return int(row[0]) if row else 0
+        text = USERS_PATH.read_text(encoding="utf-8")
+        data = json.loads(text)
+        users = data.get("users") if isinstance(data, dict) else None
+        _users_cache = list(users) if isinstance(users, list) else []
+    except (OSError, json.JSONDecodeError):
+        # Corrupt or unreadable file → start with empty list. The next
+        # write replaces the corrupt one. Owner is re-seeded on import.
+        _users_cache = []
+    return _users_cache
+
+
+def _save() -> None:
+    """Atomically replace the users file with the current cache."""
+    USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"users": _users_cache}, indent=2)
+    # Write to a sibling temp file, then replace. On gcsfuse this is
+    # implemented as a copy + delete (not POSIX-atomic) but it's still
+    # safer than overwriting in place: a partial-write reader sees the
+    # old file, not a half-written one.
+    tmp = USERS_PATH.with_suffix(USERS_PATH.suffix + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    tmp.replace(USERS_PATH)
 
 
 def init() -> None:
-    """Run any pending migrations. Idempotent — safe to call on every boot."""
-    with _db_lock:
-        conn = _connect()
-        current = _current_version(conn)
-        for version, sql in _MIGRATIONS:
-            if version <= current:
-                continue
-            conn.executescript(sql)
-            conn.execute(
-                "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('version',?)",
-                (str(version),),
-            )
-            current = version
+    """Load the cache. Idempotent — safe to call on every boot."""
+    with _lock:
+        _load()
 
 
-# Run on import so anything that imports db gets a ready-to-query connection.
+# ── Users ───────────────────────────────────────────────────────────
+
+def list_users() -> list[dict]:
+    with _lock:
+        return [dict(u) for u in _load()]
+
+
+def find_user_by_email(email: str) -> dict | None:
+    target = (email or "").lower()
+    with _lock:
+        for u in _load():
+            if (u.get("email") or "").lower() == target:
+                return dict(u)
+        return None
+
+
+def find_user_by_id(user_id: str) -> dict | None:
+    with _lock:
+        for u in _load():
+            if u.get("id") == user_id:
+                return dict(u)
+        return None
+
+
+def has_role(role: str) -> bool:
+    with _lock:
+        return any(u.get("role") == role for u in _load())
+
+
+def insert_user(user: dict) -> None:
+    with _lock:
+        _load().append(dict(user))
+        _save()
+
+
+def update_user(user_id: str, patch: dict) -> dict | None:
+    """Apply patch to the user with id=user_id. None values in patch
+    are skipped (treated as 'don't touch'). Returns updated user, or
+    None if not found."""
+    with _lock:
+        for u in _load():
+            if u.get("id") == user_id:
+                for k, v in patch.items():
+                    if v is None:
+                        continue
+                    u[k] = v
+                _save()
+                return dict(u)
+        return None
+
+
+def delete_user(user_id: str) -> bool:
+    with _lock:
+        users = _load()
+        before = len(users)
+        users[:] = [u for u in users if u.get("id") != user_id]
+        if len(users) == before:
+            return False
+        _save()
+        return True
+
+
+# ── Sessions (in-memory only) ────────────────────────────────────────
+
+_sessions: dict[str, dict] = {}
+_sessions_lock = threading.Lock()
+
+
+def insert_session(token: str, user_id: str, ttl_seconds: int, user_agent: str | None = None) -> None:
+    now = int(time.time())
+    with _sessions_lock:
+        _sessions[token] = {
+            "user_id":      user_id,
+            "created_at":   now,
+            "expires_at":   now + ttl_seconds,
+            "last_seen_at": now,
+            "user_agent":   (user_agent or "")[:500],
+        }
+
+
+def get_session(token: str) -> dict | None:
+    """Return the session record (or None if missing/expired). Expired
+    rows are pruned on access."""
+    with _sessions_lock:
+        s = _sessions.get(token)
+        if not s:
+            return None
+        if s["expires_at"] < int(time.time()):
+            _sessions.pop(token, None)
+            return None
+        return dict(s)
+
+
+def touch_session(token: str) -> None:
+    with _sessions_lock:
+        s = _sessions.get(token)
+        if s:
+            s["last_seen_at"] = int(time.time())
+
+
+def delete_session(token: str) -> None:
+    with _sessions_lock:
+        _sessions.pop(token, None)
+
+
+def delete_sessions_for_user(user_id: str) -> None:
+    with _sessions_lock:
+        for t in [k for k, v in _sessions.items() if v["user_id"] == user_id]:
+            _sessions.pop(t, None)
+
+
+# Run on import so any caller can immediately query.
 init()

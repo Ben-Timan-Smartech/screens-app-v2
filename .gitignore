@@ -46,11 +46,13 @@ __pycache__/
 .venv/
 venv/
 
-# SQLite — local dev file. Cloud Run mounts /data/screens.db from a
-# Cloud Storage volume; the file should never be committed.
+# Local persistence files. Cloud Run mounts /data/users.json from a
+# Cloud Storage volume; nothing data-shaped should ever be committed.
 screens.db
 screens.db-wal
 screens.db-shm
+users.json
+users.json.tmp
 
 # Node (in case anyone adds a CMS build step)
 node_modules/

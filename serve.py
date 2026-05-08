@@ -687,15 +687,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             actor = self._require_perm("users.view")
             if actor is None:
                 return
-            rows = db.query(
-                "SELECT * FROM users ORDER BY "
-                "CASE role WHEN 'owner' THEN 0 WHEN 'super_admin' THEN 1 "
-                "WHEN 'admin' THEN 2 WHEN 'manager' THEN 3 WHEN 'user' THEN 4 "
-                "WHEN 'viewer' THEN 5 WHEN 'brand_partner' THEN 6 ELSE 9 END, "
-                "display_name COLLATE NOCASE"
+            role_order = {r: i for i, r in enumerate(auth.ROLES)}
+            users = sorted(
+                db.list_users(),
+                key=lambda u: (
+                    role_order.get(u.get("role"), 99),
+                    (u.get("display_name") or "").lower(),
+                ),
             )
             self._send_json({
-                "users": [auth.public_user(dict(r)) for r in rows],
+                "users": [auth.public_user(u) for u in users],
                 "roles": list(auth.ROLES),
             })
             return
@@ -916,18 +917,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # Owner is singular and never created via invite.
                 self._send_json({"error": "cannot_invite_owner"}, status=400)
                 return
-            if db.query_one("SELECT id FROM users WHERE email=?", (email,)):
+            if db.find_user_by_email(email):
                 self._send_json({"error": "already_exists"}, status=409)
                 return
             user_id = auth._new_id()
             now = int(time.time())
-            db.execute(
-                """INSERT INTO users
-                   (id, email, display_name, role, status, created_at, invited_by)
-                   VALUES (?, ?, ?, ?, 'active', ?, ?)""",
-                (user_id, email, display_name, role, now, actor["id"]),
-            )
-            row = db.query_one("SELECT * FROM users WHERE id=?", (user_id,))
+            new_user = {
+                "id":            user_id,
+                "email":         email,
+                "display_name":  display_name,
+                "role":          role,
+                "status":        "active",
+                "created_at":    now,
+                "invited_by":    actor["id"],
+                "google_sub":    None,
+                "picture_url":   None,
+                "last_login_at": None,
+            }
+            db.insert_user(new_user)
             _log_activity(
                 kind="auth",
                 text=f"Invited {display_name} ({role})",
@@ -935,7 +942,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 tone="ok",
                 who=actor["display_name"],
             )
-            self._send_json({"user": auth.public_user(dict(row))})
+            self._send_json({"user": auth.public_user(new_user)})
             return
 
         # ── Push to one or more screens ──────────────────────────
@@ -1156,54 +1163,52 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if actor is None:
             return
         target_id = m.group(1)
-        target = db.query_one("SELECT * FROM users WHERE id=?", (target_id,))
+        target = db.find_user_by_id(target_id)
         if not target:
             self._send_json({"error": "not_found"}, status=404); return
 
         # Owner row is locked: only Owner can edit Owner, and Owner can't
         # be demoted (would leave the workspace ownerless).
-        if target["role"] == "owner" and actor["id"] != target["id"]:
+        if target.get("role") == "owner" and actor["id"] != target["id"]:
             self._send_json({"error": "owner_locked"}, status=403); return
 
-        sets, params = [], []
+        patch: dict = {}
         if "displayName" in body:
             name = (body.get("displayName") or "").strip()
             if not name:
                 self._send_json({"error": "missing_displayName"}, status=400); return
-            sets.append("display_name=?"); params.append(name)
+            patch["display_name"] = name
         if "role" in body:
             role = (body.get("role") or "").strip()
             if role not in auth.ROLES:
                 self._send_json({"error": "bad_role"}, status=400); return
-            if target["role"] == "owner" and role != "owner":
+            if target.get("role") == "owner" and role != "owner":
                 self._send_json({"error": "cannot_demote_owner"}, status=403); return
-            if role == "owner" and target["role"] != "owner":
+            if role == "owner" and target.get("role") != "owner":
                 self._send_json({"error": "cannot_promote_to_owner"}, status=403); return
             if not auth.role_can_be_assigned_by(actor["role"], role):
                 self._send_json({"error": "role_above_actor"}, status=403); return
-            sets.append("role=?"); params.append(role)
+            patch["role"] = role
         if "status" in body:
             status_val = (body.get("status") or "").strip()
             if status_val not in ("active", "disabled"):
                 self._send_json({"error": "bad_status"}, status=400); return
-            if target["role"] == "owner" and status_val != "active":
+            if target.get("role") == "owner" and status_val != "active":
                 self._send_json({"error": "cannot_disable_owner"}, status=403); return
-            sets.append("status=?"); params.append(status_val)
+            patch["status"] = status_val
             # Disabling kills all live sessions for that user.
             if status_val == "disabled":
-                db.execute("DELETE FROM sessions WHERE user_id=?", (target_id,))
-        if not sets:
+                db.delete_sessions_for_user(target_id)
+        if not patch:
             self._send_json({"error": "nothing_to_update"}, status=400); return
-        params.append(target_id)
-        db.execute(f"UPDATE users SET {', '.join(sets)} WHERE id=?", tuple(params))
-        row = db.query_one("SELECT * FROM users WHERE id=?", (target_id,))
+        updated = db.update_user(target_id, patch)
         _log_activity(
             kind="auth",
-            text=f"Updated {row['display_name']} ({row['role']})",
+            text=f"Updated {updated['display_name']} ({updated['role']})",
             icon="check",
             who=actor["display_name"],
         )
-        self._send_json({"user": auth.public_user(dict(row))})
+        self._send_json({"user": auth.public_user(updated)})
 
     def _serve_api_delete(self) -> None:
         path = self.path.split("?", 1)[0]
@@ -1214,14 +1219,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if actor is None:
             return
         target_id = m.group(1)
-        target = db.query_one("SELECT * FROM users WHERE id=?", (target_id,))
+        target = db.find_user_by_id(target_id)
         if not target:
             self._send_json({"error": "not_found"}, status=404); return
-        if target["role"] == "owner":
+        if target.get("role") == "owner":
             self._send_json({"error": "cannot_delete_owner"}, status=403); return
         if target["id"] == actor["id"]:
             self._send_json({"error": "cannot_delete_self"}, status=403); return
-        db.execute("DELETE FROM users WHERE id=?", (target_id,))
+        db.delete_sessions_for_user(target_id)
+        db.delete_user(target_id)
         _log_activity(
             kind="auth",
             text=f"Removed {target['display_name']}",
