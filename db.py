@@ -92,16 +92,6 @@ def init() -> None:
     pass
 
 
-def _sessions_count_for_debug() -> int:
-    """Read disk and return how many sessions currently exist. Used by
-    auth.py log lines so we can tell whether writes are landing.
-    Don't call this from hot paths."""
-    try:
-        return len(_load_data().get("sessions", {}))
-    except Exception:
-        return -1
-
-
 # ── Users ───────────────────────────────────────────────────────────
 
 def list_users() -> list[dict]:

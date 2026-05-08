@@ -204,9 +204,7 @@ def login_with_google_credential(credential: str, user_agent: str | None) -> tup
     if not email_domain_allowed(email):
         raise ValueError("domain_blocked")
 
-    print(f"[auth] login: looking up email={email}", flush=True)
     user = db.find_user_by_email(email)
-    print(f"[auth] login: user_lookup={'HIT' if user else 'MISS'} id={user.get('id') if user else None}", flush=True)
     if not user:
         # Owner-only invitation model: unknown emails can't sign up.
         raise ValueError("not_invited")
@@ -227,9 +225,7 @@ def login_with_google_credential(credential: str, user_agent: str | None) -> tup
     user = db.update_user(user["id"], patch) or user
 
     token = _new_session_token()
-    print(f"[auth] login: inserting session token_prefix={token[:8]}... user_id={user['id']}", flush=True)
     db.insert_session(token, user["id"], SESSION_TTL, user_agent)
-    print(f"[auth] login: session inserted; total_sessions_on_disk={db._sessions_count_for_debug()}", flush=True)
     return user, token
 
 
@@ -240,29 +236,38 @@ def logout(session_token: str) -> None:
 # ── Session lookup ───────────────────────────────────────────────────
 
 def session_token_from_cookie_header(cookie_header: str | None) -> str | None:
+    """Extract our session cookie from the request's Cookie header.
+
+    We can't use http.cookies.SimpleCookie here: it silently fails on
+    cookies whose values aren't RFC 6265 compliant, returning *zero*
+    parsed keys instead of just skipping the offending one. Google's
+    GIS sets a `g_state` cookie containing JSON (with braces, colons,
+    quotes), and when that cookie comes BEFORE ours in the header,
+    SimpleCookie wipes the whole jar — so screens_session is invisible
+    even though the browser sent it correctly.
+
+    Manual `;`-split is safe: cookie values can't contain `;` per
+    RFC 6265, and we don't care if other names are malformed.
+    """
     if not cookie_header:
         return None
-    try:
-        jar = http.cookies.SimpleCookie(cookie_header)
-    except http.cookies.CookieError:
-        return None
-    morsel = jar.get(SESSION_COOKIE)
-    return morsel.value if morsel else None
+    for part in cookie_header.split(";"):
+        name, sep, value = part.strip().partition("=")
+        if sep and name.strip() == SESSION_COOKIE:
+            return value.strip()
+    return None
 
 
 def current_user_for_token(token: str | None) -> Optional[dict]:
     """Resolve a session cookie to a user row (or None). Bumps last_seen_at
     so we can prune long-idle sessions in the future."""
     if not token:
-        print("[auth] me: no_token", flush=True)
         return None
     sess = db.get_session(token)
-    print(f"[auth] me: token_prefix={token[:8]}... session_found={sess is not None} sessions_on_disk={db._sessions_count_for_debug()} db_path={db.USERS_PATH}", flush=True)
     if not sess:
         return None
     user = db.find_user_by_id(sess["user_id"])
     if not user or user.get("status") != "active":
-        print(f"[auth] me: user_lookup_failed user_id={sess['user_id']} found={user is not None}", flush=True)
         return None
     db.touch_session(token)
     return user
