@@ -115,9 +115,14 @@ The CMS backend can run two ways:
 
 The CMS is gated by Google Sign-In, locked to four Workspace domains:
 `smartechworld.com`, `smartech.buzz`, `smartechwrld.com`,
-`seeyoutmrw.com`. Unknown emails are rejected — the Owner has to invite
-you in **Users & permissions** before you can sign in. Roles: Owner
-(singular), Super admin, Admin, Manager, User, Viewer, Brand partner.
+`seeyoutmrw.com`. Anyone in those domains can sign in directly — they
+appear in **Users & permissions** with the **Viewer** role (read-only),
+and the Owner can promote them from there. Roles: Owner (singular),
+Super admin, Admin, Manager, User, Viewer, Brand partner.
+
+To switch back to invite-only (no auto-provisioning), set the env var
+`SCREENS_AUTOPROVISION_ROLE` to `off`. To raise the default role for
+new sign-ups, set it to one of the role names (e.g. `user`).
 
 Sessions live in `screens.db` (SQLite); cookies are HttpOnly,
 SameSite=Lax, Secure when `SCREENS_PUBLIC_URL` starts with `https://`.
@@ -131,6 +136,7 @@ Required env vars on Cloud Run:
 | `SCREENS_DB_PATH`          | `/data/screens.db` (defaults to that in the Dockerfile) |
 | `SCREENS_OWNER_EMAIL`      | Optional override for the Owner seed email |
 | `SCREENS_OWNER_NAME`       | Optional override for the Owner display name |
+| `SCREENS_AUTOPROVISION_ROLE` | Default role for self-signups (default `viewer`; set to `off` for invite-only) |
 
 If `SCREENS_GOOGLE_CLIENT_ID` is unset, the login page shows a clear
 "sign-in not configured" message instead of crashing.

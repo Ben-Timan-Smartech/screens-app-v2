@@ -48,6 +48,24 @@ OWNER_NAME  = os.environ.get("SCREENS_OWNER_NAME",  "Ben Timan")
 # var (not in DB) because it's deploy-config, not app state.
 GOOGLE_CLIENT_ID = os.environ.get("SCREENS_GOOGLE_CLIENT_ID", "")
 
+# Auto-provisioning: when a user from an allowed domain signs in for
+# the first time and isn't already in the users file, we create them
+# with this default role. Set SCREENS_AUTOPROVISION_ROLE="" (empty) or
+# "off" to disable — that flips the workspace back to invite-only,
+# where unknown emails get a "not_invited" error.
+def _resolve_autoprovision_role() -> str | None:
+    raw = os.environ.get("SCREENS_AUTOPROVISION_ROLE")
+    if raw is None:
+        return "viewer"   # default: anyone in an allowed domain can join as Viewer
+    v = raw.strip().lower()
+    if v in ("", "off", "none", "false", "0", "disabled"):
+        return None
+    if v == "owner":
+        # Refuse to auto-provision Owner under any circumstance —
+        # Owner is singular and explicitly seeded.
+        return "viewer"
+    return v if v in ROLES else "viewer"
+
 # Public URL — used to decide whether to set the Secure cookie flag.
 # https → Secure. Deploy: SCREENS_PUBLIC_URL=https://screens.smartechworld.com
 PUBLIC_URL = os.environ.get("SCREENS_PUBLIC_URL", "")
@@ -205,24 +223,43 @@ def login_with_google_credential(credential: str, user_agent: str | None) -> tup
         raise ValueError("domain_blocked")
 
     user = db.find_user_by_email(email)
-    if not user:
-        # Owner-only invitation model: unknown emails can't sign up.
-        raise ValueError("not_invited")
-    if user.get("status") != "active":
-        raise ValueError("disabled")
-
     now = int(time.time())
     google_sub = claims.get("sub")
     picture = claims.get("picture")
-    # First sign-in: bind the google sub + picture to this user row.
-    # update_user skips None values, so we only stamp google_sub if the
-    # user doesn't already have one (mimics the SQL COALESCE).
-    patch = {"last_login_at": now}
-    if not user.get("google_sub") and google_sub:
-        patch["google_sub"] = google_sub
-    if picture:
-        patch["picture_url"] = picture
-    user = db.update_user(user["id"], patch) or user
+
+    if not user:
+        # First-time sign-in for a domain-allowed email. Auto-provision
+        # (if SCREENS_AUTOPROVISION_ROLE allows) so people can join the
+        # workspace without an explicit invite. Owner can promote them
+        # later from the Users page.
+        role = _resolve_autoprovision_role()
+        if role is None:
+            raise ValueError("not_invited")
+        user = {
+            "id":            _new_id(),
+            "email":         email,
+            "display_name":  (claims.get("name") or email).strip() or email,
+            "role":          role,
+            "status":        "active",
+            "created_at":    now,
+            "google_sub":    google_sub,
+            "picture_url":   picture,
+            "last_login_at": now,
+            "invited_by":    None,
+        }
+        db.insert_user(user)
+    else:
+        if user.get("status") != "active":
+            raise ValueError("disabled")
+        # Existing user: refresh last_login_at, fill in google_sub and
+        # picture if we don't already have them. update_user skips
+        # None values so a missing claim never wipes a stored value.
+        patch = {"last_login_at": now}
+        if not user.get("google_sub") and google_sub:
+            patch["google_sub"] = google_sub
+        if picture:
+            patch["picture_url"] = picture
+        user = db.update_user(user["id"], patch) or user
 
     token = _new_session_token()
     db.insert_session(token, user["id"], SESSION_TTL, user_agent)
