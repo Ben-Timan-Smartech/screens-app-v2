@@ -38,6 +38,13 @@ try:
 except ImportError:
     drive_client = None  # type: ignore
 
+# Persistence + auth. Both modules side-effect on import: db.init() applies
+# schema migrations, auth.ensure_owner_seeded() inserts the Owner row if
+# no Owner exists yet. Keep them imported here so a fresh boot is ready
+# to authenticate first request.
+import db          # noqa: E402  (after drive_client import-guard above)
+import auth        # noqa: E402
+
 PROJECT = Path(__file__).resolve().parent
 APP_DIR = PROJECT / "app"
 BRAND_DIR = PROJECT / "brand"           # logos, favicons, wordmark
@@ -569,6 +576,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         self.send_error(405)
 
+    def do_PATCH(self) -> None:
+        if self.path.startswith("/api/"):
+            self._serve_api_patch()
+            return
+        self.send_error(405)
+
+    def do_DELETE(self) -> None:
+        if self.path.startswith("/api/"):
+            self._serve_api_delete()
+            return
+        self.send_error(405)
+
     def do_OPTIONS(self) -> None:
         # Permissive CORS — browser preflights for /api/push from the CMS,
         # and the tablet cares less but it doesn't hurt.
@@ -579,19 +598,61 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # ── API handlers ──────────────────────────────────────────────
 
     def _cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        # Allow-Credentials must be set for cookie-bearing fetches from the
+        # CMS to work, and that requires a specific origin (not "*").
+        # Same-origin requests (CMS served from this server) hit the
+        # fallback "*" path and don't need credentials anyway.
+        origin = self.headers.get("Origin")
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Credentials", "true")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
-    def _send_json(self, payload: dict, status: int = 200) -> None:
+    def _send_json(
+        self,
+        payload: dict,
+        status: int = 200,
+        extra_headers: list[tuple[str, str]] | None = None,
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (extra_headers or []):
+            self.send_header(name, value)
         self._cors_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    # ── Auth helpers ────────────────────────────────────────────────
+    # Cached on the handler instance so multiple route checks per request
+    # don't re-hit the DB. Set on first call to _current_user().
+
+    def _current_user(self) -> dict | None:
+        cached = getattr(self, "_user_cache", "MISS")
+        if cached != "MISS":
+            return cached
+        token = auth.session_token_from_cookie_header(self.headers.get("Cookie"))
+        user = auth.current_user_for_token(token)
+        self._user_cache = user
+        return user
+
+    def _require_perm(self, perm: str) -> dict | None:
+        """Return the current user if they have `perm`. Otherwise send the
+        appropriate error and return None — the caller must early-return."""
+        user = self._current_user()
+        if user is None:
+            self._send_json({"error": "unauthenticated"}, status=401)
+            return None
+        if not auth.has_permission(user, perm):
+            self._send_json({"error": "forbidden", "need": perm}, status=403)
+            return None
+        return user
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -607,6 +668,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         path = url.path
         params = urllib.parse.parse_qs(url.query)
+
+        # ── Auth: who am I? ──────────────────────────────────────
+        # Returns the current user (if a valid session cookie is present)
+        # or {user: null}. Used by the frontend AuthGate on first paint
+        # and after every login/logout to decide what to render.
+        if path == "/api/auth/me":
+            user = self._current_user()
+            self._send_json({
+                "user":             auth.public_user(user) if user else None,
+                "googleClientId":   auth.GOOGLE_CLIENT_ID or None,
+                "allowedDomains":   sorted(auth.ALLOWED_DOMAINS),
+            })
+            return
+
+        # ── Auth: list users ──────────────────────────────────────
+        if path == "/api/users":
+            actor = self._require_perm("users.view")
+            if actor is None:
+                return
+            rows = db.query(
+                "SELECT * FROM users ORDER BY "
+                "CASE role WHEN 'owner' THEN 0 WHEN 'super_admin' THEN 1 "
+                "WHEN 'admin' THEN 2 WHEN 'manager' THEN 3 WHEN 'user' THEN 4 "
+                "WHEN 'viewer' THEN 5 WHEN 'brand_partner' THEN 6 ELSE 9 END, "
+                "display_name COLLATE NOCASE"
+            )
+            self._send_json({
+                "users": [auth.public_user(dict(r)) for r in rows],
+                "roles": list(auth.ROLES),
+            })
+            return
 
         if path == "/api/state":
             # Per-screen state when ?screenId=<deviceId>; otherwise return a
@@ -647,6 +739,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/screens":
+            if self._require_perm("screens.view") is None:
+                return
             now = time.time()
             with _STATE_LOCK:
                 screens = []
@@ -670,6 +764,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/library/info":
+            if self._require_perm("library.sync") is None:
+                return
             # Sync metadata for the Drive Sync settings tab.
             with _SYNC_LOCK:
                 state = dict(_sync_state)
@@ -723,6 +819,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/activity":
+            if self._require_perm("activity.view") is None:
+                return
             # Newest first so the CMS doesn't have to reverse client-side.
             with _STATE_LOCK:
                 items = list(_ACTIVITY_LOG)
@@ -736,10 +834,116 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         body = self._read_json()
 
+        # ── Auth: login ────────────────────────────────────────
+        # body: { credential: "<google-jwt>" }. Returns the public user
+        # shape and sets the HttpOnly session cookie.
+        if path == "/api/auth/login":
+            credential = (body.get("credential") or "").strip()
+            if not credential:
+                self._send_json({"error": "missing_credential"}, status=400)
+                return
+            try:
+                user, token = auth.login_with_google_credential(
+                    credential, self.headers.get("User-Agent")
+                )
+            except RuntimeError as e:
+                # Server-side misconfiguration (no GOOGLE_CLIENT_ID).
+                self._send_json({"error": "server_misconfigured", "detail": str(e)}, status=503)
+                return
+            except ValueError as e:
+                # Verification or policy reject. The frontend keys off this
+                # short error string for the message it shows the user.
+                code = str(e)
+                self._send_json({"error": code}, status=401)
+                return
+            _log_activity(
+                kind="auth",
+                text=f"{user['display_name']} signed in",
+                icon="check",
+                tone="ok",
+                who=user["display_name"],
+            )
+            self._send_json(
+                {"user": auth.public_user(user)},
+                extra_headers=[("Set-Cookie", auth.session_cookie_value(token))],
+            )
+            return
+
+        # ── Auth: logout ───────────────────────────────────────
+        if path == "/api/auth/logout":
+            token = auth.session_token_from_cookie_header(self.headers.get("Cookie"))
+            user = self._current_user()
+            if token:
+                auth.logout(token)
+            if user:
+                _log_activity(
+                    kind="auth",
+                    text=f"{user['display_name']} signed out",
+                    icon="close",
+                    who=user["display_name"],
+                )
+            self._send_json(
+                {"ok": True},
+                extra_headers=[("Set-Cookie", auth.clear_cookie_value())],
+            )
+            return
+
+        # ── Users: invite ──────────────────────────────────────
+        # body: { email, displayName, role }. The invited user has to sign
+        # in with Google before they actually appear in the workspace —
+        # this just creates the row that login_with_google_credential will
+        # match on email.
+        if path == "/api/users":
+            actor = self._require_perm("users.invite")
+            if actor is None:
+                return
+            email = (body.get("email") or "").strip().lower()
+            display_name = (body.get("displayName") or "").strip()
+            role = (body.get("role") or "user").strip()
+            if not email or not display_name:
+                self._send_json({"error": "missing_fields"}, status=400)
+                return
+            if role not in auth.ROLES:
+                self._send_json({"error": "bad_role"}, status=400)
+                return
+            if not auth.email_domain_allowed(email):
+                self._send_json({"error": "domain_blocked"}, status=400)
+                return
+            if not auth.role_can_be_assigned_by(actor["role"], role):
+                self._send_json({"error": "role_above_actor"}, status=403)
+                return
+            if role == "owner":
+                # Owner is singular and never created via invite.
+                self._send_json({"error": "cannot_invite_owner"}, status=400)
+                return
+            if db.query_one("SELECT id FROM users WHERE email=?", (email,)):
+                self._send_json({"error": "already_exists"}, status=409)
+                return
+            user_id = auth._new_id()
+            now = int(time.time())
+            db.execute(
+                """INSERT INTO users
+                   (id, email, display_name, role, status, created_at, invited_by)
+                   VALUES (?, ?, ?, ?, 'active', ?, ?)""",
+                (user_id, email, display_name, role, now, actor["id"]),
+            )
+            row = db.query_one("SELECT * FROM users WHERE id=?", (user_id,))
+            _log_activity(
+                kind="auth",
+                text=f"Invited {display_name} ({role})",
+                icon="check",
+                tone="ok",
+                who=actor["display_name"],
+            )
+            self._send_json({"user": auth.public_user(dict(row))})
+            return
+
         # ── Push to one or more screens ──────────────────────────
         # body: { deviceIds: [...], items: [...], mode: "replace"|"append" }
         # If deviceIds is empty/missing, push to every registered screen.
         if path == "/api/push":
+            if self._require_perm("screens.push") is None:
+                return
             items = body.get("items") or []
             mode = body.get("mode") or "replace"
             requested = body.get("deviceIds") or []
@@ -836,6 +1040,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         # ── Manually trigger a library scan (Drive Sync → Sync now) ─
         if path == "/api/library/refresh":
+            if self._require_perm("library.sync") is None:
+                return
             # Run on a background thread so the HTTP request doesn't hold up
             # the response. The UI polls /api/library/info to see when it's done.
             threading.Thread(target=run_library_scan, daemon=True).start()
@@ -850,6 +1056,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # ── Splash mapping update ────────────────────────────────
         # POST /api/splashes/mapping  { city: "NYC", brand: "tmrw"|"smartech"|null }
         if path == "/api/splashes/mapping":
+            if self._require_perm("settings.edit") is None:
+                return
             city = (body.get("city") or "").strip()
             brand = body.get("brand")
             if not city:
@@ -874,6 +1082,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
+            # Per-action permission. command + mix-splash hit the device
+            # remotely (privileged); playlist is just content push.
+            need = "screens.command" if action in ("command", "mix-splash") else "screens.push"
+            if self._require_perm(need) is None:
+                return
             with _STATE_LOCK:
                 if action == "command":
                     cmd = body.get("command")
@@ -928,6 +1141,95 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return
 
         self.send_error(404, "Unknown API endpoint")
+
+    # ── Users PATCH/DELETE ────────────────────────────────────────
+    # Edit (role / displayName / status) and remove. Owner is protected
+    # against demotion or deletion at every entry point.
+
+    def _serve_api_patch(self) -> None:
+        path = self.path.split("?", 1)[0]
+        body = self._read_json()
+        m = re.match(r"^/api/users/([A-Za-z0-9_-]+)$", path)
+        if not m:
+            self.send_error(404, "Unknown API endpoint"); return
+        actor = self._require_perm("users.edit")
+        if actor is None:
+            return
+        target_id = m.group(1)
+        target = db.query_one("SELECT * FROM users WHERE id=?", (target_id,))
+        if not target:
+            self._send_json({"error": "not_found"}, status=404); return
+
+        # Owner row is locked: only Owner can edit Owner, and Owner can't
+        # be demoted (would leave the workspace ownerless).
+        if target["role"] == "owner" and actor["id"] != target["id"]:
+            self._send_json({"error": "owner_locked"}, status=403); return
+
+        sets, params = [], []
+        if "displayName" in body:
+            name = (body.get("displayName") or "").strip()
+            if not name:
+                self._send_json({"error": "missing_displayName"}, status=400); return
+            sets.append("display_name=?"); params.append(name)
+        if "role" in body:
+            role = (body.get("role") or "").strip()
+            if role not in auth.ROLES:
+                self._send_json({"error": "bad_role"}, status=400); return
+            if target["role"] == "owner" and role != "owner":
+                self._send_json({"error": "cannot_demote_owner"}, status=403); return
+            if role == "owner" and target["role"] != "owner":
+                self._send_json({"error": "cannot_promote_to_owner"}, status=403); return
+            if not auth.role_can_be_assigned_by(actor["role"], role):
+                self._send_json({"error": "role_above_actor"}, status=403); return
+            sets.append("role=?"); params.append(role)
+        if "status" in body:
+            status_val = (body.get("status") or "").strip()
+            if status_val not in ("active", "disabled"):
+                self._send_json({"error": "bad_status"}, status=400); return
+            if target["role"] == "owner" and status_val != "active":
+                self._send_json({"error": "cannot_disable_owner"}, status=403); return
+            sets.append("status=?"); params.append(status_val)
+            # Disabling kills all live sessions for that user.
+            if status_val == "disabled":
+                db.execute("DELETE FROM sessions WHERE user_id=?", (target_id,))
+        if not sets:
+            self._send_json({"error": "nothing_to_update"}, status=400); return
+        params.append(target_id)
+        db.execute(f"UPDATE users SET {', '.join(sets)} WHERE id=?", tuple(params))
+        row = db.query_one("SELECT * FROM users WHERE id=?", (target_id,))
+        _log_activity(
+            kind="auth",
+            text=f"Updated {row['display_name']} ({row['role']})",
+            icon="check",
+            who=actor["display_name"],
+        )
+        self._send_json({"user": auth.public_user(dict(row))})
+
+    def _serve_api_delete(self) -> None:
+        path = self.path.split("?", 1)[0]
+        m = re.match(r"^/api/users/([A-Za-z0-9_-]+)$", path)
+        if not m:
+            self.send_error(404, "Unknown API endpoint"); return
+        actor = self._require_perm("users.delete")
+        if actor is None:
+            return
+        target_id = m.group(1)
+        target = db.query_one("SELECT * FROM users WHERE id=?", (target_id,))
+        if not target:
+            self._send_json({"error": "not_found"}, status=404); return
+        if target["role"] == "owner":
+            self._send_json({"error": "cannot_delete_owner"}, status=403); return
+        if target["id"] == actor["id"]:
+            self._send_json({"error": "cannot_delete_self"}, status=403); return
+        db.execute("DELETE FROM users WHERE id=?", (target_id,))
+        _log_activity(
+            kind="auth",
+            text=f"Removed {target['display_name']}",
+            icon="close",
+            tone="err",
+            who=actor["display_name"],
+        )
+        self._send_json({"ok": True})
 
     def _serve_media(self, head_only: bool) -> None:
         # Cloud mode: /media/<drive_file_id> means stream from Drive API.
