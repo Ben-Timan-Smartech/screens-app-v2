@@ -5,12 +5,19 @@ Single-file DB at $SCREENS_DB_PATH (defaults to ./screens.db locally, or
 /data/screens.db inside Cloud Run when a Cloud Storage FUSE volume is
 mounted at /data). Stdlib sqlite3 only — no ORM.
 
-Concurrency model: one writer, many readers. WAL mode is enabled so reads
-don't block the writer. The serve.py HTTP server is multi-threaded
-(`ThreadedServer`), so every connection is opened with check_same_thread=False
-and a 5-second busy timeout. Writes go through `with transaction()` which
-takes a process-level RLock — Cloud Run pinned to one instance means this
-lock is sufficient; we'd swap it for proper locking if we ever scale out.
+Concurrency model: ONE process-wide connection, every operation
+serialised under a single RLock. Why: Cloud Storage FUSE doesn't
+provide read-after-write consistency across separate file handles —
+two threads each opening their own SQLite connection see different
+cached views of the same .db file, so writes on one thread are
+invisible to reads on another. A single shared handle sidesteps that
+entirely, at the cost of some throughput. Fine for our scale; the
+auth / users tables see at most a few QPS.
+
+This also rules out WAL mode (which keeps separate -wal/-shm files
+that FUSE caches independently) — we use journal_mode=DELETE so the
+on-disk state after every commit is a single self-contained .db file
+that FUSE can flush atomically.
 
 Schema migrations are forward-only and run on import. Each migration is
 idempotent (CREATE TABLE IF NOT EXISTS, etc.).
@@ -33,54 +40,62 @@ DB_PATH = Path(os.environ.get(
     str(Path(__file__).resolve().parent / "screens.db"),
 ))
 
-_write_lock = threading.RLock()
-_local = threading.local()
+# Single global lock for all DB access (reads and writes). Re-entrant so
+# nested calls (e.g. transaction() that uses execute() internally) don't
+# self-deadlock.
+_db_lock = threading.RLock()
+_conn: sqlite3.Connection | None = None
 
 
 def _connect() -> sqlite3.Connection:
-    """Per-thread connection. SQLite connections aren't safe across threads
-    even in WAL, but per-thread + WAL gives us the throughput we need."""
-    conn = getattr(_local, "conn", None)
-    if conn is None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(
-            str(DB_PATH),
-            timeout=5.0,
-            isolation_level=None,             # autocommit; we manage txns explicitly
-            check_same_thread=False,          # we already gate by per-thread storage
-        )
-        conn.row_factory = sqlite3.Row
-        # WAL: readers don't block writers, writer doesn't block readers.
-        # foreign_keys: SQLite has FKs off by default — we want them on.
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        _local.conn = conn
+    """Lazy-init the single shared connection. Caller must hold _db_lock."""
+    global _conn
+    if _conn is not None:
+        return _conn
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(
+        str(DB_PATH),
+        timeout=10.0,
+        isolation_level=None,             # autocommit; we manage txns explicitly
+        check_same_thread=False,          # we serialise via _db_lock instead
+    )
+    conn.row_factory = sqlite3.Row
+    # journal_mode=DELETE: stick to the classic rollback journal. FUSE
+    # handles "write file, sync, close" atomically per file; WAL's
+    # auxiliary -wal/-shm files don't survive that pattern reliably.
+    # synchronous=FULL: every commit fsyncs before returning. On FUSE,
+    # this makes the local cache flush to GCS so writes are durable
+    # across container restarts. Slow, but correct.
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA synchronous=FULL")
+    _conn = conn
     return conn
 
 
 def query(sql: str, params: tuple | dict = ()) -> list[sqlite3.Row]:
-    cur = _connect().execute(sql, params)
-    return cur.fetchall()
+    with _db_lock:
+        cur = _connect().execute(sql, params)
+        return cur.fetchall()
 
 
 def query_one(sql: str, params: tuple | dict = ()) -> sqlite3.Row | None:
-    cur = _connect().execute(sql, params)
-    return cur.fetchone()
+    with _db_lock:
+        cur = _connect().execute(sql, params)
+        return cur.fetchone()
 
 
 def execute(sql: str, params: tuple | dict = ()) -> sqlite3.Cursor:
-    """Single statement, autocommit. Use `transaction()` for multi-stmt writes."""
-    with _write_lock:
+    """Single statement, autocommit."""
+    with _db_lock:
         return _connect().execute(sql, params)
 
 
 @contextlib.contextmanager
 def transaction() -> Iterator[sqlite3.Connection]:
-    """Bracket a block of writes in BEGIN/COMMIT. Held under _write_lock so
-    concurrent writers serialise cleanly."""
-    conn = _connect()
-    with _write_lock:
+    """Bracket a block of statements in BEGIN/COMMIT under the shared lock."""
+    with _db_lock:
+        conn = _connect()
         conn.execute("BEGIN")
         try:
             yield conn
@@ -145,9 +160,9 @@ def _current_version(conn: sqlite3.Connection) -> int:
 
 def init() -> None:
     """Run any pending migrations. Idempotent — safe to call on every boot."""
-    conn = _connect()
-    current = _current_version(conn)
-    with _write_lock:
+    with _db_lock:
+        conn = _connect()
+        current = _current_version(conn)
         for version, sql in _MIGRATIONS:
             if version <= current:
                 continue
