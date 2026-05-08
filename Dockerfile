@@ -49,6 +49,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY serve.py        /app/serve.py
 COPY scan-videos.py  /app/scan-videos.py
 COPY drive_client.py /app/drive_client.py
+COPY db.py           /app/db.py
+COPY auth.py         /app/auth.py
 COPY app/            /app/app/
 COPY brand/          /app/brand/
 
@@ -64,6 +66,11 @@ EXPOSE 8080
 # if MEDIA_DIR doesn't exist but boots regardless.
 ENV SCREENS_MEDIA_DIR=/app/media
 ENV SCREENS_SPLASH_DIR=/app/splash
+
+# DB path. /data is mounted from a Cloud Storage bucket (gen2 + FUSE)
+# so screens.db survives container restarts. Override with
+# SCREENS_DB_PATH if you mount the volume elsewhere.
+ENV SCREENS_DB_PATH=/data/screens.db
 
 # `-u` flushes stdout immediately so Cloud Run's log stream picks up
 # every line without buffering.

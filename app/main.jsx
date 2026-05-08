@@ -139,6 +139,8 @@ const Router = () => {
       return <ActivityLog />;
     case 'settings':
       return <Settings />;
+    case 'users':
+      return <Users />;
     case 'tablet':
       return <TabletFrame />;
     default:
@@ -162,10 +164,12 @@ function App() {
   }, []);
 
   return (
-    <>
-      <Router />
+    <AuthProvider>
+      <AuthGate>
+        <Router />
+      </AuthGate>
       <ToastHost />
-    </>
+    </AuthProvider>
   );
 }
 

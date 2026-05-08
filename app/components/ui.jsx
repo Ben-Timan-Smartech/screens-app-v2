@@ -834,12 +834,28 @@ const DarkModeToggleRow = () => {
   );
 };
 
-const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group', user = { name: 'Alex', initials: 'AM' } }) => {
+const ROLE_LABELS_SIDEBAR = {
+  owner: 'Owner', super_admin: 'Super admin', admin: 'Admin',
+  manager: 'Manager', user: 'User', viewer: 'Viewer',
+  brand_partner: 'Brand partner',
+};
+
+const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
   // Dynamic counts. Library polls /api/library; Screens reads the live
   // registry; Schedules counts the (currently empty) MOCK_SCHEDULES.
   const libraryCount = useLibraryCount();
   const fleetCount = useFleet().length;
   const scheduleCount = (MOCK_SCHEDULES || []).length;
+
+  // Real user from /api/auth/me, fetched once on mount in AuthProvider.
+  // Role-based gating uses the `permissions` array on the user object,
+  // which mirrors the server's PERMISSIONS dict for the user's role.
+  const auth = useAuth();
+  const user = auth.user || { displayName: '—', role: 'viewer', permissions: [] };
+  const initials = (user.displayName || user.email || '?')
+    .split(/\s+/).map((p) => p[0]).join('').slice(0, 2).toUpperCase();
+  const [menuOpen, setMenuOpen] = React.useState(false);
+
   return (
   <aside style={{
     width: 'var(--sidebar-w)', height: '100%',
@@ -866,13 +882,21 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group', user = { n
       <span style={{ color: 'var(--ink-4)', display: 'flex' }}><Icon.chevD size={12} /></span>
     </div>
 
-    {/* Main nav */}
+    {/* Main nav — items hidden if the role can't access them. */}
     <nav style={{ display: 'flex', flexDirection: 'column', gap: 1, marginTop: 2 }}>
       <SidebarItem icon={<Icon.home />} label="Dashboard" current={current === 'dashboard'} onClick={() => navigate('/dashboard')} />
-      <SidebarItem icon={<Icon.library />} label="Content library" current={current === 'library'} count={libraryCount || undefined} onClick={() => navigate('/library')} />
-      <SidebarItem icon={<Icon.screens />} label="Screens" current={current === 'screens'} count={fleetCount || undefined} onClick={() => navigate('/screens')} />
-      <SidebarItem icon={<Icon.schedule />} label="Schedules" current={current === 'schedules'} count={scheduleCount || undefined} onClick={() => navigate('/schedules')} />
-      <SidebarItem icon={<Icon.activity />} label="Activity log" current={current === 'activity'} onClick={() => navigate('/activity')} />
+      {can(user, 'library.view') && (
+        <SidebarItem icon={<Icon.library />} label="Content library" current={current === 'library'} count={libraryCount || undefined} onClick={() => navigate('/library')} />
+      )}
+      {can(user, 'screens.view') && (
+        <SidebarItem icon={<Icon.screens />} label="Screens" current={current === 'screens'} count={fleetCount || undefined} onClick={() => navigate('/screens')} />
+      )}
+      {can(user, 'schedules.view') && (
+        <SidebarItem icon={<Icon.schedule />} label="Schedules" current={current === 'schedules'} count={scheduleCount || undefined} onClick={() => navigate('/schedules')} />
+      )}
+      {can(user, 'activity.view') && (
+        <SidebarItem icon={<Icon.activity />} label="Activity log" current={current === 'activity'} onClick={() => navigate('/activity')} />
+      )}
     </nav>
 
     <div style={{ flex: 1 }} />
@@ -881,24 +905,58 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group', user = { n
     <nav style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
       <SidebarItem icon={<Icon.tablet />} label="On-tablet preview" current={current === 'tablet'} muted onClick={() => navigate('/tablet')} />
       <DarkModeToggleRow />
-      <SidebarItem icon={<Icon.settings />} label="Settings" current={current === 'settings'} onClick={() => navigate('/settings')} />
+      {can(user, 'users.view') && (
+        <SidebarItem icon={<Icon.users />} label="Users" current={current === 'users'} onClick={() => navigate('/users')} />
+      )}
+      {can(user, 'settings.view') && (
+        <SidebarItem icon={<Icon.settings />} label="Settings" current={current === 'settings'} onClick={() => navigate('/settings')} />
+      )}
     </nav>
 
-    {/* User chip */}
-    <div style={{ padding: '10px 8px 0', marginTop: 10, borderTop: 'var(--border)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingTop: 10 }}>
+    {/* User chip — click to open menu (sign out). */}
+    <div style={{ padding: '10px 8px 0', marginTop: 10, borderTop: 'var(--border)', position: 'relative' }}>
+      <button
+        onClick={() => setMenuOpen((v) => !v)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8, paddingTop: 10,
+          width: '100%', background: 'transparent', border: 'none', cursor: 'pointer',
+          textAlign: 'left',
+        }}>
         <div style={{
           width: 24, height: 24, borderRadius: '50%',
           background: 'var(--ink-1)', color: 'var(--ink-10)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 10, fontWeight: 500,
-        }}>{user.initials}</div>
+          fontSize: 10, fontWeight: 500, overflow: 'hidden',
+        }}>
+          {user.pictureUrl ? (
+            <img src={user.pictureUrl} alt="" width={24} height={24} style={{ display: 'block' }} />
+          ) : initials}
+        </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>{user.name} Mendez</div>
-          <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>Admin</div>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {user.displayName}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>{ROLE_LABELS_SIDEBAR[user.role] || user.role}</div>
         </div>
         <span style={{ color: 'var(--ink-4)', display: 'flex' }}><Icon.more /></span>
-      </div>
+      </button>
+      {menuOpen && (
+        <div
+          onClick={() => setMenuOpen(false)}
+          style={{
+            position: 'absolute', bottom: '100%', left: 8, right: 8, marginBottom: 6,
+            background: 'var(--ink-10)', border: 'var(--border-strong)', borderRadius: 4,
+            boxShadow: '0 8px 24px -10px rgba(0,0,0,0.25)', overflow: 'hidden', zIndex: 5,
+          }}>
+          <button
+            onClick={async () => { await auth.logout(); }}
+            style={{
+              width: '100%', textAlign: 'left', padding: '10px 12px',
+              background: 'transparent', border: 'none', cursor: 'pointer',
+              fontSize: 12, color: 'var(--ink-1)',
+            }}>Sign out</button>
+        </div>
+      )}
     </div>
   </aside>
   );

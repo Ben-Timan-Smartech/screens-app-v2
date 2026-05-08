@@ -111,9 +111,101 @@ The CMS backend can run two ways:
 | Splashes | Read from `G:\…\Screens` | Downloaded from Drive into `/tmp` at server boot, then served from local disk. |
 | `library.json` | Built by `python scan-videos.py` walking the filesystem | Same `scan-videos.py`, auto-detects cloud mode via `SCREENS_DRIVE_BRANDS_ID` and uses Drive API instead. Triggered on demand from the CMS Drive Sync card. |
 
+## Auth & users (Google Sign-In)
+
+The CMS is gated by Google Sign-In, locked to four Workspace domains:
+`smartechworld.com`, `smartech.buzz`, `smartechwrld.com`,
+`seeyoutmrw.com`. Unknown emails are rejected — the Owner has to invite
+you in **Users & permissions** before you can sign in. Roles: Owner
+(singular), Super admin, Admin, Manager, User, Viewer, Brand partner.
+
+Sessions live in `screens.db` (SQLite); cookies are HttpOnly,
+SameSite=Lax, Secure when `SCREENS_PUBLIC_URL` starts with `https://`.
+
+Required env vars on Cloud Run:
+
+| Var | Value |
+|---|---|
+| `SCREENS_GOOGLE_CLIENT_ID` | OAuth Client ID from GCP Console (see below) |
+| `SCREENS_PUBLIC_URL`       | `https://screens.smartechworld.com` |
+| `SCREENS_DB_PATH`          | `/data/screens.db` (defaults to that in the Dockerfile) |
+| `SCREENS_OWNER_EMAIL`      | Optional override for the Owner seed email |
+| `SCREENS_OWNER_NAME`       | Optional override for the Owner display name |
+
+If `SCREENS_GOOGLE_CLIENT_ID` is unset, the login page shows a clear
+"sign-in not configured" message instead of crashing.
+
+### Setting up the Google OAuth client (one-time)
+
+1. GCP Console → APIs & Services → Credentials → **Create Credentials → OAuth client ID**.
+2. Application type: **Web application**.
+3. Authorised JavaScript origins:
+   - `https://screens.smartechworld.com`
+   - `http://localhost:8765` (for local dev)
+4. **No** Authorised redirect URIs needed — we use the credential / ID-token flow, not the redirect flow.
+5. Copy the **Client ID** into the `SCREENS_GOOGLE_CLIENT_ID` env var.
+
+## Persistent storage (SQLite over GCS FUSE)
+
+`screens.db` holds users, sessions, and (next sprint) the Drive Sync
+state. Cloud Run is stateless, so the file lives in a Cloud Storage
+bucket mounted at `/data` via the gen2 execution environment's
+Cloud Storage FUSE volume support.
+
+### One-time bucket setup
+
+```bash
+PROJECT=screens-app-v2
+BUCKET=${PROJECT}-db
+
+gcloud storage buckets create gs://$BUCKET \
+  --project=$PROJECT \
+  --location=europe-west2 \
+  --uniform-bucket-level-access
+
+# Versioning gives us point-in-time recovery if the SQLite file ever
+# gets corrupted — small bucket, lifecycle keeps cost negligible.
+gcloud storage buckets update gs://$BUCKET --versioning
+
+# Cloud Run's runtime service account needs read/write on the bucket.
+SA=$(gcloud run services describe screens-app-v2 \
+  --region=europe-west2 --format='value(spec.template.spec.serviceAccountName)')
+gcloud storage buckets add-iam-policy-binding gs://$BUCKET \
+  --member="serviceAccount:$SA" \
+  --role="roles/storage.objectAdmin"
+```
+
+### Deploy with the FUSE volume + auth env vars
+
+The deploy command must use `--execution-environment=gen2` (gen1
+doesn't support volume mounts). Replace `<CLIENT_ID>` with the OAuth
+client ID from the section above.
+
+```bash
+gcloud run deploy screens-app-v2 \
+  --source=. \
+  --region=europe-west2 \
+  --execution-environment=gen2 \
+  --min-instances=1 --max-instances=1 \
+  --add-volume=name=db,type=cloud-storage,bucket=${BUCKET} \
+  --add-volume-mount=volume=db,mount-path=/data \
+  --set-env-vars=SCREENS_DB_PATH=/data/screens.db \
+  --set-env-vars=SCREENS_GOOGLE_CLIENT_ID=<CLIENT_ID> \
+  --set-env-vars=SCREENS_PUBLIC_URL=https://screens.smartechworld.com \
+  --set-env-vars=SCREENS_DRIVE_BRANDS_ID=1qY7alGpc_MsI72neKPpQtrkgGUvsd9YO \
+  --set-env-vars=SCREENS_DRIVE_SPLASHES_ID=1STZ9YXg154dFe4aldxp6Z3E0TFWaVN0C \
+  --set-env-vars=GOOGLE_APPLICATION_CREDENTIALS=/secrets/drive-credentials.json \
+  --update-secrets=/secrets/drive-credentials.json=drive-credentials:latest
+```
+
+On first boot the Owner row is seeded automatically from
+`SCREENS_OWNER_EMAIL` (default `ben@smartechworld.com`). Sign in with
+that Google account, then invite teammates from **Users & permissions**.
+
 ## Things that aren't shipped
 
 - Tests — this is still scaffold-stage code
 - A real `google-services.json` (only the `.example` is in the tree)
 - A signing config for release builds — drop a `keystore.properties` in `player/app/` before shipping
-- Persistent state — registry / command queue / per-screen playlist all in-memory; restart wipes them. SQLite swap-in is the next obvious step.
+- Drive Sync incremental rebuild — currently every sync re-walks the entire folder. SQLite tables for `videos` / `brands` / `sync_runs` + Drive `changes.list` page tokens are the next obvious step.
+- Tablet auth — `/api/screens/register` and `/api/screens/heartbeat` are unauthenticated. A device API key is on the roadmap.
