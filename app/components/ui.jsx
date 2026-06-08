@@ -374,6 +374,20 @@ const setScreenAudio = async (deviceId, audioOn) => {
   return res.json();
 };
 
+// setScreenLowDataMode — POST /api/screens/<id>/low-data-mode. When on,
+// the tablet polls every 60s instead of every 3s and skips the
+// per-location splash download. Cached videos already on disk are
+// unaffected.
+const setScreenLowDataMode = async (deviceId, lowDataMode) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/low-data-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lowDataMode }),
+  });
+  if (!res.ok) throw new Error(`low-data-mode failed: ${res.status}`);
+  return res.json();
+};
+
 // setVideoDefaultUnmute — PATCH /api/library/videos/<id> to flip the
 // per-video "default to unmute" flag. Persists in library.json so it
 // survives Drive rescans (scan-videos.py preserves sticky flags).
@@ -1084,6 +1098,6 @@ Object.assign(window, {
   Sidebar, SidebarItem, PageHeader, AppShell, Card, StatCard,
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenAudio, setVideoDefaultUnmute,
+  setScreenAudio, setScreenLowDataMode, setVideoDefaultUnmute,
   setScreenPlaylist, PushPicker,
 });

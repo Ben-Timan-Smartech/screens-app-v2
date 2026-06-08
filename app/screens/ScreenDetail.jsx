@@ -248,6 +248,21 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
+  const handleLowDataModeToggle = async (next) => {
+    if (!targetDeviceId) return;
+    try {
+      await setScreenLowDataMode(targetDeviceId, next);
+      showToast(
+        isLive
+          ? (next ? 'Low data mode on — polling slowed to 60 s' : 'Low data mode off — polling restored to 3 s')
+          : (next ? 'Low data mode will engage on reconnect' : 'Low data mode will disengage on reconnect'),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
   const handleClearAll = async () => {
     if (!targetDeviceId) return;
     const len = playlist.length;
@@ -501,6 +516,17 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                   : 'Off by default; videos can opt in via the Content Library.'}
                 value={hasHistory ? !!lastKnown.audioOn : false}
                 onChange={handleAudioToggle}
+                disabled={!canEdit}
+              />
+              <ToggleRow
+                label="Low data mode"
+                sub={canEdit
+                  ? (isLive
+                    ? 'Tablet polls every 60 s instead of 3 s and skips the per-location splash download. Cached videos already on disk are unaffected.'
+                    : 'Tablet polls every 60 s instead of 3 s and skips the per-location splash download. Cached videos already on disk are unaffected. Applies when the tablet reconnects.')
+                  : 'When on, tablet polls every 60 s and skips the per-location splash.'}
+                value={hasHistory ? !!lastKnown.lowDataMode : false}
+                onChange={handleLowDataModeToggle}
                 disabled={!canEdit}
               />
             </Card>
