@@ -18,6 +18,31 @@ Rules:
 
 ---
 
+## v0.1.3
+
+Video downloads actually work now, plus a handful of polish.
+
+- **Video downloads no longer get stuck in a retry loop.** The proxy
+  through Cloud Run was buffering the entire Drive response into
+  memory before sending the first byte, blowing past the tablet's
+  10-second read timeout. Rewrote it to stream via `urllib` directly —
+  first chunk now lands in milliseconds. Also stopped sending an
+  approximate `Content-Length` header (the cached `sizeMb` was rounded
+  to 1 decimal MB), which was making OkHttp on the player premature-EOF
+  the stream and never write the file to cache.
+- **Download status badges** in the staff overlay's playlist view.
+  Green tick when the file is on disk, spinner while it's downloading
+  or hasn't started, red ✕ if the last attempt failed.
+- **Staff overlay can edit its own playlist again.** The auth layer
+  added in v0.1.1 was rejecting tablet-side edits as unauthenticated;
+  the server now accepts playlist + mix-splash changes for a
+  registered device's own deviceId.
+- **CI builds are ~30 % faster.** Release workflow runs modern + legacy
+  in parallel on separate runners and gives the Kotlin compiler a
+  bigger JVM heap. Manual `workflow_dispatch` runs can also skip the
+  legacy flavor for ~50 % savings when iterating on a modern-only
+  fleet.
+
 ## v0.1.2
 
 Reliability fixes after the first day in production.
