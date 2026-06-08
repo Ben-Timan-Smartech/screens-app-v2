@@ -156,28 +156,28 @@ def _release_info() -> dict:
     modern_asset = _find_asset("modern")
     legacy_asset = _find_asset("legacy")
 
-    # Choose the URL shape. Two paths:
-    #   • SCREENS_GITHUB_TOKEN set → repo is (probably) private. Return
-    #     proxy URLs so anonymous browsers / device clients route their
-    #     APK download through us, where we can attach the bearer
-    #     token.
-    #   • No token → repo must be public. Return GitHub's CDN URLs
-    #     directly so we don't waste Cloud Run egress on bytes Google
-    #     could serve for free.
-    use_proxy = bool(os.environ.get("SCREENS_GITHUB_TOKEN"))
+    # All download URLs point at our own /apk routes. The bytes still
+    # come from GitHub but they're proxied through Cloud Run, which:
+    #   • Bypasses corporate networks that allow `github.com` but
+    #     block `release-assets.githubusercontent.com` (a common
+    #     restriction we've seen in the wild).
+    #   • Gives a stable filename + same-origin URL so the browser
+    #     starts the download instantly instead of loading a GitHub
+    #     page in between.
+    # The cost is some Cloud Run egress per download (~5 MB per APK,
+    # rare), which is well inside the free tier.
     public = (auth.PUBLIC_URL or "").rstrip("/")
-    def _proxy(flavor: str) -> str:
-        path = f"/api/release/download/{flavor}"
+    def _apk_url(flavor: str) -> str:
+        # /apk is the modern build; legacy gets its own subpath.
+        path = "/apk" if flavor == "modern" else f"/apk/{flavor}"
         return f"{public}{path}" if public else path
-    def _direct(asset: dict | None) -> str | None:
-        return asset.get("browser_download_url") if asset else None
 
     info = {
         "tagName":      tag,
         "versionName":  version_name,
         "versionCode":  version_code,
-        "modernUrl":    (_proxy("modern") if use_proxy else _direct(modern_asset)) if modern_asset else None,
-        "legacyUrl":    (_proxy("legacy") if use_proxy else _direct(legacy_asset)) if legacy_asset else None,
+        "modernUrl":    _apk_url("modern") if modern_asset else None,
+        "legacyUrl":    _apk_url("legacy") if legacy_asset else None,
         "publishedAt":  raw.get("published_at"),
         "releaseUrl":   raw.get("html_url"),
         "notes":        raw.get("body") or "",
@@ -707,6 +707,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith("/media/") or self.path.startswith("/splash/"):
             self._serve_media(head_only=False)
             return
+        # /apk      — modern build (the everyday one)
+        # /apk/legacy — legacy build for Android 6/7 boxes
+        # Convenience routes so the user can give someone the URL
+        # "https://screens.smartechworld.com/apk" and the download
+        # starts immediately. No CMS page renders first; we go
+        # straight to the proxy. Works on networks that block
+        # GitHub's CDN host directly.
+        raw_path = self.path.split("?", 1)[0].rstrip("/")
+        if raw_path == "/apk":
+            self._serve_release_download("modern"); return
+        if raw_path == "/apk/legacy":
+            self._serve_release_download("legacy"); return
+        if raw_path == "/apk/modern":
+            self._serve_release_download("modern"); return
         super().do_GET()
 
     def do_HEAD(self) -> None:
@@ -1416,30 +1430,41 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _serve_release_download(self, flavor: str) -> None:
         """Stream the latest release's modern or legacy APK to the client.
 
-        Hits GitHub's asset endpoint with SCREENS_GITHUB_TOKEN so private
-        repos are reachable. Pipes the bytes through in 64 KB chunks so
-        Python's HTTP server doesn't have to buffer the whole 16 MB APK
-        in memory."""
+        Works in two modes:
+          • Public repo (no token): hits the asset API anonymously;
+            GitHub 302s to its CDN; urllib follows the redirect and we
+            stream the resulting bytes. The reason this exists when
+            direct GitHub links would also work: some corporate
+            networks allow `github.com` but block
+            `release-assets.githubusercontent.com`, so a click on the
+            release URL falls off a cliff. Proxying through our own
+            host sidesteps that.
+          • Private repo (with SCREENS_GITHUB_TOKEN): the asset API
+            with octet-stream Accept returns the file directly under
+            auth.
+
+        Pipes the bytes through in 64 KB chunks so Python's HTTP
+        server doesn't have to buffer the whole APK in memory."""
         info = _release_info()
         if not info:
             self.send_error(503, "Release info unavailable"); return
         asset_id = info.get(f"_{flavor}AssetId")
         if not asset_id:
             self.send_error(404, f"No {flavor} APK in latest release"); return
-        token = os.environ.get("SCREENS_GITHUB_TOKEN")
-        if not token:
-            # Public-repo path would still work without the token; we
-            # surface a clear error message here so the operator knows
-            # what to fix. For private repos GitHub will 404 us anyway.
-            self.send_error(503, "Server missing SCREENS_GITHUB_TOKEN for proxy download")
-            return
         api_url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/assets/{asset_id}"
         req = urllib.request.Request(
             api_url,
             headers=_github_headers(accept="application/octet-stream"),
         )
         try:
+            # urllib follows the 302 from the asset API to the CDN by
+            # default. The resulting `upstream` is the actual binary
+            # stream; we just relay it.
             upstream = urllib.request.urlopen(req, timeout=30)
+        except urllib.error.HTTPError as e:
+            print(f"[release-download] upstream HTTP {e.code}: {e.reason}", file=sys.stderr)
+            self.send_error(502, f"Upstream fetch failed ({e.code})")
+            return
         except Exception as e:
             print(f"[release-download] upstream fetch failed: {e}", file=sys.stderr)
             self.send_error(502, "Upstream fetch failed")
