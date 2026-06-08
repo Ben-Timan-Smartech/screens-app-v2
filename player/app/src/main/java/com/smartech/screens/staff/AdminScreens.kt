@@ -161,6 +161,7 @@ fun DeviceAdminScreen(
 
     val deviceId by store.deviceId.collectAsState(initial = null)
     val orientation by store.orientationOverride.collectAsState(initial = null)
+    val syncGroup by repository.syncGroupFlow.collectAsState()
     val cacheCap by store.cacheCapBytes.collectAsState(initial = 8L * 1024 * 1024 * 1024)
     val pollSec by store.pollIntervalSec.collectAsState(initial = 60L)
     val info = remember { DeviceInfo.snapshot(ctx) }
@@ -261,6 +262,11 @@ fun DeviceAdminScreen(
                     // the human-readable screen code set during onboarding instead;
                     // the device ID above is the real server-side identifier.
                     InfoRow("Screen code", locScreenCode ?: "(not set)")
+                    // Sync group is read-only here; admins set it from the CMS
+                    // screen detail page. Showing it lets staff confirm whether
+                    // this tablet is locked to another screen's playback or
+                    // running independently.
+                    InfoRow("Sync group",  syncGroup ?: "(independent)")
                     InfoRow("Display",     "${info.widthPx} × ${info.heightPx} · ${info.orientation}")
                     InfoRow("RAM",        "${info.ramMb} MB")
                     InfoRow("Cached",     "${repository.cache.cachedIds().size} videos · ${formatBytes(repository.cache.totalBytes())}")

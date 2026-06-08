@@ -388,6 +388,20 @@ const setScreenLowDataMode = async (deviceId, lowDataMode) => {
   return res.json();
 };
 
+// setScreenSyncGroup — POST /api/screens/<id>/sync-group. Tablets that
+// share a syncGroup value get an identical "playback" block from the
+// server on every state poll, so they stay aligned to the same item
+// + position. Pass null or empty string to detach from any group.
+const setScreenSyncGroup = async (deviceId, syncGroup) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/sync-group`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ syncGroup }),
+  });
+  if (!res.ok) throw new Error(`sync-group failed: ${res.status}`);
+  return res.json();
+};
+
 // setVideoDefaultUnmute — PATCH /api/library/videos/<id> to flip the
 // per-video "default to unmute" flag. Persists in library.json so it
 // survives Drive rescans (scan-videos.py preserves sticky flags).
@@ -1098,6 +1112,6 @@ Object.assign(window, {
   Sidebar, SidebarItem, PageHeader, AppShell, Card, StatCard,
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenAudio, setScreenLowDataMode, setVideoDefaultUnmute,
+  setScreenAudio, setScreenLowDataMode, setScreenSyncGroup, setVideoDefaultUnmute,
   setScreenPlaylist, PushPicker,
 });
