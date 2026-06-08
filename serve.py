@@ -61,6 +61,131 @@ def _read_version() -> str:
 
 APP_VERSION = _read_version()
 
+# ── Latest-release lookup ────────────────────────────────────────────
+# Both the CMS login screen and the Android player ask "what's the
+# newest APK URL?". We answer by hitting GitHub's REST API for the
+# latest release on this repo, picking out the modern + legacy APK
+# assets, and exposing a server-side proxy URL for the actual binary
+# download.
+#
+# Why proxy instead of returning github.com URLs directly: the source
+# repo is private, so anonymous downloads (the login page button) and
+# unauthenticated devices (tablets without GitHub credentials) can't
+# fetch directly. The proxy uses SCREENS_GITHUB_TOKEN (a fine-grained
+# PAT with read access to releases) to fetch from GitHub and stream
+# the bytes back. With a public repo it'd still work but the token
+# would be unnecessary.
+#
+# The repo is hard-coded here because it's where serve.py itself lives
+# — overridable for forks via SCREENS_RELEASES_REPO.
+GITHUB_RELEASES_REPO = os.environ.get(
+    "SCREENS_RELEASES_REPO",
+    "Ben-Timan-Smartech/screens-app-v2",
+)
+
+import urllib.request  # noqa: E402
+
+_release_cache: dict = {"data": None, "fetched_at": 0.0}
+_release_cache_lock = threading.Lock()
+RELEASE_CACHE_TTL = 300  # 5 minutes
+
+
+def _github_headers(*, accept: str = "application/vnd.github+json") -> dict:
+    """Common headers for any GitHub API call. Adds the bearer token
+    when SCREENS_GITHUB_TOKEN is set — without it, private repos 404."""
+    h = {
+        "Accept": accept,
+        "User-Agent": "screens-app-v2-server",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = os.environ.get("SCREENS_GITHUB_TOKEN")
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
+
+
+def _fetch_latest_release() -> dict | None:
+    """Hit GitHub's API for the latest release. Returns the parsed JSON
+    or None on any error. Errors are swallowed because the consumers
+    (login page, player) both have graceful "release info unavailable"
+    paths — they should never crash because GitHub is briefly slow."""
+    url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/latest"
+    req = urllib.request.Request(url, headers=_github_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[release] fetch failed: {e}", file=sys.stderr)
+        return None
+
+
+def _release_info() -> dict:
+    """Return {tagName, versionName, versionCode, modernUrl, legacyUrl,
+    publishedAt, releaseUrl} for the latest release, or {} if we can't
+    reach GitHub. Cached for RELEASE_CACHE_TTL seconds.
+
+    `modernUrl`/`legacyUrl` are *proxy* URLs pointing back at this
+    server (so private-repo assets still resolve for anonymous + device
+    clients). Asset IDs are kept on the cached dict with a leading
+    underscore so the download handler can look them up without
+    re-fetching from GitHub."""
+    now = time.time()
+    with _release_cache_lock:
+        if _release_cache["data"] is not None and (now - _release_cache["fetched_at"]) < RELEASE_CACHE_TTL:
+            return _release_cache["data"]
+    raw = _fetch_latest_release()
+    if not raw:
+        # Don't poison the cache with empty data — let the next request retry.
+        return {}
+    tag = raw.get("tag_name") or ""
+    version_name = tag[1:] if tag.startswith("v") else tag
+    # Match: MAJOR.MINOR.PATCH → MAJOR*10000 + MINOR*100 + PATCH (mirrors
+    # the formula in player/app/build.gradle.kts so the player can
+    # compare server-reported versionCode to its own BuildConfig).
+    try:
+        major, minor, patch = (int(p) for p in version_name.split(".")[:3])
+        version_code = major * 10_000 + minor * 100 + patch
+    except (ValueError, TypeError):
+        version_code = 0
+    assets = raw.get("assets") or []
+    def _find_asset(flavor: str) -> dict | None:
+        for a in assets:
+            if flavor in (a.get("name") or "").lower():
+                return a
+        return None
+    modern_asset = _find_asset("modern")
+    legacy_asset = _find_asset("legacy")
+
+    # Public-facing URLs point at our own /api/release/download/<flavor>
+    # proxy. The browser / device follows the redirect to actual bytes
+    # without ever needing GitHub credentials.
+    public = (auth.PUBLIC_URL or "").rstrip("/")
+    def _proxy(flavor: str) -> str:
+        path = f"/api/release/download/{flavor}"
+        return f"{public}{path}" if public else path
+
+    info = {
+        "tagName":      tag,
+        "versionName":  version_name,
+        "versionCode":  version_code,
+        "modernUrl":    _proxy("modern") if modern_asset else None,
+        "legacyUrl":    _proxy("legacy") if legacy_asset else None,
+        "publishedAt":  raw.get("published_at"),
+        "releaseUrl":   raw.get("html_url"),
+        "notes":        raw.get("body") or "",
+        # Internal: asset IDs for the proxy endpoint. Leading underscore
+        # is purely a "don't ship this to public consumers" hint — we
+        # return the same dict to /api/auth/me, but no UI surfaces it.
+        "_modernAssetId": modern_asset.get("id") if modern_asset else None,
+        "_legacyAssetId": legacy_asset.get("id") if legacy_asset else None,
+        "_modernSize":    modern_asset.get("size") if modern_asset else None,
+        "_legacySize":    legacy_asset.get("size") if legacy_asset else None,
+    }
+    with _release_cache_lock:
+        _release_cache["data"] = info
+        _release_cache["fetched_at"] = now
+    return info
+
 # MEDIA_DIR / SPLASH_DIR are overridable via environment so the same code
 # runs on a dev laptop (default Windows G:\ path) and inside a container
 # where the Drive mount doesn't exist (e.g. Cloud Run). The defaults work
@@ -692,7 +817,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "googleClientId":   auth.GOOGLE_CLIENT_ID or None,
                 "allowedDomains":   sorted(auth.ALLOWED_DOMAINS),
                 "appVersion":       APP_VERSION,
+                "latestRelease":    _release_info(),
             })
+            return
+
+        # ── Latest release ──────────────────────────────────────
+        # Public — the login screen hits this to render a "Download
+        # Player APK" button without sign-in, and the Android player
+        # polls it to decide whether to self-update.
+        if path == "/api/release/latest":
+            info = _release_info() or {"error": "release_lookup_failed"}
+            # Strip the internal-only keys (asset IDs) before responding.
+            public_info = {k: v for k, v in info.items() if not k.startswith("_")}
+            self._send_json(public_info)
+            return
+
+        # ── APK download proxy ──────────────────────────────────
+        # /api/release/download/{modern|legacy}
+        # The repo is private so anonymous browsers and tablets without
+        # GitHub creds can't pull the asset directly. This handler
+        # fetches the binary from GitHub using SCREENS_GITHUB_TOKEN and
+        # streams it back to the client.
+        m_dl = re.match(r"^/api/release/download/(modern|legacy)$", path)
+        if m_dl:
+            flavor = m_dl.group(1)
+            self._serve_release_download(flavor)
             return
 
         # ── Auth: list users ──────────────────────────────────────
@@ -1110,7 +1259,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with _STATE_LOCK:
                 if action == "command":
                     cmd = body.get("command")
-                    if cmd not in ("reboot", "clearCache", "unregister"):
+                    if cmd not in ("reboot", "clearCache", "unregister", "update"):
                         self.send_error(400, "Unknown command"); return
                     state = _ensure_screen_state(device_id)
                     state["pendingCommands"].append({"command": cmd, "at": time.time()})
@@ -1120,11 +1269,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "reboot":     "Rebooted",
                         "clearCache": "Cleared cache on",
                         "unregister": "Unregistered",
+                        "update":     "Triggered update on",
                     }[cmd]
                     _log_activity(
                         kind="command",
                         text=f"{label} {screen_name}",
-                        icon="schedule" if cmd == "reboot" else "trash" if cmd == "clearCache" else "close",
+                        icon={
+                            "reboot":     "schedule",
+                            "clearCache": "trash",
+                            "unregister": "close",
+                            "update":     "download",
+                        }[cmd],
                         tone="err" if cmd == "unregister" else None,
                         target=device_id,
                     )
@@ -1249,6 +1404,67 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             who=actor["display_name"],
         )
         self._send_json({"ok": True})
+
+    def _serve_release_download(self, flavor: str) -> None:
+        """Stream the latest release's modern or legacy APK to the client.
+
+        Hits GitHub's asset endpoint with SCREENS_GITHUB_TOKEN so private
+        repos are reachable. Pipes the bytes through in 64 KB chunks so
+        Python's HTTP server doesn't have to buffer the whole 16 MB APK
+        in memory."""
+        info = _release_info()
+        if not info:
+            self.send_error(503, "Release info unavailable"); return
+        asset_id = info.get(f"_{flavor}AssetId")
+        if not asset_id:
+            self.send_error(404, f"No {flavor} APK in latest release"); return
+        token = os.environ.get("SCREENS_GITHUB_TOKEN")
+        if not token:
+            # Public-repo path would still work without the token; we
+            # surface a clear error message here so the operator knows
+            # what to fix. For private repos GitHub will 404 us anyway.
+            self.send_error(503, "Server missing SCREENS_GITHUB_TOKEN for proxy download")
+            return
+        api_url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/assets/{asset_id}"
+        req = urllib.request.Request(
+            api_url,
+            headers=_github_headers(accept="application/octet-stream"),
+        )
+        try:
+            upstream = urllib.request.urlopen(req, timeout=30)
+        except Exception as e:
+            print(f"[release-download] upstream fetch failed: {e}", file=sys.stderr)
+            self.send_error(502, "Upstream fetch failed")
+            return
+        try:
+            filename = f"screens-player-{flavor}-v{info.get('versionName','')}.apk"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.android.package-archive")
+            content_length = upstream.headers.get("Content-Length")
+            if content_length:
+                self.send_header("Content-Length", content_length)
+            # Tell the browser to save with our nice filename rather
+            # than inheriting the opaque CDN one. Curl + OkHttp honour
+            # this too.
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{filename}"',
+            )
+            self.send_header("Cache-Control", "no-store")
+            self._cors_headers()
+            self.end_headers()
+            try:
+                while True:
+                    chunk = upstream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
+                # Client cancelled — happens when a user closes the
+                # download dialog mid-stream. Drop silently.
+                return
+        finally:
+            upstream.close()
 
     def _serve_media(self, head_only: bool) -> None:
         # Cloud mode: /media/<drive_file_id> means stream from Drive API.

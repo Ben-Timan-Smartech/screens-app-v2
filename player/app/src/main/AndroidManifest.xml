@@ -11,6 +11,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Self-update: needed to ask Android's PackageInstaller to swap
+         in a new APK we just downloaded. The OS still gates the
+         actual install on the per-app "Allow from this source" toggle
+         the first time it's used; we send the user to that settings
+         page if it's not granted. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- TV / signage support.
          The same APK installs on retail tablets (touch) and on Android TV /
@@ -69,6 +75,21 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
+
+        <!-- FileProvider exposes the downloaded APK to the system
+             PackageInstaller as a content:// URI. The authority must
+             match Updater.launchInstaller's hard-coded format
+             (`<packageName>.fileprovider`). Paths are restricted to
+             the updates/ subdir in @xml/file_provider_paths. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_provider_paths" />
+        </provider>
 
     </application>
 </manifest>

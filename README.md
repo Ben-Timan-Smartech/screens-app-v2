@@ -137,6 +137,7 @@ Required env vars on Cloud Run:
 | `SCREENS_OWNER_EMAIL`      | Optional override for the Owner seed email |
 | `SCREENS_OWNER_NAME`       | Optional override for the Owner display name |
 | `SCREENS_AUTOPROVISION_ROLE` | Default role for self-signups (default `viewer`; set to `off` for invite-only) |
+| `SCREENS_GITHUB_TOKEN`     | Fine-grained PAT with **read access to Releases** on this repo. Needed because the source repo is private — without this the login-screen download button and the tablet self-updater can't reach the APK assets. Generate at [Settings → Developer settings → Personal access tokens](https://github.com/settings/personal-access-tokens), scope to this repo only, "Releases: Read-only" + "Contents: Read-only". Add as a plain env var on Cloud Run (not via Secret Manager — it's only modest-sensitive). |
 
 If `SCREENS_GOOGLE_CLIENT_ID` is unset, the login page shows a clear
 "sign-in not configured" message instead of crashing.
@@ -255,10 +256,58 @@ Never reuse or skip a number.
 
 ### Signing
 
-For now CI builds **debug-signed** APKs (debug-keystore signature, fine for
-sideload via adb). Proper release signing is a follow-up — add a keystore as
-a repo secret and update `release.yml` to inject it before running
-`assembleModernRelease`.
+For in-app updates to work, every release APK must be signed with the **same**
+key — Android's PackageInstaller refuses to swap in an APK whose signing
+certificate differs from the one already installed. CI auto-detects whether
+a release keystore is configured via secrets and adjusts:
+
+- **No secrets set:** release APKs fall back to debug signing. Fine for adb
+  install on a fresh device, but the in-app updater can't drop a new build
+  onto an existing install — the user has to uninstall and reinstall.
+- **Secrets set:** release APKs are signed with your stable key; the updater
+  works seamlessly.
+
+#### One-time keystore setup
+
+1. Generate the keystore locally (keep `screens-release.jks` safe — without
+   it you can never publish a compatible update for already-installed apps):
+
+   ```bash
+   keytool -genkey -v \
+     -keystore screens-release.jks \
+     -keyalg RSA -keysize 2048 -validity 10000 \
+     -alias screens
+   ```
+
+   It'll ask for a keystore password and a key password. Use the same value
+   for both to keep things simple.
+
+2. Base64-encode the keystore so GitHub Actions can read it from a secret:
+
+   ```bash
+   base64 -w 0 screens-release.jks > screens-release.jks.b64
+   ```
+
+3. Add four repository secrets at
+   [Settings → Secrets and variables → Actions](https://github.com/Ben-Timan-Smartech/screens-app-v2/settings/secrets/actions):
+
+   | Secret name         | Value |
+   |---------------------|-------|
+   | `KEYSTORE_B64`      | contents of `screens-release.jks.b64` |
+   | `KEYSTORE_PASSWORD` | the keystore password from step 1 |
+   | `KEY_ALIAS`         | `screens` |
+   | `KEY_PASSWORD`      | the key password from step 1 |
+
+4. The next release will be signed with this key. Delete the local `.b64`
+   file after upload; keep `screens-release.jks` somewhere durable.
+
+#### One-time pain point
+
+Anything installed **before** the keystore is configured (v0.1.0 and any
+intermediate debug-signed builds) needs to be **uninstalled** first before
+the first properly-signed release will install. Plan one round of
+adb-uninstall + adb-install across the fleet, then every release after that
+self-updates with no touching needed.
 
 ## Things that aren't shipped
 

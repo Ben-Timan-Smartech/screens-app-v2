@@ -7,6 +7,7 @@ import com.smartech.screens.data.DeviceStore
 import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.data.VideoCache
 import com.smartech.screens.sync.HeartbeatWorker
+import com.smartech.screens.update.Updater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,6 +24,8 @@ class ScreensApp : Application() {
         private set
     lateinit var repository: PlayerRepository
         private set
+    lateinit var updater: Updater
+        private set
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -32,6 +35,16 @@ class ScreensApp : Application() {
         val client = ApiClient(tokenProvider = { store.tokenBlocking() })
         val cache = VideoCache(this, client.http)
         repository = PlayerRepository(this, store, client.api, cache, client.http)
+        // Updater shares the OkHttp client (connection pool + interceptors
+        // already configured) and asks the store for the live server URL
+        // each tick — same source of truth as the playlist refresh.
+        updater = Updater(
+            appContext = this,
+            http = client.http,
+            backendBaseUrlProvider = { store.liveServerUrl.first() },
+        )
+        repository.updater = updater
+        updater.start()
 
         runCatching { HeartbeatWorker.schedule(this) }
             .onFailure { Log.e("ScreensApp", "HeartbeatWorker schedule failed", it) }

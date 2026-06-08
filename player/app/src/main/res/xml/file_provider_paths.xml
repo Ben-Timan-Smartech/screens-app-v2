@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Paths exposed by `ScreensFileProvider` (declared in AndroidManifest).
+  Only the downloaded-APK directory is exposed — we don't want random
+  app-internal files leaking to whatever app receives the install
+  intent.
+-->
+<paths>
+    <!-- Matches Updater.kt: APK lands in <filesDir>/updates/. -->
+    <files-path
+        name="updates"
+        path="updates/" />
+</paths>

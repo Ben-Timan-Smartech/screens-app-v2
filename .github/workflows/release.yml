@@ -88,12 +88,34 @@ jobs:
         with:
           gradle-version: '9.4.1'
 
-      - name: Build modern + legacy APKs
+      - name: Decode release keystore (if provided)
+        # Optional — when the KEYSTORE_B64 repo secret is set, decode it
+        # into the spot build.gradle.kts expects. Without it, release
+        # builds fall back to debug signing (works for adb install,
+        # breaks the Updater's "swap APK in place" flow). To enable
+        # proper signing, follow the README → Releasing → Signing
+        # section to generate a keystore and upload the four secrets.
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p player/app/build
+            printf '%s' "$KEYSTORE_B64" | base64 -d > player/app/build/release-keystore.jks
+            echo "Release keystore decoded ($(wc -c < player/app/build/release-keystore.jks) bytes)."
+          else
+            echo "No KEYSTORE_B64 secret — release APKs will be debug-signed (Updater cannot replace them)."
+          fi
+
+      - name: Build modern + legacy release APKs
         working-directory: player
-        run: gradle :app:assembleModernDebug :app:assembleLegacyDebug --no-daemon --stacktrace
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle :app:assembleModernRelease :app:assembleLegacyRelease --no-daemon --stacktrace
 
       - name: Rename APKs with version + flavor for the release
-        # Default names are app-modern-debug.apk / app-legacy-debug.apk
+        # Default names are app-modern-release.apk / app-legacy-release.apk
         # — fine, but readers downloading from the Release page benefit
         # from "screens-player-modern-v0.1.0.apk" so they don't accidentally
         # install yesterday's build.
@@ -101,9 +123,9 @@ jobs:
           set -euo pipefail
           V="${{ steps.ver.outputs.version }}"
           mkdir -p dist
-          cp "player/app/build/outputs/apk/modern/debug/app-modern-debug.apk" \
+          cp "player/app/build/outputs/apk/modern/release/app-modern-release.apk" \
              "dist/screens-player-modern-v${V}.apk"
-          cp "player/app/build/outputs/apk/legacy/debug/app-legacy-debug.apk" \
+          cp "player/app/build/outputs/apk/legacy/release/app-legacy-release.apk" \
              "dist/screens-player-legacy-v${V}.apk"
           ls -lh dist/
 

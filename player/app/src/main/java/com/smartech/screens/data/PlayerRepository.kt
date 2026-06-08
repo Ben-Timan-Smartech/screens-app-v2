@@ -33,6 +33,11 @@ class PlayerRepository(
     val cache: VideoCache,
     val httpClient: okhttp3.OkHttpClient,
 ) {
+    /** Late-bound so ScreensApp can wire Repository ↔ Updater without
+     *  a circular constructor dependency. The CMS "update" command
+     *  delegates to this. Null = updater not set up yet (early
+     *  process boot), in which case we silently no-op. */
+    var updater: com.smartech.screens.update.Updater? = null
     /** Library mirror — pulled from the live server, surfaced to staff overlay. */
     val remoteLibrary: RemoteLibrary = RemoteLibrary(httpClient)
     private var libraryRefreshTickCounter = 0
@@ -567,6 +572,14 @@ class PlayerRepository(
                 store.setLocScreenCode(null)
                 store.setLiveServerUrl(null)
                 LogBuffer.w(TAG, "Unregistered — onboarding will reappear")
+            }
+            "update" -> {
+                // CMS asked us to self-update right now. Updater
+                // handles "already up to date" silently — no overlay
+                // flash if the latest release is what we're running.
+                LogBuffer.i(TAG, "Update command received — checking for newer release")
+                updater?.checkAndUpdate(surfaceFailures = true)
+                    ?: LogBuffer.w(TAG, "Updater not wired — ignoring command")
             }
             else -> LogBuffer.w(TAG, "Unknown command: $command")
         }

@@ -491,6 +491,11 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
             <Card padding={16} style={{ borderColor: 'rgba(185, 28, 28, 0.15)' }}>
               <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 10 }}>Danger zone</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <Button variant="secondary" size="sm" icon={<Icon.download size={12} />} disabled={!canEdit || busy === 'update'}
+                  onClick={() => handleCommand('update', 'Triggered update on')}
+                  style={{ justifyContent: 'flex-start' }}>
+                  {busy === 'update' ? 'Updating…' : 'Update player APK'}
+                </Button>
                 <Button variant="secondary" size="sm" icon={<Icon.refresh size={12} />} disabled={!canEdit || busy === 'reboot'}
                   onClick={() => handleCommand('reboot', 'Reboot')}
                   style={{ justifyContent: 'flex-start' }}>

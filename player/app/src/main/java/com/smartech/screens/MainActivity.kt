@@ -22,6 +22,7 @@ import com.smartech.screens.player.PlayerScreen
 import com.smartech.screens.staff.HoldProgressIndicator
 import com.smartech.screens.staff.OnboardingScreen
 import com.smartech.screens.staff.StaffOverlay
+import com.smartech.screens.update.UpdaterOverlay
 import com.smartech.screens.util.InputMode
 import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -182,6 +183,11 @@ class MainActivity : ComponentActivity() {
                         durationMs = HOLD_THRESHOLD_MS,
                         modifier = Modifier.align(Alignment.TopEnd),
                     )
+
+                    // Self-update overlay — shows during APK download +
+                    // install, and on failure. Painted last so it sits on
+                    // top of everything else (player, staff, onboarding).
+                    UpdaterOverlay(updater = (application as ScreensApp).updater)
                 }
             }
         }

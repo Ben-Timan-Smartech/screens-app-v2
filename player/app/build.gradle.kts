@@ -90,6 +90,29 @@ android {
         jvmTarget = "17"
     }
 
+    // Release signing. CI writes a base64-decoded keystore to
+    //   player/app/build/release-keystore.jks
+    // and exposes the alias + passwords as env vars when the
+    // KEYSTORE_B64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD
+    // secrets are configured. Without those, release builds fall back
+    // to debug signing — APKs still install via adb, but signatures
+    // aren't stable across CI runners, so in-app updates won't work
+    // until proper release signing is configured.
+    val releaseKeystore = file("build/release-keystore.jks").takeIf { it.exists() }
+    val hasReleaseSigning =
+        releaseKeystore != null && System.getenv("KEYSTORE_PASSWORD") != null
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS") ?: "screens"
+                keyPassword = System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -102,7 +125,16 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // NOTE: add signing config in a local `keystore.properties` before shipping.
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                // Fallback so `assembleRelease` still compiles on CI
+                // before secrets are added; produces a debug-signed
+                // release-optimised APK. Useful for early in-house
+                // testing, but the Updater can't drop these onto an
+                // existing install without an uninstall.
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
