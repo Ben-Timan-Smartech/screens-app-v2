@@ -112,7 +112,9 @@ const VideoTile = ({ v, selected, onToggle, onPreview }) => {
           <Thumbnail title={v.title} brand={v.brand} duration={v.duration} />
         )}
 
-        {/* Play overlay */}
+        {/* Play overlay. Icon color is hardcoded #141414 (not var(--ink-0))
+            so the dark-mode token flip doesn't render a white play
+            icon on the white circle background. */}
         {hasMedia && hover && (
           <div style={{
             position: 'absolute', inset: 0,
@@ -124,7 +126,7 @@ const VideoTile = ({ v, selected, onToggle, onPreview }) => {
               width: 48, height: 48, borderRadius: '50%',
               background: 'rgba(255,255,255,0.92)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: 'var(--ink-0)',
+              color: '#141414',
             }}>
               <Icon.play size={20} />
             </div>
@@ -538,105 +540,71 @@ const BrandNavRow = ({ brand, active, onClick }) => (
   </button>
 );
 
-// Upload panel — slide-over on the right when open
-const UploadPanel = ({ open, onClose, files, setFiles }) => {
-  const [dragOver, setDragOver] = React.useState(false);
-  const addFiles = (count = 3) => {
-    const base = files.length;
-    const mock = [
-      { name: 'arc-ultra-hero-v3.mp4', size: '412 MB', progress: 100, brand: 'SONOS', product: 'Arc' },
-      { name: 'era-300-spatial-loop.mp4', size: '286 MB', progress: 72, brand: 'SONOS', product: 'Era 300' },
-      { name: 'sub-mini-bassline-d.mp4', size: '198 MB', progress: 34, brand: '', product: '' },
-    ];
-    setFiles([...files, ...mock.slice(0, count)].map((f, i) => ({ ...f, id: base + i })));
-  };
-  return (
-    <div style={{
-      position: 'absolute', top: 0, right: 0, bottom: 0,
-      width: open ? 420 : 0,
-      background: 'var(--ink-10)', borderLeft: open ? 'var(--border)' : 'none',
-      overflow: 'hidden',
-      transition: 'width .2s ease',
-      display: 'flex', flexDirection: 'column',
-    }}>
-      <div style={{ width: 420, display: 'flex', flexDirection: 'column', height: '100%' }}>
-        <div style={{ display: 'flex', alignItems: 'center', padding: '14px 20px', borderBottom: 'var(--border)' }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink-1)' }}>Upload content</div>
-            <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>Files sync to Drive automatically</div>
+// Upload panel — slide-over on the right when open.
+//
+// In-CMS upload isn't built yet (the previous mockup mutated a local
+// state array with hardcoded fake files; nothing went anywhere). For
+// now we tell the user how to actually add content via Drive Sync.
+// Brand content lives in the shared Drive folder; dropping a file
+// in there + running Settings → Drive Sync → Sync now is the real
+// workflow. This panel becomes a real uploader once the
+// /api/library/upload endpoint ships.
+const UploadPanel = ({ open, onClose }) => (
+  <div style={{
+    position: 'absolute', top: 0, right: 0, bottom: 0,
+    width: open ? 420 : 0,
+    background: 'var(--ink-10)', borderLeft: open ? 'var(--border)' : 'none',
+    overflow: 'hidden',
+    transition: 'width .2s ease',
+    display: 'flex', flexDirection: 'column',
+  }}>
+    <div style={{ width: 420, display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'center', padding: '14px 20px', borderBottom: 'var(--border)' }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink-1)' }}>Upload content</div>
+          <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>Coming soon</div>
+        </div>
+        <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} />
+      </div>
+      <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
+        <div style={{
+          border: 'var(--border)', borderRadius: 10, padding: 18,
+          background: 'var(--ink-9)', marginBottom: 16,
+        }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 6 }}>
+            In-CMS uploads aren't ready yet
           </div>
-          <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} />
+          <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.55 }}>
+            Until they ship, add brand content the same way you always have:
+            drop the file into the shared Drive folder, then run a sync.
+          </div>
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
-          <div
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e) => { e.preventDefault(); setDragOver(false); addFiles(2); }}
-            onClick={() => addFiles(3)}
-            style={{
-              border: `1.5px dashed ${dragOver ? 'var(--ink-1)' : 'var(--ink-6)'}`,
-              borderRadius: 10, padding: 24,
-              background: dragOver ? 'var(--ink-8)' : 'var(--ink-9)',
-              textAlign: 'center', cursor: 'pointer', marginBottom: 20,
-            }}>
-            <div style={{ display: 'inline-flex', width: 40, height: 40, borderRadius: 10, background: 'var(--ink-10)', border: 'var(--border)', alignItems: 'center', justifyContent: 'center', color: 'var(--ink-2)', marginBottom: 10 }}>
-              <Icon.upload size={18} />
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 2 }}>Drop video files here</div>
-            <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>or click to browse · MP4, MOV · 500 MB max</div>
-          </div>
-
-          {files.length > 0 && (
-            <>
-              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
-                <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-2)', flex: 1 }}>Queue · {files.length} file{files.length > 1 ? 's' : ''}</div>
-                <Button variant="ghost" size="sm">Apply to all</Button>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {files.map((f) => (
-                  <div key={f.id} style={{ border: 'var(--border)', borderRadius: 8, padding: 12, background: 'var(--ink-10)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                      <div style={{ width: 28, height: 28, borderRadius: 5, background: 'var(--ink-8)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--ink-2)' }}>
-                        <Icon.video size={13} />
-                      </div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</div>
-                        <div style={{ fontSize: 11, color: 'var(--ink-4)' }} className="tnum">{f.size} · {f.progress === 100 ? 'complete' : `${f.progress}%`}</div>
-                      </div>
-                      {f.progress === 100 ? <Icon.check size={14} /> : <Button variant="ghost" size="sm" icon={<Icon.close size={12} />} />}
-                    </div>
-                    <div style={{ height: 3, background: 'var(--ink-8)', borderRadius: 2, overflow: 'hidden', marginBottom: 10 }}>
-                      <div style={{ width: `${f.progress}%`, height: '100%', background: f.progress === 100 ? 'var(--ok)' : 'var(--ink-1)', transition: 'width .4s' }} />
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', height: 28, padding: '0 8px', border: 'var(--border-strong)', borderRadius: 5, fontSize: 12, color: f.brand ? 'var(--ink-1)' : 'var(--ink-4)' }}>
-                        <span style={{ flex: 1 }}>{f.brand || 'Brand…'}</span>
-                        <Icon.chevD size={11} />
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', height: 28, padding: '0 8px', border: 'var(--border-strong)', borderRadius: 5, fontSize: 12, color: f.product ? 'var(--ink-1)' : 'var(--ink-4)' }}>
-                        <span style={{ flex: 1 }}>{f.product || 'Product (optional)…'}</span>
-                        <Icon.chevD size={11} />
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
+        <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+          How to add a video today
         </div>
+        <ol style={{ fontSize: 12, color: 'var(--ink-2)', lineHeight: 1.6, paddingLeft: 18, margin: 0 }}>
+          <li>Open the Brand Content folder in Google Drive.</li>
+          <li>Drop the new MP4 / MOV into the brand subfolder it belongs to.</li>
+          <li>Back here, go to <strong>Settings → Drive Sync</strong> and click <strong>Sync now</strong>.</li>
+          <li>The video shows up in the library within ~1 minute.</li>
+        </ol>
 
-        <div style={{ padding: '14px 20px', borderTop: 'var(--border)', display: 'flex', gap: 8, alignItems: 'center' }}>
-          <div style={{ flex: 1, fontSize: 11, color: 'var(--ink-4)' }}>
-            {files.filter(f => f.progress === 100).length} of {files.length} complete
-          </div>
-          <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" size="sm" disabled={files.length === 0}>Save & tag</Button>
+        <div style={{ marginTop: 18 }}>
+          <Button variant="secondary" size="sm" icon={<Icon.sync size={12} />} onClick={() => { onClose(); navigate('/settings#drive-sync'); }}>
+            Open Drive Sync
+          </Button>
         </div>
       </div>
+      <div style={{ padding: '14px 20px', borderTop: 'var(--border)', display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ flex: 1, fontSize: 11, color: 'var(--ink-4)' }}>
+          We'll wire real uploads once the server endpoint lands.
+        </div>
+        <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
+      </div>
     </div>
-  );
-};
+  </div>
+);
 
 const ContentLibrary = () => {
   // 'all' = show every brand. Otherwise, brand id (e.g. 'sonos').
@@ -660,10 +628,6 @@ const ContentLibrary = () => {
   const targetScreen = targetDeviceId
     ? live.screens?.find((s) => s.deviceId === targetDeviceId)
     : null;
-  const [files, setFiles] = React.useState([
-    { id: 0, name: 'arc-ultra-hero-v3.mp4', size: '412 MB', progress: 100, brand: 'SONOS', product: 'Arc' },
-    { id: 1, name: 'era-300-spatial-loop.mp4', size: '286 MB', progress: 72, brand: 'SONOS', product: 'Era 300' },
-  ]);
 
   const toggle = (id) => {
     const n = new Set(selected);
@@ -703,7 +667,9 @@ const ContentLibrary = () => {
               <Icon.drive size={13} />
               <span>Drive synced · 2 min ago</span>
             </div>
-            <Button variant="secondary" size="sm" icon={<Icon.filter size={12} />}>Filters</Button>
+            {/* Filters button removed in v0.1.6 — filtering wasn't wired up
+                and was confusing users. Restore when there's real filter
+                logic to expose. */}
             <Button variant="primary" size="sm" icon={<Icon.upload size={13} />} onClick={() => setUploadOpen(true)}>Upload content</Button>
           </>
         }
@@ -864,7 +830,9 @@ const ContentLibrary = () => {
             <span style={{ fontSize: 12, fontWeight: 500 }} className="tnum">{selected.size} selected</span>
             <span style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.18)' }} />
             <button onClick={() => setSelected(new Set())} style={{ fontSize: 12, color: 'rgba(250,250,250,0.7)', padding: '4px 6px' }}>Clear</button>
-            <button style={{ fontSize: 12, color: 'rgba(250,250,250,0.7)', padding: '4px 6px' }}>Add to schedule</button>
+            {/* "Add to schedule" removed in v0.1.6 — scheduling lands in
+                v0.1.7. Hidden rather than disabled to keep the action bar
+                short. */}
             <button
               onClick={async () => {
                 // Direct path when scoped to one screen — no multi-screen picker.
@@ -903,7 +871,7 @@ const ContentLibrary = () => {
           </div>
         )}
 
-        <UploadPanel open={uploadOpen} onClose={() => setUploadOpen(false)} files={files} setFiles={setFiles} />
+        <UploadPanel open={uploadOpen} onClose={() => setUploadOpen(false)} />
         <PreviewModal video={previewVideo} onClose={() => setPreviewVideo(null)} />
         {pushPickerOpen && (
           <PushPicker

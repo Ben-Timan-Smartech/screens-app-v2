@@ -222,11 +222,22 @@ const useActivity = () => {
 const useLibrary = () => {
   const [version, setVersion] = React.useState(0);
   const lastSigRef = React.useRef('');
+  // Server-issued ETag we send back as If-None-Match so the next poll
+  // returns 304 + zero body when the library hasn't changed. Without
+  // this we re-download ~450 kB every 60 s.
+  const etagRef = React.useRef(null);
   React.useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       try {
-        const res = await fetch('/api/library', { cache: 'no-store' });
+        const headers = {};
+        if (etagRef.current) headers['If-None-Match'] = etagRef.current;
+        const res = await fetch('/api/library', { cache: 'no-store', headers });
+        // 304 means the library is unchanged since the last successful
+        // fetch — fast-path out, no parse, no rerender.
+        if (res.status === 304) return;
+        const newEtag = res.headers.get('ETag');
+        if (newEtag) etagRef.current = newEtag;
         const body = await res.json();
         const videos = Array.isArray(body.videos) ? body.videos : [];
         const brands = Array.isArray(body.brands) ? body.brands : [];
@@ -250,7 +261,10 @@ const useLibrary = () => {
       }
     };
     tick();
-    const id = setInterval(tick, 10000);
+    // 60 s instead of 10 s. The library changes only when Drive Sync
+    // runs (daily background scan + on-demand from Settings); polling
+    // every 10 s burned ~150 MB/h on every open tab.
+    const id = setInterval(tick, 60000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
   return version;

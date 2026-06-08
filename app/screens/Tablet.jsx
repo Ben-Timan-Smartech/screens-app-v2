@@ -1,21 +1,11 @@
 /* eslint-disable */
-// On-tablet staff UI — landscape 1920×1080.
-// Flow: PIN (left rail) → brand search & grid → video picker → success.
-
-// ─────────────────────────────────────────────────────────────
-// Extended brand list so search actually has something to filter.
-// ─────────────────────────────────────────────────────────────
-const TABLET_BRANDS = [
-  ...MOCK_BRANDS,
-  { id: 'samsung', name: 'Samsung', videos: 96 },
-  { id: 'lg', name: 'LG', videos: 61 },
-  { id: 'apple', name: 'Apple', videos: 44 },
-  { id: 'dyson', name: 'Dyson', videos: 38 },
-  { id: 'nespresso', name: 'Nespresso', videos: 27 },
-  { id: 'theragun', name: 'Theragun', videos: 19 },
-  { id: 'ninja', name: 'Ninja', videos: 31 },
-  { id: 'garmin', name: 'Garmin', videos: 24 },
-];
+// On-tablet staff UI — landscape 1920×1080. Static preview of the
+// staff overlay's PIN → brand picker → video picker → success flow.
+// Renders against the live MOCK_BRANDS / MOCK_VIDEOS arrays so the
+// brand grid matches what staff actually see on a tablet right now;
+// nothing on this page persists — picking a video here doesn't push
+// to any real screen. The real on-tablet overlay lives in the
+// Android app's `staff/` package.
 
 // ─────────────────────────────────────────────────────────────
 // Left rail — store brand + session identity, shared across stages
@@ -36,7 +26,7 @@ const TabletRail = ({ stage, brand, staff = 'Floor staff', step }) => (
       }}>S</div>
       <div>
         <div style={{ fontSize: 16, fontWeight: 500, letterSpacing: -0.2 }}>Screens</div>
-        <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.55)' }}>Saks Fifth Avenue</div>
+        <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.55)' }}>Preview — static demo</div>
       </div>
     </div>
 
@@ -69,8 +59,7 @@ const TabletRail = ({ stage, brand, staff = 'Floor staff', step }) => (
       </div>
 
       <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginTop: 28, lineHeight: 1.6 }}>
-        {staff === 'Floor staff' ? 'Tablet 14 · Ground floor · Sonos zone' : staff}
-        <br />Need help? Call your manager on 6042
+        On the real tablet this rail shows the screen's location and a "Cancel" button to dismiss the staff overlay.
       </div>
     </div>
   </aside>
@@ -131,7 +120,14 @@ const TabletPin = ({ onUnlock }) => {
 // ─────────────────────────────────────────────────────────────
 const TabletBrandPicker = ({ onBack, onPick }) => {
   const [q, setQ] = React.useState('');
-  const filtered = TABLET_BRANDS.filter((b) =>
+  // Sort alphabetically and filter against the live library mirror —
+  // every brand the CMS knows about shows up here, exactly like on
+  // the real tablet's staff overlay.
+  const brands = React.useMemo(
+    () => [...(window.MOCK_BRANDS || [])].sort((a, b) => a.name.localeCompare(b.name)),
+    [],
+  );
+  const filtered = brands.filter((b) =>
     b.name.toLowerCase().includes(q.toLowerCase())
   );
   return (
@@ -289,9 +285,9 @@ const TabletSuccess = ({ video, brand }) => (
         <div style={{ fontSize: 18, color: 'var(--ink-3)' }}>{video?.title || 'Arc Ultra \u2014 hero reveal'}</div>
       </div>
       <div style={{ width: 440, aspectRatio: '16/9', borderRadius: 14, overflow: 'hidden' }}>
-        <Thumbnail title={video?.title || 'Arc Ultra \u2014 hero reveal'} brand={video?.brand || brand?.name || 'SONOS'} />
+        <Thumbnail title={video?.title || ''} brand={video?.brand || brand?.name || ''} />
       </div>
-      <div style={{ fontSize: 13, color: 'var(--ink-4)' }}>Session ends in 15s</div>
+      <div style={{ fontSize: 13, color: 'var(--ink-4)' }}>Preview resets in a few seconds</div>
     </div>
   </div>
 );

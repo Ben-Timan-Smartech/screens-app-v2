@@ -1276,7 +1276,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/library":
-            self._send_json(_load_library())
+            # Library responses are ~450 kB on a typical fleet
+            # (1,300+ videos). The CMS polls this every 30 s; without
+            # an ETag every poll re-downloads the full payload even
+            # when nothing's changed. ETag keyed on the library file's
+            # mtime — Drive Sync bumps that on every scan, which is
+            # exactly when the response actually changes.
+            data = _load_library()
+            etag = f'"lib-{int(_LIBRARY_CACHE.get("mtime") or 0)}"'
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "no-store")
+                self._cors_headers()
+                self.end_headers()
+                return
+            self._send_json(data, extra_headers=[("ETag", etag)])
             return
 
         if path == "/api/library/info":

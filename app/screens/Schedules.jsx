@@ -49,6 +49,14 @@ const TemplateCard = ({ icon, title, desc, active, onClick }) => (
   </button>
 );
 
+// Schedules page — feature isn't wired to the backend yet (the mock
+// list + create flow below is a visual preview only). v0.1.7 lands
+// real scheduling: time-of-day windows, day-of-week recurrence,
+// seasonal takeovers, plus a blackout mode that mutes audio or
+// hides content during specific hours.
+//
+// Keeping the preview below the coming-soon banner so admins can
+// see what's coming and we don't waste the design work.
 const Schedules = ({ initialMode = 'list' }) => {
   const [mode, setMode] = React.useState(initialMode); // 'list' | 'create'
   const [template, setTemplate] = React.useState('seasonal');
@@ -56,23 +64,24 @@ const Schedules = ({ initialMode = 'list' }) => {
   return (
     <AppShell current="schedules">
       <PageHeader
-        title={mode === 'list' ? 'Schedules' : 'New schedule'}
-        subtitle={mode === 'list' ? '6 schedules · 3 active · 2 upcoming' : undefined}
-        crumbs={mode === 'create' ? [{ label: 'Schedules', href: '/schedules' }, 'New schedule'] : undefined}
-        actions={
-          mode === 'list' ? (
-            <>
-              <Button variant="secondary" size="sm" icon={<Icon.filter size={12} />}>Status</Button>
-              <Button variant="primary" size="sm" icon={<Icon.plus size={13} />} onClick={() => { setMode('create'); navigate('/schedules/new'); }}>New schedule</Button>
-            </>
-          ) : (
-            <>
-              <Button variant="ghost" size="sm" onClick={() => { setMode('list'); navigate('/schedules'); }}>Cancel</Button>
-              <Button variant="primary" size="sm">Save schedule</Button>
-            </>
-          )
-        }
+        title="Schedules"
+        subtitle="Coming in v0.1.7 — time-of-day playlists + blackout windows"
+        actions={null}
       />
+
+      <div style={{
+        margin: '20px',
+        padding: '14px 18px',
+        border: '1px solid rgba(232, 163, 61, 0.35)',
+        background: 'rgba(232, 163, 61, 0.08)',
+        borderRadius: 10,
+        display: 'flex', alignItems: 'flex-start', gap: 12,
+      }}>
+        <span style={{ color: 'var(--warn, #B26B0F)', marginTop: 1 }}><Icon.warning size={16} /></span>
+        <div style={{ flex: 1, fontSize: 12.5, color: 'var(--ink-2)', lineHeight: 1.55 }}>
+          <strong style={{ color: 'var(--ink-1)' }}>Preview only.</strong> The form below shows what the scheduling UI will look like, but it doesn't save anywhere yet. For now, use the playlist editor on each screen's detail page; scheduling lands in v0.1.7.
+        </div>
+      </div>
       {mode === 'list' ? (
         <div style={{ flex: 1, overflow: 'auto' }}>
           <div style={{ padding: '14px 20px 10px', display: 'flex', gap: 16, fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, borderBottom: 'var(--border)' }}>

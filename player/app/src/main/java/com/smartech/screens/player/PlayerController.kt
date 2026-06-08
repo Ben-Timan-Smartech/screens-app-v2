@@ -206,6 +206,18 @@ class PlayerController(context: Context) {
         }
     }
 
+    /** True when the current queue item is the bundled / remote splash
+     *  rather than a real playlist video. Used by [PlaybackWatchdog]
+     *  to scope recovery actions: a hiccup during splash never
+     *  warrants restarting the activity. */
+    fun isOnSplash(): Boolean {
+        val source = currentSource
+        if (source == Source.SPLASH) return true
+        // mix-splash mode: queue is [splash, item1, item2…]. Check the
+        // current media item's id directly.
+        return player.currentMediaItem?.mediaId == Source.SPLASH
+    }
+
     fun release() {
         player.release()
     }
