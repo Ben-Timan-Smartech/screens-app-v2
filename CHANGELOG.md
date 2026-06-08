@@ -18,6 +18,39 @@ Rules:
 
 ---
 
+## v0.1.5
+
+State that actually survives the things that used to wipe it.
+
+- **CMS no longer forgets every screen's playlist on deploy.** Per-screen
+  state (playlist, audio toggle, splash-mix toggle, pending commands)
+  and the device registry now persist to `/data/per_screen.json` and
+  `/data/screens.json` on the FUSE-mounted bucket. Cloud Run redeploys
+  on every merge to `main`; previously each redeploy cleared the
+  in-memory dict and every tablet polled back as "no content."
+- **Tablets remember their last playlist across reboots and updates.**
+  Every successful playlist publish saves a copy to DataStore. On cold
+  boot the player rehydrates immediately from local cache — no more
+  splash flicker between launch and the first `/api/state` response,
+  and a tablet that boots offline keeps playing what was last on it.
+- **Empty server responses no longer drop the tablet to splash.** If
+  the server returns an empty playlist at a revision ≤ what the tablet
+  last applied (the "the server lost its state" signature), the tablet
+  keeps playing what it has. Genuine "clear this screen" actions from
+  the CMS arrive with a fresh forward-going revision and still take
+  effect.
+- **"Screen ID — demo (no backend)"** in the staff overlay was always
+  misleading on live-mode tablets — the legacy field it referenced
+  never got populated. Now shows the human-readable **screen code**
+  from onboarding; the device ID row above still shows the
+  server-side identifier.
+- **Network test now checks the CMS first.** A new "CMS reachability"
+  panel at the top of the diagnostics view confirms the tablet can
+  actually reach `screens.smartechworld.com` (or your configured URL),
+  with HTTP status + round-trip time. Cloudflare throughput remains
+  below — useful but secondary, since corporate networks routinely
+  allow general internet while firewalling Cloud Run.
+
 ## v0.1.4
 
 Sound on the screens, plus the splash finally lands on 4K.

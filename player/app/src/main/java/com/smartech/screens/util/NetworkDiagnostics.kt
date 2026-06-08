@@ -33,11 +33,21 @@ object NetworkDiagnostics {
 
     enum class Phase(val label: String) {
         LINK("Reading link info"),
+        SERVER("Checking CMS reachability"),
         LATENCY("Testing latency"),
         DOWNLOAD("Testing download"),
         UPLOAD("Testing upload"),
         DONE("Done"),
     }
+
+    /** CMS-reachability probe result. Null = no liveServerUrl configured. */
+    data class ServerProbe(
+        val url: String,
+        val reachable: Boolean,
+        val httpStatus: Int?,        // null if the request never got a response (timeout, DNS, etc.)
+        val latencyMs: Long?,        // round-trip time of the GET, only set on success
+        val errorMessage: String?,   // populated when reachable=false
+    )
 
     data class Result(
         val connectionType: ConnectionType,
@@ -47,6 +57,7 @@ object NetworkDiagnostics {
         val deviceIp: String?,
         val gatewayIp: String?,
         val macAddress: String?,
+        val server: ServerProbe?,               // null when liveServerUrl isn't set
         val latencyMs: Long?,                   // mean of successful probes
         val packetLossPct: Float?,              // 0..100
         val downloadMbps: Double?,              // megabits per second
@@ -64,6 +75,7 @@ object NetworkDiagnostics {
     suspend fun run(
         context: Context,
         client: OkHttpClient,
+        serverUrl: String? = null,
         onPhase: (Phase) -> Unit = {},
     ): Result = withContext(Dispatchers.IO) {
         android.util.Log.i("NetDiag", "Diagnostic run started")
@@ -89,19 +101,33 @@ object NetworkDiagnostics {
             LinkInfo(ConnectionType.UNKNOWN, null, null, null, null, null, false)
         }
 
-        // ── 2. Latency + packet loss ────────────────────────────────
+        // ── 2. CMS reachability ──────────────────────────────────────
+        // Done before the generic Cloudflare probes because the
+        // top-line question for staff is "can this tablet talk to the
+        // CMS?" — Cloudflare being reachable doesn't answer it (corporate
+        // networks often allow general internet but firewall Cloud Run).
+        onPhase(Phase.SERVER)
+        val serverProbe = serverUrl?.takeIf { it.isNotBlank() }?.let {
+            android.util.Log.i("NetDiag", "Probing CMS at $it...")
+            probeServer(probeClient, it.trimEnd('/'))
+        }
+        if (serverProbe != null && !serverProbe.reachable) {
+            errors.add("CMS unreachable: ${serverProbe.errorMessage ?: "unknown"}")
+        }
+
+        // ── 3. Latency + packet loss ────────────────────────────────
         onPhase(Phase.LATENCY)
         android.util.Log.i("NetDiag", "Measuring latency...")
         val (latencyMs, lossPct, latencyErr) = measureLatency(probeClient)
         latencyErr?.let(errors::add)
 
-        // ── 3. Download throughput ──────────────────────────────────
+        // ── 4. Download throughput ──────────────────────────────────
         onPhase(Phase.DOWNLOAD)
         android.util.Log.i("NetDiag", "Measuring download...")
         val (down, downErr) = measureDownload(probeClient)
         downErr?.let(errors::add)
 
-        // ── 4. Upload throughput ────────────────────────────────────
+        // ── 5. Upload throughput ────────────────────────────────────
         onPhase(Phase.UPLOAD)
         android.util.Log.i("NetDiag", "Measuring upload...")
         val (up, upErr) = measureUpload(probeClient)
@@ -118,12 +144,47 @@ object NetworkDiagnostics {
             deviceIp = link.deviceIp,
             gatewayIp = link.gatewayIp,
             macAddress = link.macAddress,
+            server = serverProbe,
             latencyMs = latencyMs,
             packetLossPct = lossPct,
             downloadMbps = down,
             uploadMbps = up,
             ssidPermissionMissing = link.ssidPermissionMissing,
             errors = errors,
+        )
+    }
+
+    /** Three sequential GETs to /api/release/latest — a cheap public
+     *  endpoint that every CMS deployment exposes. Returns the median
+     *  RTT and the HTTP status of the last response. */
+    private fun probeServer(client: OkHttpClient, base: String): ServerProbe {
+        val url = "$base/api/release/latest"
+        val rtts = mutableListOf<Long>()
+        var lastStatus: Int? = null
+        var lastError: String? = null
+        repeat(3) {
+            val req = Request.Builder().url(url).get().build()
+            val started = System.nanoTime()
+            try {
+                client.newCall(req).execute().use { r ->
+                    lastStatus = r.code
+                    if (r.isSuccessful) {
+                        rtts += (System.nanoTime() - started) / 1_000_000
+                    } else {
+                        lastError = "HTTP ${r.code}"
+                    }
+                }
+            } catch (t: Throwable) {
+                lastError = "${t.javaClass.simpleName}: ${t.message ?: "no message"}"
+            }
+        }
+        val median = rtts.takeIf { it.isNotEmpty() }?.sorted()?.let { it[it.size / 2] }
+        return ServerProbe(
+            url = url,
+            reachable = median != null,
+            httpStatus = lastStatus,
+            latencyMs = median,
+            errorMessage = if (median == null) lastError else null,
         )
     }
 

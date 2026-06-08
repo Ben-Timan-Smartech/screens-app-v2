@@ -88,6 +88,18 @@ class ScreensApp : Application() {
             }.onFailure { Log.w("ScreensApp", "URL maintenance skipped", it) }
         }
 
+        // Rehydrate the last-known-good playlist from DataStore before
+        // any network call lands. Two reasons:
+        //   1. Offline boot keeps showing the previous content instead
+        //      of dropping to the bundled splash.
+        //   2. Cold start with internet still avoids the ~5 s splash
+        //      flicker between activity creation and the first
+        //      /api/state response.
+        scope.launch {
+            runCatching { repository.rehydrateFromCache() }
+                .onFailure { Log.w("ScreensApp", "Playlist rehydrate failed", it) }
+        }
+
         // Live LAN demo: continuously poll /api/state and fire heartbeats.
         // No-op when no liveServerUrl is configured — the loop just calls
         // refreshPlaylist which falls through to demo mode.

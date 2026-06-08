@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.util.NetworkDiagnostics
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 private val Ink      = Color(0xFF141414)
@@ -83,7 +84,16 @@ fun NetworkTestScreen(
         result = null
         scope.launch {
             try {
-                val r = NetworkDiagnostics.run(ctx, repository.httpClient) { phase = it }
+                // Read the configured CMS URL once per run so the test can
+                // probe the actual backend the player polls — not just
+                // generic-internet endpoints. Null URL → ServerPanel
+                // renders an explicit "not configured" state.
+                val serverUrl = runCatching { repository.store.liveServerUrl.first() }.getOrNull()
+                val r = NetworkDiagnostics.run(
+                    ctx,
+                    repository.httpClient,
+                    serverUrl = serverUrl,
+                ) { phase = it }
                 result = r
             } catch (t: Throwable) {
                 android.util.Log.e("NetTestUI", "Diagnostics failed", t)
@@ -112,8 +122,9 @@ fun NetworkTestScreen(
                 Text("Network test", color = Bone, fontSize = 30.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    "Latency, packet loss, download / upload throughput, and link details. " +
-                        "Uses Cloudflare's public speed-test endpoints.",
+                    "Confirms the tablet can reach the CMS, then measures latency, " +
+                        "packet loss, and download / upload throughput. " +
+                        "Throughput uses Cloudflare's public speed-test endpoints.",
                     color = Color(0x99FFFFFF), fontSize = 14.sp,
                 )
 
@@ -146,6 +157,11 @@ fun NetworkTestScreen(
                 Text("Cancel", color = Muted, fontSize = 16.sp,
                     modifier = Modifier.clickable { onCancel() }.padding(8.dp))
             }
+
+            // Top panel: can the tablet talk to the CMS? Rendered first because
+            // it's the most actionable result — Cloudflare being reachable
+            // doesn't tell staff anything useful if the CMS is firewalled.
+            ServerPanel(result = result, running = running, phase = phase)
 
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Box(Modifier.weight(1f)) {
@@ -279,6 +295,85 @@ fun ThroughputPanel(result: NetworkDiagnostics.Result?, running: Boolean) {
                 r.uploadMbps?.let { "${"%.1f".format(it)} Mbps" } ?: "—",
                 valueColor = r.uploadMbps?.let { upColor(it) } ?: Muted,
             )
+        }
+    }
+}
+
+/**
+ * CMS-reachability panel. The first thing staff should see — answers
+ * "is this tablet actually able to talk to its server?" without making
+ * them parse Cloudflare throughput numbers first.
+ *
+ * States:
+ *   • Server URL not configured → orange "no server set" state, points
+ *     the user at the Configuration card to set it.
+ *   • Probe in flight → "Checking…" with the URL.
+ *   • Reachable → green dot, HTTP status, latency.
+ *   • Unreachable → red dot, error message.
+ */
+@Composable
+fun ServerPanel(
+    result: NetworkDiagnostics.Result?,
+    running: Boolean,
+    phase: NetworkDiagnostics.Phase?,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White)
+            .border(1.dp, BoneLine, RoundedCornerShape(12.dp))
+            .padding(20.dp),
+    ) {
+        Text("CMS reachability", color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(14.dp))
+
+        val server = result?.server
+        when {
+            // No completed run yet AND we're currently in the SERVER phase.
+            running && phase == NetworkDiagnostics.Phase.SERVER && result == null ->
+                Text("Probing the CMS…", color = Muted, fontSize = 13.sp)
+            running && result == null ->
+                Text("Queued — waiting for earlier phases", color = Muted, fontSize = 13.sp)
+            result == null ->
+                Text("—", color = Muted, fontSize = 13.sp)
+            server == null -> {
+                // The run completed but no liveServerUrl was configured.
+                // Don't show this as a network failure — it's a config gap.
+                StatLine("Server URL", "Not configured", valueColor = Warn)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Set the server URL in Device admin → Configuration before testing reachability.",
+                    color = Muted, fontSize = 12.sp,
+                )
+            }
+            else -> {
+                StatLine(
+                    "Status",
+                    if (server.reachable) "Reachable" else "Unreachable",
+                    valueColor = if (server.reachable) Ok else Err,
+                )
+                StatLine("URL", server.url)
+                StatLine(
+                    "HTTP",
+                    server.httpStatus?.toString() ?: "—",
+                    valueColor = when (server.httpStatus) {
+                        in 200..299 -> Ok
+                        in 300..399 -> Warn
+                        null -> Err
+                        else -> Err
+                    },
+                )
+                StatLine(
+                    "Round-trip",
+                    server.latencyMs?.let { "${it} ms" } ?: "—",
+                    valueColor = server.latencyMs?.let { latencyColor(it) } ?: Muted,
+                )
+                if (!server.reachable && server.errorMessage != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(server.errorMessage, color = Err, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                }
+            }
         }
     }
 }
