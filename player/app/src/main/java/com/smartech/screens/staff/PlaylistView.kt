@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -77,6 +78,7 @@ fun PlaylistView(
     // for the bytes to land.
     val canonicalItems by repository.intendedPlaylist.collectAsState()
     val downloads by repository.downloads.collectAsState()
+    val failures by repository.downloadFailures.collectAsState()
     // Local override so deletes feel instant — clears as soon as the live
     // poll catches up to the new server revision.
     var pendingItems by remember { mutableStateOf<List<VideoItem>?>(null) }
@@ -211,10 +213,23 @@ fun PlaylistView(
                     items(items.size) { i ->
                         val v = items[i]
                         val progress = downloads[v.id]
+                        // Status derives from three signals: in-flight
+                        // downloads, recent failures, and what's on
+                        // disk. The cache check isn't reactive on its
+                        // own, but it re-runs every time downloads or
+                        // failures change (which is exactly when the
+                        // file state flips), so the badge stays in
+                        // sync without polling.
+                        val failed = v.id in failures
+                        val cached = remember(downloads, failures) {
+                            repository.cache.has(v.id)
+                        }
                         PlaylistRow(
                             index = i + 1,
                             video = v,
                             progress = progress,
+                            cached = cached,
+                            failed = failed,
                             canMoveUp = i > 0,
                             canMoveDown = i < items.size - 1,
                             onMoveUp = { moveItem(i, i - 1) },
@@ -315,6 +330,8 @@ private fun PlaylistRow(
     index: Int,
     video: VideoItem,
     progress: PlayerRepository.DownloadProgress? = null,
+    cached: Boolean = false,
+    failed: Boolean = false,
     canMoveUp: Boolean = false,
     canMoveDown: Boolean = false,
     onMoveUp: () -> Unit = {},
@@ -336,6 +353,12 @@ private fun PlaylistRow(
                 color = Muted, fontSize = 14.sp, fontFamily = FontFamily.Monospace,
                 modifier = Modifier.width(28.dp),
             )
+            DownloadStatusBadge(
+                downloading = downloading,
+                cached = cached,
+                failed = failed,
+            )
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(video.title, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium)
                 Text(
@@ -366,6 +389,64 @@ private fun PlaylistRow(
         if (downloading) {
             Spacer(Modifier.height(10.dp))
             DownloadProgressStrip(progress!!)
+        }
+    }
+}
+
+/**
+ * Status badge for the leading edge of each playlist row. Three states
+ * mapped to one shape so the rows scan cleanly down the list:
+ *   • **Cached** → solid green disc with a tick
+ *   • **Downloading** (or not yet attempted) → spinner
+ *   • **Failed** → solid red disc with an ✕
+ *
+ * State priority is failed > cached > downloading. A video that failed
+ * once but has bytes on disk from a previous successful download still
+ * reads as cached — but if it last failed, the operator sees the X
+ * even if the file is technically present (probably truncated).
+ */
+@Composable
+private fun DownloadStatusBadge(
+    downloading: Boolean,
+    cached: Boolean,
+    failed: Boolean,
+) {
+    val size = 24.dp
+    val ok    = Color(0xFF1E7A3D)   // green
+    val err   = Color(0xFFA63824)   // same red as the × button
+    val ring  = BoneSoft
+    Box(
+        Modifier.size(size),
+        contentAlignment = Alignment.Center,
+    ) {
+        when {
+            failed -> Box(
+                Modifier
+                    .size(size)
+                    .clip(CircleShape)
+                    .background(err),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("✕", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+            cached -> Box(
+                Modifier
+                    .size(size)
+                    .clip(CircleShape)
+                    .background(ok),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("✓", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
+            else -> {
+                // Downloading OR pending — both render as a spinner.
+                CircularProgressIndicator(
+                    modifier = Modifier.size(size - 4.dp),
+                    strokeWidth = 2.dp,
+                    color = Ink,
+                    trackColor = ring,
+                )
+            }
         }
     }
 }

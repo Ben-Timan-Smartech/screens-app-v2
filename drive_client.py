@@ -218,6 +218,37 @@ def get_metadata(file_id: str) -> dict:
     ).execute()
 
 
+# Cached service-account credentials for the streaming path. The
+# google-api-python-client Service object holds its own credentials,
+# but we need raw access to the Bearer token for urllib calls — see
+# stream_file's docstring. Refreshed on demand.
+_streaming_creds = None
+_streaming_creds_lock = threading.Lock()
+
+
+def _streaming_token() -> str:
+    """Return a valid Bearer token for Drive read access. Refreshes
+    silently when the cached token is near expiry."""
+    global _streaming_creds
+    from google.oauth2 import service_account
+    from google.auth.transport import requests as ga_requests
+
+    with _streaming_creds_lock:
+        if _streaming_creds is None:
+            creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if not creds_path or not os.path.isfile(creds_path):
+                raise RuntimeError(
+                    f"GOOGLE_APPLICATION_CREDENTIALS not set or file missing: {creds_path!r}"
+                )
+            _streaming_creds = service_account.Credentials.from_service_account_file(
+                creds_path,
+                scopes=["https://www.googleapis.com/auth/drive.readonly"],
+            )
+        if not _streaming_creds.valid:
+            _streaming_creds.refresh(ga_requests.Request())
+        return _streaming_creds.token
+
+
 def stream_file(
     file_id: str,
     range_header: Optional[str] = None,
@@ -225,43 +256,63 @@ def stream_file(
 ) -> Iterator[tuple[int, int, int, bytes]]:
     """Yield (status, start, end, chunk) for a file download.
 
-    Wraps Drive's media download with HTTP Range support. Drive's
-    `alt=media` endpoint accepts a standard `Range: bytes=…` header and
-    returns 206 Partial Content with `Content-Range`, exactly what
-    HTML5 `<video>` wants for seeking.
+    The original implementation called the google-api-python-client
+    HTTP wrapper (`svc._http.request()`), which under the hood uses
+    httplib2 — and httplib2 *buffers the entire response body into
+    memory before returning*. For a 50 MB video that's 5–30 seconds of
+    silence on the wire, well past the tablet's 10-second OkHttp read
+    timeout. Result: tablet drops the connection, we send a 200 header
+    with no body, player thinks the download truncated, retries, loop.
 
-    Why we don't use MediaIoBaseDownload: that helper buffers the whole
-    file into memory before yielding. We need to stream chunks straight
-    to the HTTP socket.
+    This version bypasses google-api-python-client for the media
+    download and talks to Drive's REST endpoint directly via urllib.
+    urllib streams from the socket as you call `.read(n)`, so the
+    first chunk reaches the wire within milliseconds of the connection
+    opening. Auth comes from a cached service-account token — same
+    credentials as the rest of the module.
+
+    Range headers are forwarded verbatim, so HTML5 `<video>` seeking
+    keeps working.
     """
-    svc = _get_service()
-    # Build a request to the underlying HTTP layer. The discovery client
-    # exposes `_http` for this kind of low-level use.
-    headers = {}
+    import urllib.request
+
+    token = _streaming_token()
+    url = (
+        f"https://www.googleapis.com/drive/v3/files/{file_id}"
+        f"?alt=media&supportsAllDrives=true"
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "screens-app-v2-drive-client",
+    }
     if range_header:
         headers["Range"] = range_header
-    request = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
-    # _http here is a googleapiclient AuthorizedHttp wrapping httplib2.
-    # We re-use it so credentials are attached automatically.
-    http = svc._http
-    uri = request.uri
-    resp, content = http.request(uri, "GET", headers=headers)
-    status = int(resp.status)
-    # Parse Content-Range to figure out start/end so the caller can
-    # forward to the HTTP client without re-parsing.
-    cr = resp.get("content-range") or resp.get("Content-Range")
-    if cr and "bytes " in cr:
-        # bytes start-end/total
-        try:
-            spec = cr.split(" ", 1)[1].split("/", 1)[0]
-            start_s, end_s = spec.split("-", 1)
-            start, end = int(start_s), int(end_s)
-        except Exception:
-            start, end = 0, len(content) - 1
-    else:
-        start, end = 0, max(0, len(content) - 1)
 
-    # Yield in chunk_size pieces so the HTTP server can write to the
-    # socket without holding the whole video in memory.
-    for i in range(0, len(content), chunk_size):
-        yield status, start + i, min(start + i + chunk_size - 1, end), content[i:i + chunk_size]
+    req = urllib.request.Request(url, headers=headers)
+    # Long timeout: connection-establish only. Once we're streaming,
+    # Python's HTTPResponse handles long reads cleanly.
+    resp = urllib.request.urlopen(req, timeout=30)
+    try:
+        status = int(resp.status)
+        cr = resp.headers.get("Content-Range")
+        if cr and "bytes " in cr:
+            try:
+                spec = cr.split(" ", 1)[1].split("/", 1)[0]
+                start_s, end_s = spec.split("-", 1)
+                start, end = int(start_s), int(end_s)
+            except Exception:
+                start, end = 0, 0
+        else:
+            start = 0
+            cl = resp.headers.get("Content-Length")
+            end = (int(cl) - 1) if cl else 0
+
+        offset = start
+        while True:
+            chunk = resp.read(chunk_size)
+            if not chunk:
+                break
+            yield status, offset, offset + len(chunk) - 1, chunk
+            offset += len(chunk)
+    finally:
+        resp.close()
