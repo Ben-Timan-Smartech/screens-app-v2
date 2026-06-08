@@ -242,6 +242,13 @@ class PlayerRepository(
     private val _downloads = MutableStateFlow<Map<String, DownloadProgress>>(emptyMap())
     val downloads: StateFlow<Map<String, DownloadProgress>> = _downloads
 
+    /** Video IDs whose most recent download attempt threw. Cleared when
+     *  the same ID later succeeds. Drives the red-X badge in the
+     *  on-tablet staff playlist view so the operator can tell a real
+     *  failure apart from a still-pending download at a glance. */
+    private val _downloadFailures = MutableStateFlow<Set<String>>(emptySet())
+    val downloadFailures: StateFlow<Set<String>> = _downloadFailures
+
     /**
      * The user's *intended* playlist — what the server says is on this
      * screen, even when some items are still downloading. Distinct from the
@@ -368,9 +375,12 @@ class PlayerRepository(
                     _downloads.update { it - v.id }
                     LogBuffer.i(TAG, "Cached ${v.id}")
                 }
+                // Cleared on success — drop any earlier failure flag.
+                _downloadFailures.update { it - v.id }
             } catch (t: Throwable) {
                 LogBuffer.w(TAG, "Live download failed for ${v.id}: ${t.message}")
                 _downloads.update { it - v.id }
+                _downloadFailures.update { it + v.id }
             }
         }
         val cap = store.cacheCapBytes.first()
