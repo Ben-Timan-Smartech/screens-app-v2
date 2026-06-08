@@ -92,6 +92,62 @@ const StatusLine = ({ label, value, mono, tone }) => (
   </div>
 );
 
+// SyncGroupRow — text input alongside the other Display toggles. Two
+// or more screens that share a syncGroup value get an identical
+// playback hint from the server on every poll, so they stay aligned
+// to the same item + position. Empty value detaches the screen from
+// any group. Commits on blur or Enter; we don't fire a request on
+// every keystroke. The "suggested" hint surfaces the screen's storeId
+// so the operator can one-click set a sensible default group.
+const SyncGroupRow = ({ value, suggested, onCommit, disabled, isLive }) => {
+  const [draft, setDraft] = React.useState(value || '');
+  // Keep the input in sync when the prop changes (e.g. another browser
+  // tab toggled it, or the server returned a different value).
+  React.useEffect(() => { setDraft(value || ''); }, [value]);
+  const commit = () => {
+    const next = (draft || '').trim();
+    if (next === (value || '').trim()) return; // no-op
+    onCommit(next);
+  };
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0' }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Sync group</div>
+        <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>
+          {isLive
+            ? 'Screens sharing this label play the same video at the same time. Leave blank for independent playback.'
+            : 'Screens sharing this label play the same video at the same time. Saves now, applies when the tablet reconnects.'}
+        </div>
+        {suggested && !draft && (
+          <div
+            onClick={() => !disabled && (setDraft(suggested), onCommit(suggested))}
+            style={{
+              marginTop: 4, fontSize: 11, color: 'var(--ink-2)',
+              cursor: disabled ? 'default' : 'pointer', textDecoration: disabled ? 'none' : 'underline',
+            }}>
+            Suggested: {suggested}
+          </div>
+        )}
+      </div>
+      <input
+        value={draft}
+        disabled={disabled}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.target.blur(); } }}
+        placeholder="e.g. NYC-1"
+        style={{
+          width: 140, height: 28, padding: '0 8px',
+          border: 'var(--border-strong)', borderRadius: 5,
+          fontSize: 12, color: 'var(--ink-1)',
+          fontFamily: 'inherit',
+          background: disabled ? 'var(--ink-9)' : 'var(--ink-10)',
+        }}
+      />
+    </div>
+  );
+};
+
 // Toggle row — used for "Mix splash into playlist".
 const ToggleRow = ({ label, sub, value, onChange, disabled }) => (
   <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0' }}>
@@ -241,6 +297,22 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
         isLive
           ? (next ? 'Audio enabled — all videos play with sound' : 'Audio muted — only library-flagged videos play sound')
           : (next ? 'Audio will turn on next reconnect' : 'Audio will mute on next reconnect'),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
+  const handleSyncGroupChange = async (raw) => {
+    if (!targetDeviceId) return;
+    const next = (raw || '').trim();
+    try {
+      await setScreenSyncGroup(targetDeviceId, next || null);
+      showToast(
+        next
+          ? `Joined sync group "${next}" — screens in this group play in lockstep`
+          : 'Left sync group — playback runs independently',
         'ok',
       );
     } catch (e) {
@@ -502,6 +574,13 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 value={hasHistory ? !!lastKnown.audioOn : false}
                 onChange={handleAudioToggle}
                 disabled={!canEdit}
+              />
+              <SyncGroupRow
+                value={hasHistory ? (lastKnown.syncGroup || '') : ''}
+                suggested={hasHistory ? (lastKnown.location?.storeId || '') : ''}
+                onCommit={handleSyncGroupChange}
+                disabled={!canEdit}
+                isLive={isLive}
               />
             </Card>
 

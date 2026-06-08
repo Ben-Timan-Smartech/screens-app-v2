@@ -230,6 +230,10 @@ SCREENS_JSON = Path(os.environ.get(
     "SCREENS_REGISTRY_PATH",
     str(APP_DIR / "components" / "screens.json"),
 ))
+SYNC_GROUPS_JSON = Path(os.environ.get(
+    "SCREENS_SYNC_GROUPS_PATH",
+    str(APP_DIR / "components" / "sync_groups.json"),
+))
 
 # Cloud Run injects $PORT (defaults to 8080); on a laptop we keep 8765.
 PORT = int(os.environ.get("PORT", "8765"))
@@ -285,9 +289,13 @@ def _load_state_from_disk() -> None:
     """One-shot loader, called once on module import. Best-effort —
     a missing or corrupt file just means we start with empty state,
     same as fresh boot before persistence existed."""
-    global _per_screen, _screens
+    global _per_screen, _screens, _sync_groups
     with _STATE_LOCK:
-        for path, target_name in [(PER_SCREEN_JSON, "_per_screen"), (SCREENS_JSON, "_screens")]:
+        for path, target_name in [
+            (PER_SCREEN_JSON, "_per_screen"),
+            (SCREENS_JSON, "_screens"),
+            (SYNC_GROUPS_JSON, "_sync_groups"),
+        ]:
             if not path.is_file():
                 continue
             try:
@@ -297,8 +305,10 @@ def _load_state_from_disk() -> None:
                     continue
                 if target_name == "_per_screen":
                     _per_screen = raw
-                else:
+                elif target_name == "_screens":
                     _screens = raw
+                else:
+                    _sync_groups = raw
                 print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
             except Exception as e:
                 print(f"[state] load {path} failed: {e}", file=sys.stderr)
@@ -355,11 +365,88 @@ def _ensure_screen_state(device_id: str) -> dict:
             "pushedAt": None,
             "mixSplash": True,                    # bundled splash mixed in by default
             "audioOn": False,                     # screen-wide audio is muted by default — see /api/screens/<id>/audio
+            "syncGroup": None,                    # see _compute_playback / /api/screens/<id>/sync-group
             "pendingCommands": [],                 # list of pending commands for this screen
         }
         _per_screen[device_id] = s
         _save_per_screen()
+    # Back-fill the sync-group field on records persisted before this
+    # feature shipped. Cheap and avoids a one-off migration script.
+    if "syncGroup" not in s:
+        s["syncGroup"] = None
     return s
+
+
+# ── Sync groups ──────────────────────────────────────────────────────
+# When two or more screens share a `syncGroup` value, the server hands
+# them an identical "playback" block on every /api/state poll — same
+# item, same position-within-item, computed from a fixed group epoch
+# and the playlist's per-item durations. The tablet seeks ExoPlayer to
+# that position on every poll if it drifts past a threshold.
+#
+# `_sync_groups[groupId]` = {
+#   "loopStartedAt": float (epoch seconds),
+#   "lastRevision":  int,
+# }
+#
+# We reset `loopStartedAt` to `now` whenever the group's playlist
+# revision moves forward (so a new push restarts the loop in lockstep
+# across every screen in the group). Persisted alongside _per_screen so
+# the alignment survives Cloud Run redeploys.
+
+_sync_groups: dict[str, dict] = {}
+
+
+def _save_sync_groups() -> None:
+    """Persist _sync_groups. Call inside _STATE_LOCK after any mutation."""
+    _atomic_write_json(SYNC_GROUPS_JSON, _sync_groups)
+
+
+def _compute_playback(items: list, group_id: str, current_revision: int, now: float) -> dict | None:
+    """Return {itemId, itemIndex, positionMs, itemStartedAtMs, loopDurationSec}
+    for the item the given sync group should be on right now, or None
+    when the group has no items to play. Caller must hold _STATE_LOCK."""
+    if not items:
+        return None
+    # Coerce durations to a sensible default — 15 s for any item that's
+    # missing durationSec keeps the loop math from blowing up.
+    durations = [max(1.0, float(item.get("durationSec") or 15)) for item in items]
+    total = sum(durations)
+    if total <= 0:
+        return None
+    group = _sync_groups.get(group_id)
+    if group is None or group.get("lastRevision") != current_revision:
+        # First time we've seen this group, or the playlist just changed
+        # underneath it — restart the loop from now so every screen in
+        # the group is in lockstep on the next poll.
+        group = {"loopStartedAt": now, "lastRevision": current_revision}
+        _sync_groups[group_id] = group
+        _save_sync_groups()
+    loop_started_at = float(group["loopStartedAt"])
+    elapsed = max(0.0, now - loop_started_at)
+    offset = elapsed % total
+    cumulative = 0.0
+    for i, dur in enumerate(durations):
+        if offset < cumulative + dur:
+            position_in_item = offset - cumulative
+            return {
+                "itemId":           items[i].get("id"),
+                "itemIndex":        i,
+                "positionMs":       int(position_in_item * 1000),
+                "itemStartedAtMs":  int((now - position_in_item) * 1000),
+                "loopDurationSec":  total,
+                "groupId":          group_id,
+            }
+        cumulative += dur
+    # Floating-point edge case — fall through to last item.
+    return {
+        "itemId":           items[-1].get("id"),
+        "itemIndex":        len(items) - 1,
+        "positionMs":       int(durations[-1] * 1000) - 1,
+        "itemStartedAtMs":  int((now - durations[-1]) * 1000),
+        "loopDurationSec":  total,
+        "groupId":          group_id,
+    }
 
 
 # Library cache. scan-videos.py writes app/components/library.json; we read
@@ -1119,6 +1206,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         merged = dict(it)
                         merged["defaultUnmute"] = bool((lib or {}).get("defaultUnmute"))
                         enriched_items.append(merged)
+                    # Sync-group playback hint. When the screen has a
+                    # syncGroup set, compute "what every screen in this
+                    # group should be playing right now" from the loop's
+                    # epoch + per-item durations. Tablet seeks ExoPlayer
+                    # to the returned itemId + positionMs on every poll
+                    # if it has drifted past a threshold.
+                    sync_group_id = s.get("syncGroup")
+                    playback = None
+                    if sync_group_id:
+                        playback = _compute_playback(
+                            items=enriched_items,
+                            group_id=sync_group_id,
+                            current_revision=s["revision"],
+                            now=time.time(),
+                        )
                     payload = {
                         "screenId":    screen_id,
                         "revision":    s["revision"],
@@ -1126,6 +1228,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "pushedAt":    s["pushedAt"],
                         "mixSplash":   s["mixSplash"],
                         "audioOn":     s.get("audioOn", False),
+                        "syncGroup":   sync_group_id,
+                        "playback":    playback,
+                        "serverNowMs": int(time.time() * 1000),
                         "commands":    commands,
                         "splashUrl":   splash["url"] if splash else None,
                         "splashName":  splash["name"] if splash else None,
@@ -1159,6 +1264,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "currentItems":          state.get("items", []),
                         "mixSplash":             state.get("mixSplash", True),
                         "audioOn":               state.get("audioOn", False),
+                        "syncGroup":             state.get("syncGroup"),
                     }
                     screens.append(record)
             self._send_json({"screens": screens})
@@ -1495,7 +1601,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/playlist   { items: [...], mode: "replace"|"append" }
         # POST /api/screens/<deviceId>/mix-splash { mixSplash: bool }
         # POST /api/screens/<deviceId>/audio      { audioOn: bool }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio)$", path)
+        # POST /api/screens/<deviceId>/sync-group { syncGroup: string | null }
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|sync-group)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -1509,7 +1616,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # `command` is privileged either way (reboot, unregister)
             # and stays user-only.
             is_self_edit = (
-                action in ("playlist", "mix-splash", "audio")
+                action in ("playlist", "mix-splash", "audio", "sync-group")
                 and device_id in _screens
             )
             if not is_self_edit:
@@ -1594,6 +1701,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         target=device_id,
                     )
                     self._send_json({"ok": True, "audioOn": state["audioOn"]})
+                    return
+                if action == "sync-group":
+                    # Empty string or null clears the group; otherwise the
+                    # string is stored verbatim (typically a store ID like
+                    # "NYC-1" or a custom group key like "wall-A").
+                    raw_group = body.get("syncGroup")
+                    new_group = None
+                    if isinstance(raw_group, str):
+                        cleaned = raw_group.strip()
+                        new_group = cleaned if cleaned else None
+                    state = _ensure_screen_state(device_id)
+                    state["syncGroup"] = new_group
+                    _save_per_screen()
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    _log_activity(
+                        kind="settings",
+                        text=(
+                            f"Joined sync group '{new_group}' on " if new_group
+                            else "Left sync group on "
+                        ) + screen_name,
+                        icon="settings",
+                        target=device_id,
+                    )
+                    self._send_json({"ok": True, "syncGroup": new_group})
                     return
 
         self.send_error(404, "Unknown API endpoint")

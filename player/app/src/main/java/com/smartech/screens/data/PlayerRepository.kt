@@ -247,9 +247,30 @@ class PlayerRepository(
         /** Screen-wide audio override. Default false = muted. When true,
          *  every video plays unmuted regardless of its own defaultUnmute. */
         val audioOn: Boolean = false,
+        /** Optional sync-group ID. When set, the server returns a
+         *  [playback] block telling this tablet exactly where in the
+         *  loop it should be — so every screen in the group stays
+         *  aligned. */
+        val syncGroup: String? = null,
+        val playback: LivePlayback? = null,
+        /** Server's wall-clock at response build time. We use it to
+         *  correct for transit latency when seeking. */
+        val serverNowMs: Long? = null,
         val commands: List<LiveCommand> = emptyList(),
         val splashUrl: String? = null,
         val splashName: String? = null,
+    )
+
+    /** Server-computed "what should be on screen right now" for a
+     *  sync group. Fields mirror server's _compute_playback output. */
+    @Serializable
+    data class LivePlayback(
+        val itemId: String,
+        val itemIndex: Int,
+        val positionMs: Long,
+        val itemStartedAtMs: Long,
+        val loopDurationSec: Double = 0.0,
+        val groupId: String = "",
     )
 
     @Serializable
@@ -285,6 +306,29 @@ class PlayerRepository(
     val audioOnFlow: StateFlow<Boolean> = _audioOn
     val audioOn: Boolean get() = _audioOn.value
     val mixSplash: Boolean get() = _mixSplash.value
+
+    /** Latest sync-group ID for the staff UI to surface. Null = not
+     *  in a group, so no sync corrections are applied. */
+    private val _syncGroup = MutableStateFlow<String?>(null)
+    val syncGroupFlow: StateFlow<String?> = _syncGroup
+
+    /** Sync-correction hint. Emitted once per /api/state poll when the
+     *  server returned a playback block. PlayerController collects this
+     *  and seeks ExoPlayer if it has drifted past the correction
+     *  threshold. */
+    data class PlaybackSyncHint(
+        val itemId: String,
+        val itemIndex: Int,
+        val positionMs: Long,
+        /** [System.currentTimeMillis] adjusted for the round-trip
+         *  delta between this tablet and the server, so the consumer
+         *  can compute "expected position right now" without trusting
+         *  either clock alone. */
+        val adjustedAtMs: Long,
+        val groupId: String,
+    )
+    private val _playbackSync = MutableStateFlow<PlaybackSyncHint?>(null)
+    val playbackSyncFlow: StateFlow<PlaybackSyncHint?> = _playbackSync
 
     /** Per-video download progress. Cleared when a download finishes. */
     data class DownloadProgress(
@@ -377,6 +421,40 @@ class PlayerRepository(
         if (state.audioOn != _audioOn.value) {
             _audioOn.value = state.audioOn
             LogBuffer.i(TAG, "Audio → ${if (state.audioOn) "on" else "off"}")
+        }
+
+        // Sync group ID. Surface to the staff UI so admins can confirm
+        // membership at a glance. Null = standalone playback.
+        if (state.syncGroup != _syncGroup.value) {
+            _syncGroup.value = state.syncGroup
+            LogBuffer.i(TAG, "Sync group → ${state.syncGroup ?: "(none)"}")
+        }
+
+        // Sync-correction hint. When the server returned a playback
+        // block, push it onto the flow so PlayerController can decide
+        // whether to seek. We adjust the server's timestamp for the
+        // round-trip latency: positionMs was computed at serverNowMs;
+        // by the time the tablet reads it, more time has passed.
+        // Storing the local-clock equivalent lets the consumer compute
+        // "expected position now" with one subtraction.
+        val playback = state.playback
+        if (playback != null && state.syncGroup != null) {
+            val serverNow = state.serverNowMs ?: System.currentTimeMillis()
+            val localNow = System.currentTimeMillis()
+            // adjustedAtMs = localNow → "as of this moment in tablet
+            // clock, the item was at positionMs". Drift from server
+            // clock washes out because both endpoints subtract from
+            // serverNowMs identically.
+            val adjustedPos = playback.positionMs + (localNow - serverNow).coerceAtLeast(0)
+            _playbackSync.value = PlaybackSyncHint(
+                itemId = playback.itemId,
+                itemIndex = playback.itemIndex,
+                positionMs = adjustedPos,
+                adjustedAtMs = localNow,
+                groupId = playback.groupId,
+            )
+        } else {
+            _playbackSync.value = null
         }
 
         // Per-location splash. Download (or clear) when the URL changes.
@@ -605,6 +683,39 @@ class PlayerRepository(
                 lastLiveRevision = -1
             }.onFailure {
                 LogBuffer.w(TAG, "setAudioOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
+            }
+        }
+    }
+
+    /** Set this screen's sync-group membership on the server. Null or
+     *  blank string detaches the screen from any group. */
+    suspend fun setSyncGroupOnServer(value: String?) {
+        val normalised = value?.trim()?.ifBlank { null }
+        LogBuffer.i(TAG, "setSyncGroupOnServer → ${normalised ?: "(none)"}")
+        _syncGroup.value = normalised
+
+        val base = store.liveServerUrl.first()?.trimEnd('/')
+        if (base.isNullOrBlank()) {
+            LogBuffer.w(TAG, "setSyncGroupOnServer skipped — no liveServerUrl set")
+            return
+        }
+        val deviceId = store.ensureDeviceId()
+        // null encodes as JSON null so the server clears the field.
+        val bodyValue = if (normalised == null) "null" else q(normalised)
+        val body = """{"syncGroup":$bodyValue}"""
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/screens/${urlEncode(deviceId)}/sync-group")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) LogBuffer.w(TAG, "setSyncGroupOnServer HTTP ${r.code}")
+                    else LogBuffer.i(TAG, "setSyncGroupOnServer OK")
+                }
+                lastLiveRevision = -1
+            }.onFailure {
+                LogBuffer.w(TAG, "setSyncGroupOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
         }
     }

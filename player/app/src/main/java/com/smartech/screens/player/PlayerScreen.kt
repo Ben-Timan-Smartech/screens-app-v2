@@ -30,6 +30,7 @@ fun PlayerScreen(
     val state by repository.state.collectAsState()
     val remoteSplash by repository.remoteSplashFile.collectAsState()
     val audioOn by repository.audioOnFlow.collectAsState()
+    val playbackSync by repository.playbackSyncFlow.collectAsState()
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
@@ -43,6 +44,19 @@ fun PlayerScreen(
             is PlayerRepository.State.Playing -> controller.apply(s.items, s.revision, repository.mixSplash)
             else -> controller.playSplash()
         }
+    }
+
+    // Sync-group correction. Re-runs every poll because the repository
+    // emits a fresh PlaybackSyncHint each /api/state response. The
+    // controller decides internally whether the drift is worth a seek.
+    // No-op when the tablet isn't in a sync group (flow is null).
+    LaunchedEffect(playbackSync) {
+        val hint = playbackSync ?: return@LaunchedEffect
+        controller.applyPlaybackSync(
+            itemId = hint.itemId,
+            positionMs = hint.positionMs,
+            adjustedAtMs = hint.adjustedAtMs,
+        )
     }
 
     Box(
