@@ -392,6 +392,23 @@ def run_library_scan() -> dict:
         )
         print(f"[sync] scan-videos.py subprocess started (pid={proc.pid})", file=sys.stderr, flush=True)
         assert proc.stdout is not None
+
+        # Watchdog: forcibly kill the subprocess if it goes too long
+        # without emitting *any* line. Drive API hangs do happen
+        # (network blip, paged listing on a huge folder), and without
+        # this the for-loop below would block forever and the
+        # _sync_state["running"] flag would stay True indefinitely.
+        def _watchdog():
+            deadline = time.time() + 900   # 15 min total budget
+            while proc.poll() is None and time.time() < deadline:
+                time.sleep(15)
+            if proc.poll() is None:
+                print(f"[sync] watchdog: subprocess pid={proc.pid} exceeded 15m budget — killing", file=sys.stderr, flush=True)
+                try: proc.kill()
+                except Exception: pass
+        threading.Thread(target=_watchdog, daemon=True).start()
+
+        last_progress_at = time.time()
         for raw in proc.stdout:
             line = raw.rstrip()
             if not line:
@@ -402,19 +419,25 @@ def run_library_scan() -> dict:
                     _sync_state["progressCurrent"] = int(m.group(1))
                     _sync_state["progressTotal"] = int(m.group(2))
                     _sync_state["progressLabel"] = m.group(3)
+                # Mirror PROGRESS lines too — but only every 20 brands
+                # so the log stream doesn't get spammed. Lets us see
+                # forward motion in Cloud Run during a long scan.
+                cur = int(m.group(1))
+                if cur == 1 or cur % 20 == 0 or cur == int(m.group(2)):
+                    print(f"[sync] progress: {cur}/{m.group(2)} ({m.group(3)})", file=sys.stderr, flush=True)
+                last_progress_at = time.time()
                 continue
             # Keep a rolling tail of regular log lines so we can surface
             # the script's stderr if something goes wrong AND echo each
             # line to our own stderr so it shows up in Cloud Run logs
-            # while the scan is running (otherwise debugging boot-time
-            # scan failures is impossible — they vanish into the tail
-            # array and only surface in /api/library/info).
+            # while the scan is running.
             tail.append(line)
             if len(tail) > 30:
                 tail.pop(0)
             print(f"[sync] {line}", file=sys.stderr, flush=True)
-        proc.wait(timeout=900)
+        proc.wait(timeout=60)   # subprocess.stdout already exhausted; this is just the reap
         ok = proc.returncode == 0
+        print(f"[sync] subprocess exited rc={proc.returncode}", file=sys.stderr, flush=True)
 
         count = None
         if ok:
