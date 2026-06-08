@@ -18,6 +18,36 @@ Rules:
 
 ---
 
+## v0.1.2
+
+Reliability fixes after the first day in production.
+
+- **"Reboot screen" actually comes back now.** The CMS button used to
+  kill the player process and rely on AlarmManager to relaunch it —
+  Android 11+ cancels alarms when the scheduling process dies, so the
+  player went dark. Switched to an in-place activity restart that
+  resets the player loop without killing the JVM.
+- **Manual "Check for updates" button** in the on-device staff
+  overlay (Device admin → Actions). Forces an update poll without
+  waiting for the 6-hour timer or driving to the CMS.
+- **`/apk` shortcut** on the CMS host streams the latest APK directly.
+  `https://screens.smartechworld.com/apk` starts the modern build
+  download immediately; `/apk/legacy` does the same for Android 6/7.
+  Sidesteps networks that block GitHub's release CDN.
+- **`/api/library/refresh` survives container restarts.** Cloud Run
+  writes `library.json` to the FUSE-mounted bucket now, with auto-sync
+  on boot when the file's empty. After tonight's redeploys, the CMS
+  brand library populated automatically; previously it would have
+  needed a manual Drive Sync click.
+- **Drive rate-limit smoothing** for `/media/<id>`. We were calling
+  `drive.files.get()` once per video request — Drive started 404ing
+  half of them under load. Metadata now reads from the cached
+  `library.json` and only falls back to the Drive API for files we
+  haven't indexed.
+- **Streaming retry** on the well-known google-api-python-client
+  auth-refresh race (`NoneType has no attribute 'read'`). Was making
+  ~1% of video downloads fail on first try.
+
 ## v0.1.1
 
 Self-updating + onboarding flow. Tablets can now keep themselves on the
