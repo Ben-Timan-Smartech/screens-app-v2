@@ -229,8 +229,25 @@ fun DeviceAdminScreen(
                         fontFamily = FontFamily.Monospace,
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
-                    Text("Cancel", color = Muted, fontSize = 16.sp,
-                        modifier = Modifier.clickable { onCancel() }.padding(8.dp))
+                    // "Return to splash" — outlined button so it reads as a
+                    // deliberate action rather than a destructive flag. Wraps
+                    // the same onCancel callback (closes the staff overlay
+                    // back to the player loop, which renders the splash
+                    // until the next playlist tick).
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .border(1.dp, Muted, RoundedCornerShape(6.dp))
+                            .clickable { onCancel() }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            "Return to splash",
+                            color = Muted,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
                 }
             }
 
