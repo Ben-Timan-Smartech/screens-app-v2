@@ -1,0 +1,117 @@
+# Release: build the Android player APKs and publish a GitHub Release
+# whenever a `v*` tag lands.
+#
+# Trigger: `git tag v0.1.1 && git push --tags` (or the scripts/release.sh
+# helper, which bundles bump + tag + push). The tag's version MUST match
+# both the VERSION file and a matching `## vX.Y.Z` section in
+# CHANGELOG.md — the workflow fails fast if any of these disagree.
+#
+# Build outputs:
+#   • app-modern-debug.apk — minSdk 26, the everyday build (Android 8+)
+#   • app-legacy-debug.apk — minSdk 23, kept for older TV boxes
+#
+# Why debug (not release)? Release signing needs a keystore we haven't
+# provisioned yet (see player/app/build.gradle.kts — "add signing config
+# in a local keystore.properties before shipping"). Debug-signed APKs
+# install fine via adb / sideload, which is how we distribute today.
+# Switching to release signing is a follow-up: add the keystore as a
+# repo secret and update this workflow to inject it.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse + validate version
+        id: ver
+        # Strip the leading 'v' off the tag, then cross-check that:
+        #   - the VERSION file matches
+        #   - CHANGELOG.md has a matching `## vX.Y.Z` section
+        # Either mismatch means someone tagged without bumping; abort
+        # with a clear error rather than publishing a confusing release.
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          FILE_VERSION=$(tr -d '[:space:]' < VERSION)
+          if [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
+            echo "::error::Tag is v$TAG_VERSION but VERSION file says $FILE_VERSION"
+            exit 1
+          fi
+          if ! grep -q "^## v$TAG_VERSION\$" CHANGELOG.md; then
+            echo "::error::No '## v$TAG_VERSION' section in CHANGELOG.md"
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: v$TAG_VERSION"
+
+      - name: Extract CHANGELOG section for this release
+        id: notes
+        # Pull out everything between `## vX.Y.Z` and the next `## v…`
+        # heading (or EOF). Stored as a file because GHA outputs don't
+        # play well with multi-line values that contain backticks.
+        run: |
+          set -euo pipefail
+          awk -v ver="v${{ steps.ver.outputs.version }}" '
+            $0 == "## " ver { found=1; next }
+            found && /^## v/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::Extracted CHANGELOG section is empty"
+            exit 1
+          fi
+          echo "Release notes:"
+          cat release-notes.md
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle (with caching)
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build modern + legacy APKs
+        working-directory: player
+        run: ./gradlew :app:assembleModernDebug :app:assembleLegacyDebug --no-daemon --stacktrace
+
+      - name: Rename APKs with version + flavor for the release
+        # Default names are app-modern-debug.apk / app-legacy-debug.apk
+        # — fine, but readers downloading from the Release page benefit
+        # from "screens-player-modern-v0.1.0.apk" so they don't accidentally
+        # install yesterday's build.
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          mkdir -p dist
+          cp "player/app/build/outputs/apk/modern/debug/app-modern-debug.apk" \
+             "dist/screens-player-modern-v${V}.apk"
+          cp "player/app/build/outputs/apk/legacy/debug/app-legacy-debug.apk" \
+             "dist/screens-player-legacy-v${V}.apk"
+          ls -lh dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Screens v${{ steps.ver.outputs.version }}
+          body_path: release-notes.md
+          files: |
+            dist/screens-player-modern-v${{ steps.ver.outputs.version }}.apk
+            dist/screens-player-legacy-v${{ steps.ver.outputs.version }}.apk
+          # Releases are not drafts — they're immediately visible. The
+          # tag is the durable identifier; deleting a release won't
+          # remove the tag from history.
+          draft: false
+          prerelease: false

@@ -208,6 +208,58 @@ On first boot the Owner row is seeded automatically from
 `SCREENS_OWNER_EMAIL` (default `ben@smartechworld.com`). Sign in with
 that Google account, then invite teammates from **Users & permissions**.
 
+## Releasing
+
+The CMS auto-deploys to Cloud Run on every merge to `main` (Cloud Build picks
+up the push and rolls out a new revision). The Android player APK is built and
+published by **GitHub Actions** whenever a `v*` tag lands. A "release" is one
+deliberate batch of work, not one commit.
+
+### Version & changelog
+
+- **`VERSION`** at the repo root holds the canonical version (`0.1.0`,
+  `0.1.1`, …). Bumped only when cutting a release. Single source of truth —
+  `player/app/build.gradle.kts` reads it at build time so `versionName` always
+  matches.
+- **`CHANGELOG.md`** is the release-notes book. Each release gets a
+  `## vX.Y.Z` section (newest at top); the release workflow uses that exact
+  section as the GitHub Release body and the in-app "what's new". Write it for
+  Ben and whoever installs the APK, not for engineers.
+
+### Cutting a release
+
+Hold-and-release: don't release on every change. Commit fixes to `main` and
+let them accumulate. When there's a coherent batch to ship:
+
+1. Add a new `## vX.Y.Z` section to the **top** of `CHANGELOG.md` with
+   plain-English bullets describing what changed and why it matters.
+2. Commit the changelog edit and push to `main`.
+3. Run `scripts/release.sh X.Y.Z`. It validates the changelog has a matching
+   section, bumps `VERSION`, commits, tags `vX.Y.Z`, and pushes.
+4. Watch the build at
+   [Actions → Release](https://github.com/Ben-Timan-Smartech/screens-app-v2/actions/workflows/release.yml).
+5. When it's green, the APKs land at
+   [releases](https://github.com/Ben-Timan-Smartech/screens-app-v2/releases/latest)
+   — `screens-player-modern-vX.Y.Z.apk` for Android 8+ devices and
+   `screens-player-legacy-vX.Y.Z.apk` for Android 6/7 tablets.
+
+### Versioning rules (semver)
+
+- **PATCH** (`0.1.0 → 0.1.1`): fixes and small improvements. The default.
+- **MINOR** (`0.1.x → 0.2.0`): a notable new capability or a batch big enough
+  to feel like a milestone.
+- **MAJOR** (`0.x → 1.0.0`): first "this is the real, stable product"
+  release, or a breaking change to the API contract.
+
+Never reuse or skip a number.
+
+### Signing
+
+For now CI builds **debug-signed** APKs (debug-keystore signature, fine for
+sideload via adb). Proper release signing is a follow-up — add a keystore as
+a repo secret and update `release.yml` to inject it before running
+`assembleModernRelease`.
+
 ## Things that aren't shipped
 
 - Tests — this is still scaffold-stage code

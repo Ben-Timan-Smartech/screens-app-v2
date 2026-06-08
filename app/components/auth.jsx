@@ -46,6 +46,7 @@ const AuthProvider = ({ children }) => {
     user: null,
     googleClientId: null,
     allowedDomains: [],
+    appVersion: null,
   });
 
   const refresh = useCallback(() => {
@@ -56,6 +57,7 @@ const AuthProvider = ({ children }) => {
           user: data.user || null,
           googleClientId: data.googleClientId || null,
           allowedDomains: data.allowedDomains || [],
+          appVersion: data.appVersion || null,
         }),
       )
       .catch(() =>
