@@ -156,20 +156,28 @@ def _release_info() -> dict:
     modern_asset = _find_asset("modern")
     legacy_asset = _find_asset("legacy")
 
-    # Public-facing URLs point at our own /api/release/download/<flavor>
-    # proxy. The browser / device follows the redirect to actual bytes
-    # without ever needing GitHub credentials.
+    # Choose the URL shape. Two paths:
+    #   • SCREENS_GITHUB_TOKEN set → repo is (probably) private. Return
+    #     proxy URLs so anonymous browsers / device clients route their
+    #     APK download through us, where we can attach the bearer
+    #     token.
+    #   • No token → repo must be public. Return GitHub's CDN URLs
+    #     directly so we don't waste Cloud Run egress on bytes Google
+    #     could serve for free.
+    use_proxy = bool(os.environ.get("SCREENS_GITHUB_TOKEN"))
     public = (auth.PUBLIC_URL or "").rstrip("/")
     def _proxy(flavor: str) -> str:
         path = f"/api/release/download/{flavor}"
         return f"{public}{path}" if public else path
+    def _direct(asset: dict | None) -> str | None:
+        return asset.get("browser_download_url") if asset else None
 
     info = {
         "tagName":      tag,
         "versionName":  version_name,
         "versionCode":  version_code,
-        "modernUrl":    _proxy("modern") if modern_asset else None,
-        "legacyUrl":    _proxy("legacy") if legacy_asset else None,
+        "modernUrl":    (_proxy("modern") if use_proxy else _direct(modern_asset)) if modern_asset else None,
+        "legacyUrl":    (_proxy("legacy") if use_proxy else _direct(legacy_asset)) if legacy_asset else None,
         "publishedAt":  raw.get("published_at"),
         "releaseUrl":   raw.get("html_url"),
         "notes":        raw.get("body") or "",
