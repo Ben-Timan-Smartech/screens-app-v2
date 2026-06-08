@@ -1366,11 +1366,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
-            # Per-action permission. command + mix-splash hit the device
-            # remotely (privileged); playlist is just content push.
-            need = "screens.command" if action in ("command", "mix-splash") else "screens.push"
-            if self._require_perm(need) is None:
-                return
+            # Two callers hit these endpoints:
+            #   • CMS users (push from the web admin) — gated on the
+            #     `screens.push` / `screens.command` permission.
+            #   • The tablet itself (staff overlay's playlist editor
+            #     or mix-splash toggle) — no user session. We let the
+            #     tablet edit *its own* playlist + mix-splash flag
+            #     when the URL's deviceId matches a registered screen.
+            # `command` is privileged either way (reboot, unregister)
+            # and stays user-only.
+            is_self_edit = (
+                action in ("playlist", "mix-splash")
+                and device_id in _screens
+            )
+            if not is_self_edit:
+                need = "screens.command" if action in ("command", "mix-splash") else "screens.push"
+                if self._require_perm(need) is None:
+                    return
             with _STATE_LOCK:
                 if action == "command":
                     cmd = body.get("command")
