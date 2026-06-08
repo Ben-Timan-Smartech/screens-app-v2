@@ -626,7 +626,12 @@ class PlayerRepository(
      * JVM keeps running so the relaunch is reliable. For a "true"
      * process restart, use Clear cache + Reboot.
      */
-    private fun scheduleSelfRestart() {
+    /** Public form for the playback watchdog (and any other nuclear-
+     *  option recovery path that needs to bounce the activity without
+     *  killing the JVM). */
+    fun scheduleSelfRestart() = doScheduleSelfRestart()
+
+    private fun doScheduleSelfRestart() {
         val intent = android.content.Intent(appContext, com.smartech.screens.MainActivity::class.java).apply {
             flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK

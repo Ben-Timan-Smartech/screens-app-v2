@@ -90,7 +90,12 @@ const CreateUserForm = ({ onSave, onCancel }) => {
   );
 };
 
-const UsersTab = () => {
+// UsersTab removed in v0.1.6. The Settings → Users tab kept a
+// purely-local MOCK_USERS list that never talked to the backend,
+// while the sidebar's Users page (Users.jsx) was the real one. Having
+// two diverging views of the same data was confusing — sidebar Users
+// is now the single source of truth.
+const _RemovedUsersTab = () => {
   const [users, setUsers] = React.useState(MOCK_USERS);
   const [creating, setCreating] = React.useState(false);
 
@@ -531,9 +536,13 @@ const DriveSyncTab = () => {
 };
 
 const Settings = () => {
-  const [tab, setTab] = React.useState('users');
+  // "Users" tab removed in v0.1.6 — it pointed at a mocked-up local
+  // state list while the real users page (sidebar → Users, route
+  // /users) talks to the actual /api/users endpoints. Having two
+  // different lists of users was confusing — sidebar Users is now
+  // the single source of truth.
+  const [tab, setTab] = React.useState('brands');
   const tabs = [
-    { k: 'users', label: 'Users' },
     { k: 'brands', label: 'Brands' },
     { k: 'locations', label: 'Locations' },
     { k: 'splashes', label: 'Splashes' },
@@ -560,8 +569,6 @@ const Settings = () => {
         </div>
 
         <div style={{ flex: 1, overflow: 'auto', padding: '24px 28px 40px' }}>
-          {tab === 'users' && <UsersTab />}
-
           {tab === 'brands' && (
             <>
               <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>

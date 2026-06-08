@@ -505,13 +505,24 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               />
             </Card>
 
-            {/* Schedule placeholder — same as before */}
+            {/* Schedule lands in v0.1.7 (time-windowed playlists +
+                blackout periods). Showing the slot so admins know
+                it's coming; "Edit" button intentionally absent until
+                the feature is real. */}
             <Card padding={16}>
               <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
                 <div style={{ flex: 1, fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Schedule</div>
-                <Button variant="ghost" size="sm">Edit</Button>
+                <span style={{
+                  fontSize: 10, fontWeight: 500,
+                  color: 'var(--ink-3)',
+                  background: 'var(--ink-8)',
+                  padding: '2px 8px', borderRadius: 999,
+                  textTransform: 'uppercase', letterSpacing: 0.6,
+                }}>Coming soon</span>
               </div>
-              <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>No active schedules · default playlist</div>
+              <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>
+                Time-of-day playlists + blackout windows are in the v0.1.7 release.
+              </div>
             </Card>
 
             <Card padding={16} style={{ borderColor: 'rgba(185, 28, 28, 0.15)' }}>
