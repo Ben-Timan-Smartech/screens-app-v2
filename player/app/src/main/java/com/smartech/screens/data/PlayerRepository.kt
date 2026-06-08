@@ -475,24 +475,30 @@ class PlayerRepository(
     private fun urlEncode(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
 
     /**
-     * Schedule the launcher to relaunch us in ~1.5s, then exit. AlarmManager
-     * fires the PendingIntent even after our process dies, so the app comes
-     * back without depending on the player being set as HOME.
+     * Restart the player. Old implementation used AlarmManager.set +
+     * killProcess, but on Android 11+ pending alarms get cancelled
+     * when the scheduling app's process dies and the bundled-OS
+     * "background activity launch" restrictions kept the alarm from
+     * actually firing on some TV boxes. Result: the CMS Reboot
+     * button looked like it killed the app but the app never came
+     * back.
+     *
+     * New implementation: launch a fresh MainActivity with
+     * CLEAR_TASK + NEW_TASK before the old one dies. The activity
+     * stack is wiped, ExoPlayer / repository state is rebuilt; the
+     * JVM keeps running so the relaunch is reliable. For a "true"
+     * process restart, use Clear cache + Reboot.
      */
     private fun scheduleSelfRestart() {
         val intent = android.content.Intent(appContext, com.smartech.screens.MainActivity::class.java).apply {
             flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
-        val flags = android.app.PendingIntent.FLAG_IMMUTABLE or
-            android.app.PendingIntent.FLAG_UPDATE_CURRENT
-        val pi = android.app.PendingIntent.getActivity(appContext, 0, intent, flags)
-        val am = appContext.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-        am.set(
-            android.app.AlarmManager.RTC,
-            System.currentTimeMillis() + 1_500,
-            pi,
-        )
+        try {
+            appContext.startActivity(intent)
+        } catch (e: Throwable) {
+            LogBuffer.w(TAG, "scheduleSelfRestart startActivity failed: ${e.message}", e)
+        }
     }
 
     /**
@@ -555,10 +561,19 @@ class PlayerRepository(
         LogBuffer.w(TAG, "Command received: $command")
         when (command) {
             "reboot" -> {
-                LogBuffer.w(TAG, "Reboot — scheduling self-restart in 1.5s")
-                kotlinx.coroutines.delay(200)  // let the heartbeat ack flush
+                LogBuffer.w(TAG, "Reboot — restarting activity")
+                // Let the heartbeat ack flush before we yank the
+                // activity. 200ms is enough for the OkHttp call to
+                // commit; longer than 200ms isn't worth a stuck UI.
+                kotlinx.coroutines.delay(200)
                 scheduleSelfRestart()
-                android.os.Process.killProcess(android.os.Process.myPid())
+                // No more killProcess. On Android 11+ alarms scheduled
+                // by the dying process get cancelled, so the old
+                // "kill + relaunch via AlarmManager" pattern was leaving
+                // tablets dark. CLEAR_TASK in the new activity intent
+                // resets the back stack; the JVM continues, repository
+                // singletons get garbage-collected when the activity
+                // finishes, ExoPlayer is rebuilt fresh.
             }
             "clearCache" -> {
                 cache.reconcile(keep = emptySet(), capBytes = 0L)
