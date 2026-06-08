@@ -355,10 +355,16 @@ def _ensure_screen_state(device_id: str) -> dict:
             "pushedAt": None,
             "mixSplash": True,                    # bundled splash mixed in by default
             "audioOn": False,                     # screen-wide audio is muted by default — see /api/screens/<id>/audio
+            "lowDataMode": False,                 # see /api/screens/<id>/low-data-mode
             "pendingCommands": [],                 # list of pending commands for this screen
         }
         _per_screen[device_id] = s
         _save_per_screen()
+    # Back-fill the flag on records persisted before low-data-mode shipped
+    # so the player sees a sane default after a deploy that upgrades the
+    # schema. Cheap (~one dict-get per call); avoids a one-time migration.
+    if "lowDataMode" not in s:
+        s["lowDataMode"] = False
     return s
 
 
@@ -1126,6 +1132,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "pushedAt":    s["pushedAt"],
                         "mixSplash":   s["mixSplash"],
                         "audioOn":     s.get("audioOn", False),
+                        "lowDataMode": s.get("lowDataMode", False),
                         "commands":    commands,
                         "splashUrl":   splash["url"] if splash else None,
                         "splashName":  splash["name"] if splash else None,
@@ -1159,6 +1166,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "currentItems":          state.get("items", []),
                         "mixSplash":             state.get("mixSplash", True),
                         "audioOn":               state.get("audioOn", False),
+                        "lowDataMode":           state.get("lowDataMode", False),
                     }
                     screens.append(record)
             self._send_json({"screens": screens})
@@ -1491,11 +1499,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         # ── Per-screen controls ──────────────────────────────────
-        # POST /api/screens/<deviceId>/command    { command: "reboot"|"clearCache"|"unregister"|"update" }
-        # POST /api/screens/<deviceId>/playlist   { items: [...], mode: "replace"|"append" }
-        # POST /api/screens/<deviceId>/mix-splash { mixSplash: bool }
-        # POST /api/screens/<deviceId>/audio      { audioOn: bool }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio)$", path)
+        # POST /api/screens/<deviceId>/command         { command: "reboot"|"clearCache"|"unregister"|"update" }
+        # POST /api/screens/<deviceId>/playlist        { items: [...], mode: "replace"|"append" }
+        # POST /api/screens/<deviceId>/mix-splash      { mixSplash: bool }
+        # POST /api/screens/<deviceId>/audio           { audioOn: bool }
+        # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|low-data-mode)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -1509,7 +1518,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # `command` is privileged either way (reboot, unregister)
             # and stays user-only.
             is_self_edit = (
-                action in ("playlist", "mix-splash", "audio")
+                action in ("playlist", "mix-splash", "audio", "low-data-mode")
                 and device_id in _screens
             )
             if not is_self_edit:
@@ -1594,6 +1603,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         target=device_id,
                     )
                     self._send_json({"ok": True, "audioOn": state["audioOn"]})
+                    return
+                if action == "low-data-mode":
+                    state = _ensure_screen_state(device_id)
+                    state["lowDataMode"] = bool(body.get("lowDataMode", False))
+                    _save_per_screen()
+                    # No revision bump — like audio, this is a sideband
+                    # flag the player reads on every state poll and
+                    # applies without restarting playback.
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    _log_activity(
+                        kind="settings",
+                        text=(
+                            "Enabled low data mode on " if state["lowDataMode"]
+                            else "Disabled low data mode on "
+                        ) + screen_name,
+                        icon="settings",
+                        target=device_id,
+                    )
+                    self._send_json({"ok": True, "lowDataMode": state["lowDataMode"]})
                     return
 
         self.send_error(404, "Unknown API endpoint")
