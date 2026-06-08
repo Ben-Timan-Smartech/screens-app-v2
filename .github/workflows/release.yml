@@ -1,21 +1,30 @@
-# Release: build the Android player APKs and publish a GitHub Release
-# whenever a `v*` tag lands.
+# Release: build the Android player APKs and publish a GitHub Release.
 #
-# Trigger: `git tag v0.1.1 && git push --tags` (or the scripts/release.sh
-# helper, which bundles bump + tag + push). The tag's version MUST match
-# both the VERSION file and a matching `## vX.Y.Z` section in
-# CHANGELOG.md — the workflow fails fast if any of these disagree.
+# Triggers:
+#   • push of a `v*` tag — the normal flow driven by scripts/release.sh.
+#     Always builds modern + legacy.
+#   • workflow_dispatch — manual trigger. Lets you skip the legacy flavor
+#     for routine modern-only releases (~50 % faster than building both).
+#     Reads `version` from the VERSION file in the source tree; creates
+#     the tag at publish time if it doesn't already exist.
 #
-# Build outputs:
-#   • app-modern-debug.apk — minSdk 26, the everyday build (Android 8+)
-#   • app-legacy-debug.apk — minSdk 23, kept for older TV boxes
+# The build is split into four jobs:
 #
-# Why debug (not release)? Release signing needs a keystore we haven't
-# provisioned yet (see player/app/build.gradle.kts — "add signing config
-# in a local keystore.properties before shipping"). Debug-signed APKs
-# install fine via adb / sideload, which is how we distribute today.
-# Switching to release signing is a follow-up: add the keystore as a
-# repo secret and update this workflow to inject it.
+#       setup ──┬──> build-modern ──┐
+#               │                   ├──> release
+#               └──> build-legacy ──┘   (legacy is conditional)
+#
+# Modern + legacy run on separate runners in parallel, so wall-clock
+# time drops from "modern + legacy sequentially in one Gradle
+# invocation" (~7 min) to "max(modern, legacy)" (~4 min). Plus a
+# ~30–50 % bump from the larger Kotlin daemon heap configured in
+# player/gradle.properties.
+#
+# Release signing: same keystore for both jobs. The KEYSTORE_B64 /
+# KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD repo secrets are
+# decoded inside each build job; without them, builds fall back to
+# debug signing (Updater can't install over an existing release-signed
+# APK in that case).
 
 name: Release
 
@@ -23,43 +32,55 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      include_legacy:
+        description: 'Also build the legacy (Android 6/7) APK. Uncheck for a faster modern-only release.'
+        type: boolean
+        default: true
 
 permissions:
-  contents: write   # needed to create the GitHub Release
+  contents: write   # needed to create the GitHub Release + tag (workflow_dispatch path)
 
 jobs:
-  release:
+  setup:
     runs-on: ubuntu-latest
+    outputs:
+      version:        ${{ steps.ver.outputs.version }}
+      include_legacy: ${{ steps.ver.outputs.include_legacy }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Parse + validate version
+      - name: Resolve version + include_legacy
         id: ver
-        # Strip the leading 'v' off the tag, then cross-check that:
-        #   - the VERSION file matches
-        #   - CHANGELOG.md has a matching `## vX.Y.Z` section
-        # Either mismatch means someone tagged without bumping; abort
-        # with a clear error rather than publishing a confusing release.
+        # Tag-push path: version comes from the tag (must match VERSION
+        # file and have a matching CHANGELOG section). Dispatch path:
+        # version comes from the VERSION file in the source. In both
+        # cases CHANGELOG must already have the matching `## vX.Y.Z`
+        # section — releases without notes are a non-starter.
         run: |
           set -euo pipefail
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            VERSION=$(tr -d '[:space:]' < VERSION)
+            INCLUDE_LEGACY="${{ github.event.inputs.include_legacy }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+            INCLUDE_LEGACY="true"
+          fi
           FILE_VERSION=$(tr -d '[:space:]' < VERSION)
-          if [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
-            echo "::error::Tag is v$TAG_VERSION but VERSION file says $FILE_VERSION"
+          if [ "$VERSION" != "$FILE_VERSION" ]; then
+            echo "::error::Tag is v$VERSION but VERSION file says $FILE_VERSION"
             exit 1
           fi
-          if ! grep -q "^## v$TAG_VERSION\$" CHANGELOG.md; then
-            echo "::error::No '## v$TAG_VERSION' section in CHANGELOG.md"
+          if ! grep -q "^## v$VERSION\$" CHANGELOG.md; then
+            echo "::error::No '## v$VERSION' section in CHANGELOG.md"
             exit 1
           fi
-          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: v$TAG_VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "include_legacy=$INCLUDE_LEGACY" >> "$GITHUB_OUTPUT"
+          echo "Resolved: v$VERSION  include_legacy=$INCLUDE_LEGACY"
 
-      - name: Extract CHANGELOG section for this release
-        id: notes
-        # Pull out everything between `## vX.Y.Z` and the next `## v…`
-        # heading (or EOF). Stored as a file because GHA outputs don't
-        # play well with multi-line values that contain backticks.
+      - name: Extract CHANGELOG section
         run: |
           set -euo pipefail
           awk -v ver="v${{ steps.ver.outputs.version }}" '
@@ -67,34 +88,33 @@ jobs:
             found && /^## v/ { exit }
             found { print }
           ' CHANGELOG.md > release-notes.md
-          if [ ! -s release-notes.md ]; then
-            echo "::error::Extracted CHANGELOG section is empty"
-            exit 1
-          fi
-          echo "Release notes:"
-          cat release-notes.md
+          test -s release-notes.md || { echo "::error::Empty CHANGELOG section"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          retention-days: 1
+
+  # ── Modern build ───────────────────────────────────────────────
+  # Android 8+. The everyday APK. Always runs.
+
+  build-modern:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle (with caching)
-        # The gradle wrapper jar isn't checked in (only the .properties),
-        # so we can't `./gradlew`. setup-gradle installs the version we
-        # pin here and puts `gradle` on PATH. Keep this in sync with
-        # ci.yml and with gradle-wrapper.properties under player/gradle.
-        uses: gradle/actions/setup-gradle@v3
+      - uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '9.4.1'
 
       - name: Decode release keystore (if provided)
-        # Optional — when the KEYSTORE_B64 repo secret is set, decode it
-        # into the spot build.gradle.kts expects. Without it, release
-        # builds fall back to debug signing (works for adb install,
-        # breaks the Updater's "swap APK in place" flow). To enable
-        # proper signing, follow the README → Releasing → Signing
-        # section to generate a keystore and upload the four secrets.
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
         run: |
@@ -103,43 +123,122 @@ jobs:
             printf '%s' "$KEYSTORE_B64" | base64 -d > player/app/build/release-keystore.jks
             echo "Release keystore decoded ($(wc -c < player/app/build/release-keystore.jks) bytes)."
           else
-            echo "No KEYSTORE_B64 secret — release APKs will be debug-signed (Updater cannot replace them)."
+            echo "No KEYSTORE_B64 — debug-signed fallback."
           fi
 
-      - name: Build modern + legacy release APKs
+      - name: Build modern release APK
         working-directory: player
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle :app:assembleModernRelease :app:assembleLegacyRelease --no-daemon --stacktrace
+          KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+        run: gradle :app:assembleModernRelease --no-daemon --stacktrace
 
-      - name: Rename APKs with version + flavor for the release
-        # Default names are app-modern-release.apk / app-legacy-release.apk
-        # — fine, but readers downloading from the Release page benefit
-        # from "screens-player-modern-v0.1.0.apk" so they don't accidentally
-        # install yesterday's build.
+      - name: Stage APK with versioned filename
         run: |
           set -euo pipefail
-          V="${{ steps.ver.outputs.version }}"
+          V="${{ needs.setup.outputs.version }}"
           mkdir -p dist
           cp "player/app/build/outputs/apk/modern/release/app-modern-release.apk" \
              "dist/screens-player-modern-v${V}.apk"
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-modern
+          path: dist/screens-player-modern-*.apk
+          retention-days: 7
+
+  # ── Legacy build ───────────────────────────────────────────────
+  # Android 6/7 (TX3-class boxes). Conditional — workflow_dispatch can
+  # skip it. Tag-push always includes it.
+
+  build-legacy:
+    needs: setup
+    if: needs.setup.outputs.include_legacy == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '9.4.1'
+
+      - name: Decode release keystore (if provided)
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p player/app/build
+            printf '%s' "$KEYSTORE_B64" | base64 -d > player/app/build/release-keystore.jks
+            echo "Release keystore decoded ($(wc -c < player/app/build/release-keystore.jks) bytes)."
+          else
+            echo "No KEYSTORE_B64 — debug-signed fallback."
+          fi
+
+      - name: Build legacy release APK
+        working-directory: player
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+        run: gradle :app:assembleLegacyRelease --no-daemon --stacktrace
+
+      - name: Stage APK with versioned filename
+        run: |
+          set -euo pipefail
+          V="${{ needs.setup.outputs.version }}"
+          mkdir -p dist
           cp "player/app/build/outputs/apk/legacy/release/app-legacy-release.apk" \
              "dist/screens-player-legacy-v${V}.apk"
           ls -lh dist/
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-legacy
+          path: dist/screens-player-legacy-*.apk
+          retention-days: 7
+
+  # ── Publish ────────────────────────────────────────────────────
+  # Collects artifacts (release notes + APKs), creates / updates the
+  # GitHub Release. Runs as soon as both build jobs are done. If
+  # legacy was skipped (workflow_dispatch with include_legacy=false),
+  # the legacy job's result is "skipped" — we still want to publish.
+
+  release:
+    needs: [setup, build-modern, build-legacy]
+    runs-on: ubuntu-latest
+    # `always()` so a skipped legacy doesn't block us; explicit gate
+    # so a *failed* legacy still stops the release.
+    if: |
+      always() &&
+      needs.setup.result == 'success' &&
+      needs.build-modern.result == 'success' &&
+      (needs.build-legacy.result == 'success' || needs.build-legacy.result == 'skipped')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Inspect downloaded artifacts
+        run: |
+          find dist -type f -printf '%p  %s bytes\n' | sort
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Screens v${{ steps.ver.outputs.version }}
-          body_path: release-notes.md
+          tag_name:   v${{ needs.setup.outputs.version }}
+          name:       Screens v${{ needs.setup.outputs.version }}
+          body_path:  dist/release-notes/release-notes.md
+          # Glob patterns — legacy APK is fine to be missing on
+          # modern-only releases (the glob just doesn't match).
           files: |
-            dist/screens-player-modern-v${{ steps.ver.outputs.version }}.apk
-            dist/screens-player-legacy-v${{ steps.ver.outputs.version }}.apk
-          # Releases are not drafts — they're immediately visible. The
-          # tag is the durable identifier; deleting a release won't
-          # remove the tag from history.
+            dist/apk-modern/screens-player-modern-v${{ needs.setup.outputs.version }}.apk
+            dist/apk-legacy/screens-player-legacy-v${{ needs.setup.outputs.version }}.apk
           draft: false
           prerelease: false
