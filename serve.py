@@ -1744,11 +1744,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         # GET: stream the body. Headers go out on the first chunk so we
-        # can echo the actual status (206 vs 200) Drive returned. We
-        # retry once on the well-known "'NoneType' object has no
-        # attribute 'read'" failure inside google-api-python-client +
-        # httplib2 — it's a transient auth-refresh race that nearly
-        # always succeeds on a second try.
+        # can echo the actual status (206 vs 200) Drive returned. For
+        # full-file responses we deliberately OMIT Content-Length and
+        # close the connection at end-of-body — the cached `sizeMb`
+        # from library.json is rounded to 1 decimal MB, so claiming an
+        # exact byte count there causes OkHttp on the player to
+        # premature-EOF the stream and fail the cache write. Range
+        # responses get the precise length back from drive_client.
         headers_sent = False
         attempt = 0
         while True:
@@ -1760,12 +1762,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if not headers_sent:
                         if status == 206:
                             self.send_response(206)
-                            self.send_header("Content-Range", f"bytes {start}-{end}/{size or (end + 1)}")
+                            self.send_header("Content-Range", f"bytes {start}-{end}/*")
                             self.send_header("Content-Length", str(end - start + 1))
                         else:
                             self.send_response(200)
-                            if size:
-                                self.send_header("Content-Length", str(size))
+                            # No Content-Length: actual byte count is
+                            # only knowable as we stream. Connection:close
+                            # tells HTTP/1.1 clients to read until EOF;
+                            # the close_connection flag makes the Python
+                            # HTTP server actually drop the socket after
+                            # this response instead of trying to reuse.
+                            self.send_header("Connection", "close")
+                            self.close_connection = True
                         self.send_header("Content-Type", ctype)
                         self.send_header("Accept-Ranges", "bytes")
                         self.send_header("Cache-Control", "public, max-age=3600")
@@ -1780,15 +1788,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 break
             except Exception as e:
                 if not headers_sent and attempt < 2:
-                    # Retry once. Most failures we've seen are the
-                    # NoneType-has-no-read flake; if it persists on
-                    # attempt 2, surface as a 500.
                     print(f"[/media] stream attempt {attempt} failed for {file_id}: {e} — retrying", file=sys.stderr)
                     continue
                 if not headers_sent:
                     print(f"[/media] stream failed for {file_id}: {e}", file=sys.stderr)
                     self.send_error(500, f"Drive stream failed: {e}")
-                # Headers already out — can't change status. Just drop.
                 return
 
     # Quieter than the default stdlib log line.
