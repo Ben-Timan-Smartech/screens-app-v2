@@ -50,7 +50,14 @@ DRIVE_ROOT = Path(os.environ.get(
 DRIVE_BRANDS_FOLDER_ID = os.environ.get("SCREENS_DRIVE_BRANDS_ID")
 
 OUT_FILE = PROJECT / "app" / "components" / "real-data.jsx"
-LIBRARY_JSON = PROJECT / "app" / "components" / "library.json"
+# Library JSON path. Defaults to the in-tree CMS components dir (good
+# for local dev) but is overridable so Cloud Run can point it at
+# /data/library.json — the FUSE-mounted bucket — so a scan survives
+# container restarts. Mirror the same env var in serve.py.
+LIBRARY_JSON = Path(os.environ.get(
+    "SCREENS_LIBRARY_PATH",
+    str(PROJECT / "app" / "components" / "library.json"),
+))
 
 # Seed brand records — folders whose names + products we know up front. The
 # scanner walks every direct subfolder of `Brand Content/` and uses these as
@@ -552,7 +559,15 @@ def main():
             "products": b["products"],
         })
     library = {"brands": brand_records, "videos": videos}
-    LIBRARY_JSON.write_text(json.dumps(library, indent=2), encoding="utf-8")
+    # Atomic write: stage to a temp file in the same dir, then rename.
+    # On gcsfuse this is a copy + delete (not POSIX-atomic) but
+    # crucially a partial-write reader sees the *old* library.json,
+    # not a half-written one. Important for the CMS poller that hits
+    # /api/library every 10s.
+    LIBRARY_JSON.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LIBRARY_JSON.with_suffix(LIBRARY_JSON.suffix + ".tmp")
+    tmp.write_text(json.dumps(library, indent=2), encoding="utf-8")
+    tmp.replace(LIBRARY_JSON)
     print(f"Wrote {LIBRARY_JSON}")
 
 

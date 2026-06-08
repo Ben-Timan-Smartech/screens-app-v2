@@ -208,7 +208,15 @@ SPLASH_DIR = Path(os.environ.get(
     "SCREENS_SPLASH_DIR",
     r"G:\Shared drives\Smartech\Screens",
 ))
-LIBRARY_JSON = APP_DIR / "components" / "library.json"
+# Library JSON path. Defaults to a sibling of the CMS source, which is
+# fine for local dev (writes land in the checkout). On Cloud Run point
+# this at `/data/library.json` so the Drive-Sync output survives
+# container restarts — the FUSE-mounted bucket is the only writable
+# place outside the ephemeral container filesystem.
+LIBRARY_JSON = Path(os.environ.get(
+    "SCREENS_LIBRARY_PATH",
+    str(APP_DIR / "components" / "library.json"),
+))
 
 # Cloud Run injects $PORT (defaults to 8080); on a laptop we keep 8765.
 PORT = int(os.environ.get("PORT", "8765"))
@@ -453,6 +461,32 @@ def run_library_scan() -> dict:
             tone="err",
         )
         return {"ok": False, "error": str(e)}
+
+
+def _trigger_initial_sync_if_needed() -> None:
+    """Fire one library scan in the background if the cached file is
+    missing or empty. The CMS shows "no content" until library.json
+    has videos in it — without this, a fresh container shows nothing
+    for up to 24h while the daily loop sleeps.
+
+    Cheap to call: a few stat() calls + maybe a JSON parse.
+    """
+    needs_sync = False
+    try:
+        if not LIBRARY_JSON.is_file():
+            needs_sync = True
+        else:
+            data = json.loads(LIBRARY_JSON.read_text(encoding="utf-8"))
+            if not data.get("videos"):
+                needs_sync = True
+    except Exception as e:
+        print(f"[sync] initial-check failed, will sync: {e}", file=sys.stderr)
+        needs_sync = True
+    if not needs_sync:
+        print(f"[sync] library already populated ({LIBRARY_JSON}) — skipping initial sync", file=sys.stderr)
+        return
+    print(f"[sync] library empty at boot — kicking off initial sync", file=sys.stderr)
+    threading.Thread(target=run_library_scan, daemon=True).start()
 
 
 def daily_sync_loop() -> None:
@@ -1688,6 +1722,11 @@ def main() -> None:
     # existing library.json from the last run is used; Drive Sync UI lets
     # the user trigger an on-demand scan if needed.
     threading.Thread(target=daily_sync_loop, daemon=True).start()
+    # Initial scan if the library is missing or empty. Triggers
+    # automatically on fresh deploys so the CMS doesn't show "no
+    # content" for up to 24 hours while waiting for the daily timer.
+    # Runs in the background so the HTTP server starts immediately.
+    _trigger_initial_sync_if_needed()
     httpd = ThreadedServer((BIND, PORT), Handler)
     ip = lan_ip()
     # Stick to ASCII in console output — Windows cp1252 chokes on arrows.
