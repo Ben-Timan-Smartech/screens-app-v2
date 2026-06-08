@@ -42,9 +42,11 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.smartech.screens.BuildConfig
+import com.smartech.screens.ScreensApp
 import com.smartech.screens.data.LocationTaxonomy
 import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.data.UserDirectory
+import com.smartech.screens.update.Updater
 import com.smartech.screens.util.DeviceInfo
 import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.launch
@@ -350,11 +352,30 @@ fun DeviceAdminScreen(
 
             // Actions
             item {
+                // Pull the singleton updater off the Application so the
+                // action below can poke it directly. The check is
+                // already gated to non-destructive — surfaceFailures is
+                // true so the user sees "Up to date" feedback via the
+                // overlay if there's nothing new to install.
+                val updater = (ctx.applicationContext as ScreensApp).updater
+                val updateState by updater.state.collectAsState()
+                val checking = updateState is Updater.State.Checking
                 CardSection("Actions") {
                     ActionRow(
                         title = "Run network test",
                         sub = "Latency, packet loss, download / upload, link details.",
                         onClick = onOpenDiagnostics,
+                    )
+                    Divider()
+                    ActionRow(
+                        title = if (checking) "Checking for updates…" else "Check for updates",
+                        sub = "Asks the server whether a newer player APK is published. Triggers the installer overlay if one is.",
+                        onClick = {
+                            if (!checking) {
+                                LogBuffer.i("Admin", "Update check triggered by ${user.name}")
+                                scope.launch { updater.checkAndUpdate(surfaceFailures = true) }
+                            }
+                        },
                     )
                     Divider()
                     ActionRow(
