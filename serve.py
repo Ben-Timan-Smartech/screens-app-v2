@@ -1464,8 +1464,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             items = body.get("items") or []
             mode = body.get("mode") or "replace"
             requested = body.get("deviceIds") or []
+            # Same fan-out semantics as /api/screens/<id>/playlist —
+            # selecting one member of a sync group implicitly selects
+            # all members, so the group doesn't fracture on the next
+            # poll. Opt out with `fanOutToGroup: false`.
+            fan_out = body.get("fanOutToGroup", True) is not False
             with _STATE_LOCK:
-                targets = [d for d in requested if d in _screens] or list(_screens.keys())
+                base_targets = [d for d in requested if d in _screens] or list(_screens.keys())
+                if fan_out:
+                    expanded: set[str] = set()
+                    for d in base_targets:
+                        st = _per_screen.get(d) or {}
+                        gid = st.get("syncGroup")
+                        if gid:
+                            expanded.update(
+                                k for k, v in _per_screen.items()
+                                if v.get("syncGroup") == gid
+                            )
+                        expanded.add(d)
+                    targets = sorted(expanded)
+                else:
+                    targets = base_targets
                 pushed = 0
                 for device_id in targets:
                     s = _ensure_screen_state(device_id)
@@ -1656,26 +1675,64 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if action == "playlist":
                     items = body.get("items") or []
                     mode = body.get("mode") or "replace"
-                    state = _ensure_screen_state(device_id)
-                    if mode == "append":
-                        existing = {x.get("id") for x in state["items"]}
-                        for v in items:
-                            if v.get("id") not in existing:
-                                state["items"].append(v)
+                    # If the target screen belongs to a sync group, fan
+                    # out the push to every member. Sync only works when
+                    # every member is on the same playlist + revision —
+                    # pushing to a lone member would break the group on
+                    # the next poll, which is almost never what the user
+                    # actually wants. Caller can pass `fanOutToGroup:
+                    # false` to opt out and push to just this screen.
+                    fan_out = body.get("fanOutToGroup", True) is not False
+                    base_state = _ensure_screen_state(device_id)
+                    group_id = base_state.get("syncGroup") if fan_out else None
+                    if group_id:
+                        targets = [
+                            d for d, s in _per_screen.items()
+                            if s.get("syncGroup") == group_id
+                        ]
+                        # Defensive: make sure the original is included
+                        # even if it hasn't shown up in the dict yet.
+                        if device_id not in targets:
+                            targets.append(device_id)
                     else:
-                        state["items"] = list(items)
-                    state["revision"] += 1
-                    state["pushedAt"] = time.time()
+                        targets = [device_id]
+                    for tid in targets:
+                        st = _ensure_screen_state(tid)
+                        if mode == "append":
+                            existing = {x.get("id") for x in st["items"]}
+                            for v in items:
+                                if v.get("id") not in existing:
+                                    st["items"].append(v)
+                        else:
+                            st["items"] = list(items)
+                        st["revision"] += 1
+                        st["pushedAt"] = time.time()
                     _save_per_screen()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     verb = "Replaced playlist on" if mode == "replace" else "Added to"
+                    if group_id and len(targets) > 1:
+                        log_text = (
+                            f"{verb} {len(targets)} screens in sync group "
+                            f"'{group_id}' · {len(items)} video"
+                            f"{'' if len(items) == 1 else 's'}"
+                        )
+                    else:
+                        log_text = (
+                            f"{verb} {screen_name} · {len(items)} video"
+                            f"{'' if len(items) == 1 else 's'}"
+                        )
                     _log_activity(
                         kind="push",
-                        text=f"{verb} {screen_name} · {len(items)} video{'' if len(items) == 1 else 's'}",
+                        text=log_text,
                         icon="upload",
                         target=device_id,
                     )
-                    self._send_json({"ok": True, "revision": state["revision"]})
+                    self._send_json({
+                        "ok": True,
+                        "revision": base_state["revision"],
+                        "screensTargeted": len(targets),
+                        "syncGroup": group_id,
+                    })
                     return
                 if action == "mix-splash":
                     state = _ensure_screen_state(device_id)
