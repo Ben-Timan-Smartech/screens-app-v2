@@ -47,6 +47,7 @@ const AuthProvider = ({ children }) => {
     googleClientId: null,
     allowedDomains: [],
     appVersion: null,
+    latestRelease: null,
   });
 
   const refresh = useCallback(() => {
@@ -58,6 +59,7 @@ const AuthProvider = ({ children }) => {
           googleClientId: data.googleClientId || null,
           allowedDomains: data.allowedDomains || [],
           appVersion: data.appVersion || null,
+          latestRelease: data.latestRelease || null,
         }),
       )
       .catch(() =>
@@ -105,7 +107,7 @@ const FullPage = ({ children }) => (
 );
 
 const LoginScreen = () => {
-  const { googleClientId, allowedDomains, refresh } = useAuth();
+  const { googleClientId, allowedDomains, refresh, latestRelease } = useAuth();
   const buttonRef = useRef(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -204,6 +206,47 @@ const LoginScreen = () => {
         <div style={{
           fontSize: 12, color: 'var(--err)', maxWidth: 360, textAlign: 'center', lineHeight: 1.5,
         }}>{error}</div>
+      )}
+
+      {/* Player APK download — visible without sign-in. Links to the
+          modern build by default (Android 8+). Anyone provisioning a
+          tablet needs this before they can finish onboarding it; gating
+          it behind sign-in would create a chicken-and-egg loop. */}
+      {latestRelease && latestRelease.modernUrl && (
+        <div style={{
+          marginTop: 12, paddingTop: 18, borderTop: 'var(--border-faint)',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+          maxWidth: 360, width: '100%',
+        }}>
+          <div style={{ fontSize: 11, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+            Setting up a new screen?
+          </div>
+          <a
+            href={latestRelease.modernUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              padding: '8px 14px', borderRadius: 4,
+              background: 'var(--ink-10)', color: 'var(--ink-1)',
+              border: 'var(--border-strong)',
+              fontSize: 12, fontWeight: 500, textDecoration: 'none',
+              cursor: 'pointer',
+            }}
+          >
+            Download Player APK · v{latestRelease.versionName}
+          </a>
+          {latestRelease.legacyUrl && (
+            <a
+              href={latestRelease.legacyUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ fontSize: 10, color: 'var(--ink-4)', textDecoration: 'underline' }}
+            >
+              Older device? Use the legacy build (Android 6/7)
+            </a>
+          )}
+        </div>
       )}
     </FullPage>
   );

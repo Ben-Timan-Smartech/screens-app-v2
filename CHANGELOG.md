@@ -18,6 +18,38 @@ Rules:
 
 ---
 
+## v0.1.1
+
+Self-updating + onboarding flow. Tablets can now keep themselves on the
+latest build with no admin involvement, and getting a new screen running is
+a one-link download instead of a copy-paste from chat.
+
+- **Download Player APK from the login screen.** A new "Download Player
+  APK" link appears below the sign-in button, visible without an account.
+  Anyone setting up a tablet can grab the installer directly.
+- **In-app auto-update.** The player checks `/api/release/latest` on launch
+  and every 6 hours. When the server reports a newer version, it
+  downloads the APK, shows a full-screen "Updating to vX.Y.Z…" dialog,
+  and hands off to Android's installer. As long as builds are signed
+  with the stable release keystore, the update is in-place — no data
+  loss, no reinstall.
+- **CMS: "Update player APK" button** on every screen's detail page.
+  Triggers the same updater flow immediately rather than waiting for the
+  6-hour tick. Activity log records who pushed the update.
+- **Release-key signing in CI.** When the `KEYSTORE_B64` /
+  `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` repo secrets are
+  configured, the release workflow signs APKs with the stable key. With
+  no secrets, CI falls back to debug-signed APKs (still install via
+  adb, but the in-app updater can't swap them in place).
+- **Server-side APK proxy.** `/api/release/download/{modern|legacy}`
+  streams the latest release's APK to anyone who asks — needed because
+  the source repo is private and GitHub's anonymous CDN won't serve
+  private assets. Set `SCREENS_GITHUB_TOKEN` on Cloud Run.
+- **Offline-resilient playback** was already in place: every video is
+  pre-downloaded to local storage before it starts playing, and the
+  player reads from `file://` URIs. Network drops only affect the
+  refresh cycle — the current playlist keeps looping.
+
 ## v0.1.0
 
 First versioned release. Everything that landed in the auth + persistence push
