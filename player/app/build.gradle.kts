@@ -12,6 +12,20 @@ if (file("google-services.json").exists()) {
     apply(plugin = "com.google.gms.google-services")
 }
 
+// Single source of truth for the app version: the VERSION file at the repo
+// root, written by scripts/release.sh and consumed by GitHub Actions. We
+// derive versionCode deterministically so APKs always sort correctly in
+// Android's installer (newer > older). MAJOR*10000 + MINOR*100 + PATCH —
+// works up to 99.99.99, after which we'd revisit (we won't).
+val appVersionName: String = file("$rootDir/../VERSION").takeIf { it.exists() }
+    ?.readText()
+    ?.trim()
+    ?: "0.0.0"
+val appVersionCode: Int = appVersionName.split("-").first().split(".").let { parts ->
+    val (major, minor, patch) = (parts + listOf("0", "0", "0")).take(3).map { it.toIntOrNull() ?: 0 }
+    major * 10_000 + minor * 100 + patch
+}
+
 android {
     namespace = "com.smartech.screens"
     compileSdk = 34
@@ -20,8 +34,8 @@ android {
         applicationId = "com.smartech.screens"
         // minSdk lives on the per-flavor blocks below.
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         // Backend base URL — overridable at build time.
         //   ./gradlew assembleRelease -PapiBase=https://api.smartech.group/api

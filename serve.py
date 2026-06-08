@@ -49,6 +49,18 @@ PROJECT = Path(__file__).resolve().parent
 APP_DIR = PROJECT / "app"
 BRAND_DIR = PROJECT / "brand"           # logos, favicons, wordmark
 
+# App version, read once at module load from the VERSION file at the repo
+# root. Surfaced via /api/auth/me so the CMS sidebar can show "v0.1.2"
+# and admins can tell at a glance which release is running. Falls back
+# to "dev" when the file isn't present (e.g. running outside a checkout).
+def _read_version() -> str:
+    try:
+        return (PROJECT / "VERSION").read_text(encoding="utf-8").strip() or "dev"
+    except OSError:
+        return "dev"
+
+APP_VERSION = _read_version()
+
 # MEDIA_DIR / SPLASH_DIR are overridable via environment so the same code
 # runs on a dev laptop (default Windows G:\ path) and inside a container
 # where the Drive mount doesn't exist (e.g. Cloud Run). The defaults work
@@ -679,6 +691,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "user":             auth.public_user(user) if user else None,
                 "googleClientId":   auth.GOOGLE_CLIENT_ID or None,
                 "allowedDomains":   sorted(auth.ALLOWED_DOMAINS),
+                "appVersion":       APP_VERSION,
             })
             return
 

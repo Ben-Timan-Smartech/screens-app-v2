@@ -1,0 +1,70 @@
+# CI: quick sanity checks on every PR and every push to main.
+#
+# Two parallel jobs:
+#   • python-smoke — imports the server modules so a broken syntax /
+#     refactor / missing-symbol bug blocks the PR before deploy.
+#   • android-compile — compiles the modern flavor of the player APK.
+#     Catches Kotlin / Gradle breakage without running the full release
+#     pipeline. Legacy flavor only gets compiled at release time —
+#     keeping CI fast.
+#
+# Release builds happen in release.yml (tag push). This workflow does
+# NOT publish anything.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel an in-flight CI for the same branch when a new push arrives —
+# wastes less compute on rapid pushes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Import server modules
+        # Each module's top-level side effects must succeed:
+        # - db.py ensures the users file path is reachable
+        # - auth.py seeds the owner row
+        # - serve.py wires up the HTTP handlers (no listen)
+        run: |
+          python -c "import db, auth, serve; print('imports OK')"
+      - name: Cookie-header parser regression check
+        # Guards against the SimpleCookie trap (see memory/cookie_parser_trap.md):
+        # ensures the manual parser still finds screens_session when a
+        # neighbouring cookie value isn't RFC-compliant.
+        run: |
+          python -c "
+          import auth
+          h = 'g_state={\"x\":1,\"y\":{\"z\":2}}; screens_session=ABC123'
+          got = auth.session_token_from_cookie_header(h)
+          assert got == 'ABC123', f'parser regressed: got {got!r}'
+          print('parser OK')
+          "
+
+  android-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle (with caching)
+        uses: gradle/actions/setup-gradle@v3
+      - name: Compile modern debug APK
+        working-directory: player
+        # assembleModernDebug compiles + packages the APK without running
+        # tests. Faster than full assemble of both flavors; catches the
+        # same class of regressions.
+        run: ./gradlew :app:assembleModernDebug --no-daemon --stacktrace

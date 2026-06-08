@@ -850,8 +850,11 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
   // Real user from /api/auth/me, fetched once on mount in AuthProvider.
   // Role-based gating uses the `permissions` array on the user object,
   // which mirrors the server's PERMISSIONS dict for the user's role.
+  // appVersion is the canonical VERSION file value, shown in the user
+  // chip so admins can tell which release is running at a glance.
   const auth = useAuth();
   const user = auth.user || { displayName: '—', role: 'viewer', permissions: [] };
+  const appVersion = auth.appVersion;
   const initials = (user.displayName || user.email || '?')
     .split(/\s+/).map((p) => p[0]).join('').slice(0, 2).toUpperCase();
   const [menuOpen, setMenuOpen] = React.useState(false);
@@ -936,7 +939,14 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
           <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {user.displayName}
           </div>
-          <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>{ROLE_LABELS_SIDEBAR[user.role] || user.role}</div>
+          <div style={{ fontSize: 11, color: 'var(--ink-4)', display: 'flex', gap: 6, alignItems: 'baseline' }}>
+            <span>{ROLE_LABELS_SIDEBAR[user.role] || user.role}</span>
+            {appVersion && (
+              <span style={{ fontFamily: 'var(--font-mono, JetBrains Mono, monospace)', fontSize: 10, color: 'var(--ink-5, var(--ink-4))' }} title="App version">
+                · v{appVersion}
+              </span>
+            )}
+          </div>
         </div>
         <span style={{ color: 'var(--ink-4)', display: 'flex' }}><Icon.more /></span>
       </button>
