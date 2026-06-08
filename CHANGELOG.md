@@ -18,6 +18,56 @@ Rules:
 
 ---
 
+## v0.1.6
+
+Multi-screen sync, low-data mode, playback watchdog, and a UI cleanup pass.
+
+- **Sync groups: multi-screen synchronised playback.** Tag two or more
+  screens with the same **Sync group** label (Screen detail → Display
+  card), and the server hands every group member identical playback
+  hints on each poll — same item, same position. Tablets seek
+  ExoPlayer to correct drift when it exceeds 1.5 s, so screens in the
+  group stay aligned. Pushing a playlist to one screen in a group
+  fans out to every member automatically — opt out per request with
+  `fanOutToGroup: false`.
+- **Low data mode.** Per-screen toggle on the screen detail page and
+  in the tablet's staff overlay. When on, the tablet polls
+  `/api/state` every 60 s instead of every 3 s and skips the
+  per-location splash download. Cached videos are unaffected. Trade
+  near-real-time CMS responsiveness for ~95% less idle bandwidth —
+  great for cellular-tethered or metered installs.
+- **Playback watchdog.** Background loop on the tablet that samples
+  ExoPlayer every 30 s. If playback stalls (frozen position, stuck
+  buffering for 2 min, unhandled player error), it escalates through
+  `prepare()` → playlist refresh → in-place activity restart. Zero
+  cost when healthy; auto-recovers the rare case where the player
+  would otherwise silently freeze and need a manual reboot.
+- **Content Library: ~450 kB → 0 kB per poll on the idle path.**
+  Server returns ETag on `/api/library`; client sends
+  `If-None-Match` and skips on 304. Poll cadence dropped from 10 s
+  to 60 s. Net: ~150 MB/h per open CMS tab → kilobytes.
+- **Content Library play button** no longer renders white-on-white
+  in dark mode.
+- **Settings → Users** removed in favour of the sidebar's Users page
+  (the Settings tab was a mocked-up local list; sidebar is the real
+  one talking to `/api/users`).
+- **UI cleanup pass** — placeholders that didn't do anything now
+  either say so or are gone:
+    - Schedule card on the screen detail page → "Coming soon" badge.
+    - Schedules sidebar page → "Preview only" banner above the
+      existing mock.
+    - "Filters" button on the library → removed.
+    - "Add to schedule" in the selection action bar → removed.
+    - Upload panel → "Coming soon" explainer pointing at the Drive
+      Sync workflow that actually works today.
+- **On-tablet preview** page now mirrors the live brand list from
+  the library and drops the hardcoded "Saks Fifth Avenue" / fake
+  helpline copy. A "Preview only" badge on the back-to-admin chip
+  makes it clear nothing pushes to real screens from this page.
+- **Admin overlay** "Cancel" button renamed to "Return to splash"
+  with a proper bordered button style — it always meant "exit the
+  staff overlay back to the player loop," not "undo my changes."
+
 ## v0.1.5
 
 State that actually survives the things that used to wipe it.
