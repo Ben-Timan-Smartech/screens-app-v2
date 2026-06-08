@@ -45,6 +45,10 @@ data class VideoItem(
     val hash: String? = null,
     val brand: String? = null,
     val product: String? = null,
+    /** When true, this video plays with audio even if the screen is muted.
+     *  Set per-video from the CMS Content Library; flows through here so
+     *  the player can apply the right volume on each item transition. */
+    @SerialName("defaultUnmute") val defaultUnmute: Boolean = false,
 )
 
 /** Response of GET /device/playlist. Server resolves schedules before returning. */

@@ -286,6 +286,7 @@ def _ensure_screen_state(device_id: str) -> dict:
             "items": [],
             "pushedAt": None,
             "mixSplash": True,                    # bundled splash mixed in by default
+            "audioOn": False,                     # screen-wide audio is muted by default — see /api/screens/<id>/audio
             "pendingCommands": [],                 # list of pending commands for this screen
         }
         _per_screen[device_id] = s
@@ -336,6 +337,45 @@ def _library_lookup_by_drive_id(drive_file_id: str) -> dict | None:
     _load_library()
     idx = _LIBRARY_CACHE.get("by_drive_id") or {}
     return idx.get(drive_file_id)
+
+
+def _library_lookup_by_id(video_id: str) -> dict | None:
+    """Return the cached library entry for the synthetic video ID
+    (e.g. "sonos-1"). Used to merge per-video flags (defaultUnmute,
+    etc.) into per-screen pushed playlist items at /api/state time."""
+    _load_library()
+    data = _LIBRARY_CACHE.get("data") or {}
+    for v in (data.get("videos") or []):
+        if v.get("id") == video_id:
+            return v
+    return None
+
+
+def _update_video_in_library(video_id: str, patch: dict) -> dict | None:
+    """Mutate library.json in-place: find the video with matching id,
+    apply patch (skipping None values), atomic-rewrite the file. Bumps
+    the in-memory cache mtime sentinel so the next /api/library read
+    re-loads from disk. Returns the updated entry, or None if id missing."""
+    _load_library()
+    data = _LIBRARY_CACHE.get("data") or {}
+    target = None
+    for v in (data.get("videos") or []):
+        if v.get("id") == video_id:
+            for key, value in patch.items():
+                if value is None:
+                    continue
+                v[key] = value
+            target = v
+            break
+    if target is None:
+        return None
+    LIBRARY_JSON.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LIBRARY_JSON.with_suffix(LIBRARY_JSON.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(LIBRARY_JSON)
+    # Force cache reload on next access.
+    _LIBRARY_CACHE["mtime"] = 0.0
+    return dict(target)
 
 
 # ── Splash registry ──────────────────────────────────────────────────
@@ -994,12 +1034,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     screen_meta = _screens.get(screen_id, {})
                     location = screen_meta.get("location") or {}
                     splash = resolve_splash_for(location.get("city"), location.get("concept"))
+                    # Enrich each pushed item with library-side flags
+                    # (defaultUnmute) so the player can apply per-video
+                    # audio at playback time. The items list is small
+                    # per screen (a handful at most) so the lookup is
+                    # cheap.
+                    enriched_items = []
+                    for it in s["items"]:
+                        lib = _library_lookup_by_id(it.get("id") or "")
+                        merged = dict(it)
+                        merged["defaultUnmute"] = bool((lib or {}).get("defaultUnmute"))
+                        enriched_items.append(merged)
                     payload = {
                         "screenId":    screen_id,
                         "revision":    s["revision"],
-                        "items":       s["items"],
+                        "items":       enriched_items,
                         "pushedAt":    s["pushedAt"],
                         "mixSplash":   s["mixSplash"],
+                        "audioOn":     s.get("audioOn", False),
                         "commands":    commands,
                         "splashUrl":   splash["url"] if splash else None,
                         "splashName":  splash["name"] if splash else None,
@@ -1032,6 +1084,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "currentRevision":       state.get("revision", 0),
                         "currentItems":          state.get("items", []),
                         "mixSplash":             state.get("mixSplash", True),
+                        "audioOn":               state.get("audioOn", False),
                     }
                     screens.append(record)
             self._send_json({"screens": screens})
@@ -1359,24 +1412,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         # ── Per-screen controls ──────────────────────────────────
-        # POST /api/screens/<deviceId>/command   { command: "reboot"|"clearCache"|"unregister" }
-        # POST /api/screens/<deviceId>/playlist  { items: [...], mode: "replace"|"append" }
+        # POST /api/screens/<deviceId>/command    { command: "reboot"|"clearCache"|"unregister"|"update" }
+        # POST /api/screens/<deviceId>/playlist   { items: [...], mode: "replace"|"append" }
         # POST /api/screens/<deviceId>/mix-splash { mixSplash: bool }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash)$", path)
+        # POST /api/screens/<deviceId>/audio      { audioOn: bool }
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
             # Two callers hit these endpoints:
             #   • CMS users (push from the web admin) — gated on the
             #     `screens.push` / `screens.command` permission.
-            #   • The tablet itself (staff overlay's playlist editor
-            #     or mix-splash toggle) — no user session. We let the
-            #     tablet edit *its own* playlist + mix-splash flag
-            #     when the URL's deviceId matches a registered screen.
+            #   • The tablet itself (staff overlay's playlist editor,
+            #     mix-splash toggle, audio toggle) — no user session.
+            #     We let the tablet edit *its own* state when the
+            #     URL's deviceId matches a registered screen.
             # `command` is privileged either way (reboot, unregister)
             # and stays user-only.
             is_self_edit = (
-                action in ("playlist", "mix-splash")
+                action in ("playlist", "mix-splash", "audio")
                 and device_id in _screens
             )
             if not is_self_edit:
@@ -1441,6 +1495,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state["revision"] += 1                  # bump so player picks up flag change
                     self._send_json({"ok": True, "mixSplash": state["mixSplash"]})
                     return
+                if action == "audio":
+                    state = _ensure_screen_state(device_id)
+                    state["audioOn"] = bool(body.get("audioOn", False))
+                    # Don't bump revision — audio toggles shouldn't
+                    # force a full playlist re-init on the tablet.
+                    # The player polls /api/state every ~3s and reads
+                    # audioOn there, so the change picks up promptly
+                    # without restarting the current video.
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    _log_activity(
+                        kind="settings",
+                        text=("Unmuted " if state["audioOn"] else "Muted ") + screen_name,
+                        icon="settings",
+                        target=device_id,
+                    )
+                    self._send_json({"ok": True, "audioOn": state["audioOn"]})
+                    return
 
         self.send_error(404, "Unknown API endpoint")
 
@@ -1451,6 +1522,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _serve_api_patch(self) -> None:
         path = self.path.split("?", 1)[0]
         body = self._read_json()
+
+        # ── Update a video's library-side flags ─────────────────
+        # PATCH /api/library/videos/<id> { defaultUnmute: bool }
+        # Used by the CMS content library to toggle a per-video
+        # "default to unmute" flag. The next /api/state response to
+        # the tablet includes the new value, and the player applies
+        # it on the next onMediaItemTransition.
+        m_v = re.match(r"^/api/library/videos/([A-Za-z0-9_\-]+)$", path)
+        if m_v:
+            actor = self._require_perm("library.edit")
+            if actor is None:
+                return
+            video_id = m_v.group(1)
+            patch: dict = {}
+            if "defaultUnmute" in body:
+                patch["defaultUnmute"] = bool(body.get("defaultUnmute"))
+            if not patch:
+                self._send_json({"error": "nothing_to_update"}, status=400); return
+            updated = _update_video_in_library(video_id, patch)
+            if not updated:
+                self._send_json({"error": "video_not_found"}, status=404); return
+            _log_activity(
+                kind="settings",
+                text=("Unmuted '" if patch.get("defaultUnmute") else "Muted '")
+                     + (updated.get("title") or video_id) + "' by default",
+                icon="settings",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"video": updated})
+            return
+
         m = re.match(r"^/api/users/([A-Za-z0-9_-]+)$", path)
         if not m:
             self.send_error(404, "Unknown API endpoint"); return

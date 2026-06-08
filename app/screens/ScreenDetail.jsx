@@ -233,6 +233,21 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
+  const handleAudioToggle = async (next) => {
+    if (!targetDeviceId) return;
+    try {
+      await setScreenAudio(targetDeviceId, next);
+      showToast(
+        isLive
+          ? (next ? 'Audio enabled — all videos play with sound' : 'Audio muted — only library-flagged videos play sound')
+          : (next ? 'Audio will turn on next reconnect' : 'Audio will mute on next reconnect'),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
   const handleClearAll = async () => {
     if (!targetDeviceId) return;
     const len = playlist.length;
@@ -475,6 +490,17 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                   : 'Plays the bundled splash between videos. Default on.'}
                 value={hasHistory ? !!lastKnown.mixSplash : true}
                 onChange={handleMixSplashToggle}
+                disabled={!canEdit}
+              />
+              <ToggleRow
+                label="Audio"
+                sub={canEdit
+                  ? (isLive
+                    ? 'Off (default): muted; videos can opt in via the Content Library. On: every video plays with sound.'
+                    : 'Off (default): muted; videos can opt in via the Content Library. On: every video plays with sound. Applies when the tablet reconnects.')
+                  : 'Off by default; videos can opt in via the Content Library.'}
+                value={hasHistory ? !!lastKnown.audioOn : false}
+                onChange={handleAudioToggle}
                 disabled={!canEdit}
               />
             </Card>

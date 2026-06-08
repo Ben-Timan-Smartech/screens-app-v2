@@ -201,6 +201,9 @@ class PlayerRepository(
         val revision: Int = 0,
         val items: List<LiveItem> = emptyList(),
         val mixSplash: Boolean = true,
+        /** Screen-wide audio override. Default false = muted. When true,
+         *  every video plays unmuted regardless of its own defaultUnmute. */
+        val audioOn: Boolean = false,
         val commands: List<LiveCommand> = emptyList(),
         val splashUrl: String? = null,
         val splashName: String? = null,
@@ -221,6 +224,9 @@ class PlayerRepository(
         val url: String,
         val durationSec: Int? = null,
         val sizeMb: Double? = null,
+        /** Per-video "play with audio even if screen is muted" flag.
+         *  Set in the CMS Content Library. */
+        val defaultUnmute: Boolean = false,
     )
 
     /** Latest mix-splash flag from the server. Observable so the staff UI can
@@ -228,6 +234,13 @@ class PlayerRepository(
      *  the snapshot via the StateFlow .value. */
     private val _mixSplash = MutableStateFlow(true)
     val mixSplashFlow: StateFlow<Boolean> = _mixSplash
+
+    /** Latest screen-wide audio-on flag. False (default) = muted. The
+     *  player applies this to ExoPlayer's volume on every item
+     *  transition, OR'd with the per-video defaultUnmute flag. */
+    private val _audioOn = MutableStateFlow(false)
+    val audioOnFlow: StateFlow<Boolean> = _audioOn
+    val audioOn: Boolean get() = _audioOn.value
     val mixSplash: Boolean get() = _mixSplash.value
 
     /** Per-video download progress. Cleared when a download finishes. */
@@ -311,6 +324,16 @@ class PlayerRepository(
             LogBuffer.i(TAG, "Mix splash → ${state.mixSplash}")
             // Re-publish current playlist so the controller picks up the new flag.
             lastPlaylist?.let { publish(it) }
+        }
+
+        // Screen-wide audio flag. Updated silently — no re-publish
+        // because PlayerController re-evaluates volume on each item
+        // transition via the audioOn flow + the per-item flag, so a
+        // change here picks up on the next video without restarting
+        // playback.
+        if (state.audioOn != _audioOn.value) {
+            _audioOn.value = state.audioOn
+            LogBuffer.i(TAG, "Audio → ${if (state.audioOn) "on" else "off"}")
         }
 
         // Per-location splash. Download (or clear) when the URL changes.
@@ -478,6 +501,40 @@ class PlayerRepository(
                 lastLiveRevision = -1
             }.onFailure {
                 LogBuffer.w(TAG, "setMixSplashOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
+            }
+        }
+    }
+
+    /** Toggle the per-screen audio mute/unmute flag on the server. The
+     *  global flag overrides "default to mute"; if it's off the player
+     *  falls back to the per-video defaultUnmute setting from the
+     *  Content Library. */
+    suspend fun setAudioOnServer(value: Boolean) {
+        LogBuffer.i(TAG, "setAudioOnServer → $value")
+        // Optimistic local update — UI + player react instantly.
+        _audioOn.value = value
+        lastPlaylist?.let { publish(it) }
+
+        val base = store.liveServerUrl.first()?.trimEnd('/')
+        if (base.isNullOrBlank()) {
+            LogBuffer.w(TAG, "setAudioOnServer skipped — no liveServerUrl set")
+            return
+        }
+        val deviceId = store.ensureDeviceId()
+        val body = """{"audioOn":$value}"""
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/screens/${urlEncode(deviceId)}/audio")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) LogBuffer.w(TAG, "setAudioOnServer HTTP ${r.code}")
+                    else LogBuffer.i(TAG, "setAudioOnServer OK")
+                }
+                lastLiveRevision = -1
+            }.onFailure {
+                LogBuffer.w(TAG, "setAudioOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
         }
     }
@@ -737,6 +794,7 @@ class PlayerRepository(
         return VideoItem(
             id = id, title = title, brand = brand, product = product,
             url = absoluteUrl, durationSec = durationSec,
+            defaultUnmute = defaultUnmute,
         )
     }
 

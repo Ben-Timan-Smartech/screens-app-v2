@@ -8,6 +8,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import com.smartech.screens.R
 import com.smartech.screens.data.PlayerRepository
+import com.smartech.screens.util.LogBuffer
 
 /**
  * Thin wrapper around [ExoPlayer] that plays a list of locally-cached files on
@@ -32,7 +33,46 @@ class PlayerController(context: Context) {
         .apply {
             repeatMode = Player.REPEAT_MODE_ALL
             playWhenReady = true
+            // Default to silent — the global audioOn flag flips it on,
+            // and per-video defaultUnmute (set in the Content Library)
+            // overrides the silent default on individual items.
+            volume = 0f
         }
+
+    /** Global "unmute everything" flag pushed from the server/staff overlay. */
+    private var audioOn: Boolean = false
+    /** Per-item override: id → defaultUnmute. Populated whenever a playlist
+     *  is applied; consulted on every item transition. The bundled splash
+     *  is never in this map and therefore always plays at the audioOn
+     *  volume (muted by default). */
+    private val defaultUnmuteById = mutableMapOf<String, Boolean>()
+
+    init {
+        // Re-apply volume whenever the player moves to the next item in the
+        // queue. Without this listener, the first MediaItem's volume sticks
+        // for the whole loop.
+        player.addListener(object : Player.Listener {
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                applyVolumeForCurrentItem()
+            }
+        })
+    }
+
+    /** Flip the global audioOn flag and re-apply volume immediately. */
+    fun setAudioOn(value: Boolean) {
+        if (audioOn == value) return
+        audioOn = value
+        LogBuffer.i("PlayerController", "Audio → ${if (value) "on" else "off"}")
+        applyVolumeForCurrentItem()
+    }
+
+    private fun applyVolumeForCurrentItem() {
+        val id = player.currentMediaItem?.mediaId
+        val perItem = id?.let { defaultUnmuteById[it] } ?: false
+        val unmute = audioOn || perItem
+        val target = if (unmute) 1f else 0f
+        if (player.volume != target) player.volume = target
+    }
 
     /** Swap in a downloaded splash; null reverts to the bundled one. */
     fun setRemoteSplash(file: java.io.File?) {
@@ -101,9 +141,17 @@ class PlayerController(context: Context) {
                 .setUri(Uri.fromFile(lv.file))
                 .build()
         }
+        // Refresh the per-item defaultUnmute map for volume decisions.
+        defaultUnmuteById.clear()
+        for (lv in playlist) {
+            if (lv.item.defaultUnmute) defaultUnmuteById[lv.item.id] = true
+        }
         player.setMediaItems(items, /* resetPosition = */ true)
         player.prepare()
         player.play()
+        // onMediaItemTransition fires asynchronously; apply now so the very
+        // first item doesn't briefly play at the previous loop's volume.
+        applyVolumeForCurrentItem()
     }
 
     fun release() {

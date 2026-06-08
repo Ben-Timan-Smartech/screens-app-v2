@@ -392,6 +392,33 @@ const PreviewModal = ({ video, onClose }) => {
         : video._dims || null)
     : null;
   const [dims, setDims] = React.useState(initialDims);
+  // Per-video "default to unmute" flag. Reads from MOCK_VIDEOS so it
+  // reflects whatever /api/library last returned; flipping the toggle
+  // PATCHes the server and optimistically mutates the in-memory entry.
+  const [defaultUnmute, setDefaultUnmute] = React.useState(!!video?.defaultUnmute);
+  const [unmuteBusy, setUnmuteBusy] = React.useState(false);
+  React.useEffect(() => { setDefaultUnmute(!!video?.defaultUnmute); }, [video]);
+  const onToggleUnmute = async (next) => {
+    if (!video || unmuteBusy) return;
+    setUnmuteBusy(true);
+    const prev = defaultUnmute;
+    setDefaultUnmute(next);
+    try {
+      await setVideoDefaultUnmute(video.id, next);
+      // Optimistic in-memory update so the change is visible without
+      // waiting for the next /api/library poll.
+      video.defaultUnmute = next;
+      showToast(
+        next ? 'Will play with sound by default' : 'Reverted to muted by default',
+        'ok',
+      );
+    } catch (e) {
+      setDefaultUnmute(prev);
+      showToast(`Failed: ${e.message}`, 'err');
+    } finally {
+      setUnmuteBusy(false);
+    }
+  };
   const videoRef = React.useRef(null);
 
   React.useEffect(() => {
@@ -463,6 +490,36 @@ const PreviewModal = ({ video, onClose }) => {
           autoPlay
           style={{ width: '100%', maxHeight: '70vh', background: '#000', display: 'block' }}
         />
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '12px 16px', borderTop: 'var(--border)',
+          background: 'var(--ink-9)',
+        }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Default to unmute</div>
+            <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>
+              When the screen is muted, this video still plays with sound.
+            </div>
+          </div>
+          <button
+            disabled={unmuteBusy}
+            onClick={() => onToggleUnmute(!defaultUnmute)}
+            style={{
+              position: 'relative',
+              width: 38, height: 22, borderRadius: 999,
+              background: defaultUnmute ? 'var(--ink-0)' : 'var(--ink-6)',
+              transition: 'background .15s',
+              cursor: unmuteBusy ? 'wait' : 'pointer',
+              opacity: unmuteBusy ? 0.6 : 1,
+            }}>
+            <span style={{
+              position: 'absolute', top: 2, left: defaultUnmute ? 18 : 2,
+              width: 18, height: 18, borderRadius: '50%',
+              background: '#fff', transition: 'left .15s',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+            }} />
+          </button>
+        </div>
       </div>
     </div>
   );
