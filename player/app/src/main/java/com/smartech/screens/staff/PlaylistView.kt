@@ -73,6 +73,7 @@ fun PlaylistView(
 ) {
     val mixSplash by repository.mixSplashFlow.collectAsState()
     val audioOn by repository.audioOnFlow.collectAsState()
+    val lowDataMode by repository.lowDataModeFlow.collectAsState()
     // intendedPlaylist mirrors what the server says is on this screen, even
     // when some items are still downloading. That way the row appears the
     // moment the user adds it — with a progress bar — rather than waiting
@@ -195,6 +196,34 @@ fun PlaylistView(
                             LogBuffer.i("PlaylistView", "Audio tapped → $value")
                             scope.launch {
                                 repository.setAudioOnServer(value)
+                            }
+                        },
+                        enabled = true,
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Low data mode toggle. Polls every 60 s instead of 3 s
+                // and skips the per-location splash. Cached videos
+                // already on disk are unaffected.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Low data mode", color = Bone, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            if (lowDataMode)
+                                "Polling every 60 s; skipping the per-location splash download."
+                            else
+                                "Polls the server every ~3 s for new playlist + commands.",
+                            color = Color(0x99FFFFFF), fontSize = 12.sp,
+                        )
+                    }
+                    DarkToggle(
+                        on = lowDataMode,
+                        onChange = { value ->
+                            LogBuffer.i("PlaylistView", "Low data tapped → $value")
+                            scope.launch {
+                                repository.setLowDataModeOnServer(value)
                             }
                         },
                         enabled = true,

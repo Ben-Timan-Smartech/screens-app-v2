@@ -92,6 +92,62 @@ const StatusLine = ({ label, value, mono, tone }) => (
   </div>
 );
 
+// SyncGroupRow — text input alongside the other Display toggles. Two
+// or more screens that share a syncGroup value get an identical
+// playback hint from the server on every poll, so they stay aligned
+// to the same item + position. Empty value detaches the screen from
+// any group. Commits on blur or Enter; we don't fire a request on
+// every keystroke. The "suggested" hint surfaces the screen's storeId
+// so the operator can one-click set a sensible default group.
+const SyncGroupRow = ({ value, suggested, onCommit, disabled, isLive }) => {
+  const [draft, setDraft] = React.useState(value || '');
+  // Keep the input in sync when the prop changes (e.g. another browser
+  // tab toggled it, or the server returned a different value).
+  React.useEffect(() => { setDraft(value || ''); }, [value]);
+  const commit = () => {
+    const next = (draft || '').trim();
+    if (next === (value || '').trim()) return; // no-op
+    onCommit(next);
+  };
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0' }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Sync group</div>
+        <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>
+          {isLive
+            ? 'Screens sharing this label play the same video at the same time. Leave blank for independent playback.'
+            : 'Screens sharing this label play the same video at the same time. Saves now, applies when the tablet reconnects.'}
+        </div>
+        {suggested && !draft && (
+          <div
+            onClick={() => !disabled && (setDraft(suggested), onCommit(suggested))}
+            style={{
+              marginTop: 4, fontSize: 11, color: 'var(--ink-2)',
+              cursor: disabled ? 'default' : 'pointer', textDecoration: disabled ? 'none' : 'underline',
+            }}>
+            Suggested: {suggested}
+          </div>
+        )}
+      </div>
+      <input
+        value={draft}
+        disabled={disabled}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.target.blur(); } }}
+        placeholder="e.g. NYC-1"
+        style={{
+          width: 140, height: 28, padding: '0 8px',
+          border: 'var(--border-strong)', borderRadius: 5,
+          fontSize: 12, color: 'var(--ink-1)',
+          fontFamily: 'inherit',
+          background: disabled ? 'var(--ink-9)' : 'var(--ink-10)',
+        }}
+      />
+    </div>
+  );
+};
+
 // Toggle row — used for "Mix splash into playlist".
 const ToggleRow = ({ label, sub, value, onChange, disabled }) => (
   <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0' }}>
@@ -241,6 +297,37 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
         isLive
           ? (next ? 'Audio enabled — all videos play with sound' : 'Audio muted — only library-flagged videos play sound')
           : (next ? 'Audio will turn on next reconnect' : 'Audio will mute on next reconnect'),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
+  const handleLowDataModeToggle = async (next) => {
+    if (!targetDeviceId) return;
+    try {
+      await setScreenLowDataMode(targetDeviceId, next);
+      showToast(
+        isLive
+          ? (next ? 'Low data mode on — polling slowed to 60 s' : 'Low data mode off — polling restored to 3 s')
+          : (next ? 'Low data mode will engage on reconnect' : 'Low data mode will disengage on reconnect'),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
+  const handleSyncGroupChange = async (raw) => {
+    if (!targetDeviceId) return;
+    const next = (raw || '').trim();
+    try {
+      await setScreenSyncGroup(targetDeviceId, next || null);
+      showToast(
+        next
+          ? `Joined sync group "${next}" — screens in this group play in lockstep`
+          : 'Left sync group — playback runs independently',
         'ok',
       );
     } catch (e) {
@@ -503,15 +590,44 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 onChange={handleAudioToggle}
                 disabled={!canEdit}
               />
+              <ToggleRow
+                label="Low data mode"
+                sub={canEdit
+                  ? (isLive
+                    ? 'Tablet polls every 60 s instead of 3 s and skips the per-location splash download. Cached videos already on disk are unaffected.'
+                    : 'Tablet polls every 60 s instead of 3 s and skips the per-location splash download. Cached videos already on disk are unaffected. Applies when the tablet reconnects.')
+                  : 'When on, tablet polls every 60 s and skips the per-location splash.'}
+                value={hasHistory ? !!lastKnown.lowDataMode : false}
+                onChange={handleLowDataModeToggle}
+                disabled={!canEdit}
+              />
+              <SyncGroupRow
+                value={hasHistory ? (lastKnown.syncGroup || '') : ''}
+                suggested={hasHistory ? (lastKnown.location?.storeId || '') : ''}
+                onCommit={handleSyncGroupChange}
+                disabled={!canEdit}
+                isLive={isLive}
+              />
             </Card>
 
-            {/* Schedule placeholder — same as before */}
+            {/* Schedule lands in v0.1.7 (time-windowed playlists +
+                blackout periods). Showing the slot so admins know
+                it's coming; "Edit" button intentionally absent until
+                the feature is real. */}
             <Card padding={16}>
               <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
                 <div style={{ flex: 1, fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Schedule</div>
-                <Button variant="ghost" size="sm">Edit</Button>
+                <span style={{
+                  fontSize: 10, fontWeight: 500,
+                  color: 'var(--ink-3)',
+                  background: 'var(--ink-8)',
+                  padding: '2px 8px', borderRadius: 999,
+                  textTransform: 'uppercase', letterSpacing: 0.6,
+                }}>Coming soon</span>
               </div>
-              <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>No active schedules · default playlist</div>
+              <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>
+                Time-of-day playlists + blackout windows are in the v0.1.7 release.
+              </div>
             </Card>
 
             <Card padding={16} style={{ borderColor: 'rgba(185, 28, 28, 0.15)' }}>

@@ -247,9 +247,34 @@ class PlayerRepository(
         /** Screen-wide audio override. Default false = muted. When true,
          *  every video plays unmuted regardless of its own defaultUnmute. */
         val audioOn: Boolean = false,
+        /** When true, the tablet slows its poll cadence and skips the
+         *  remote splash download. See [LOW_DATA_POLL_MS] /
+         *  [DEFAULT_POLL_MS]. */
+        val lowDataMode: Boolean = false,
+        /** Optional sync-group ID. When set, the server returns a
+         *  [playback] block telling this tablet exactly where in the
+         *  loop it should be — so every screen in the group stays
+         *  aligned. */
+        val syncGroup: String? = null,
+        val playback: LivePlayback? = null,
+        /** Server's wall-clock at response build time. We use it to
+         *  correct for transit latency when seeking. */
+        val serverNowMs: Long? = null,
         val commands: List<LiveCommand> = emptyList(),
         val splashUrl: String? = null,
         val splashName: String? = null,
+    )
+
+    /** Server-computed "what should be on screen right now" for a
+     *  sync group. Fields mirror server's _compute_playback output. */
+    @Serializable
+    data class LivePlayback(
+        val itemId: String,
+        val itemIndex: Int,
+        val positionMs: Long,
+        val itemStartedAtMs: Long,
+        val loopDurationSec: Double = 0.0,
+        val groupId: String = "",
     )
 
     @Serializable
@@ -285,6 +310,38 @@ class PlayerRepository(
     val audioOnFlow: StateFlow<Boolean> = _audioOn
     val audioOn: Boolean get() = _audioOn.value
     val mixSplash: Boolean get() = _mixSplash.value
+
+    /** Low-data mode. When true the tablet polls /api/state every
+     *  [LOW_DATA_POLL_MS] (60s) instead of [DEFAULT_POLL_MS] (3s) and
+     *  skips the remote per-location splash download (falling back to
+     *  the APK-bundled splash). Cached videos already on disk are
+     *  unaffected — once a clip is downloaded it never re-fetches. */
+    private val _lowDataMode = MutableStateFlow(false)
+    val lowDataModeFlow: StateFlow<Boolean> = _lowDataMode
+    val lowDataMode: Boolean get() = _lowDataMode.value
+
+    /** Latest sync-group ID for the staff UI to surface. Null = not
+     *  in a group, so no sync corrections are applied. */
+    private val _syncGroup = MutableStateFlow<String?>(null)
+    val syncGroupFlow: StateFlow<String?> = _syncGroup
+
+    /** Sync-correction hint. Emitted once per /api/state poll when the
+     *  server returned a playback block. PlayerController collects this
+     *  and seeks ExoPlayer if it has drifted past the correction
+     *  threshold. */
+    data class PlaybackSyncHint(
+        val itemId: String,
+        val itemIndex: Int,
+        val positionMs: Long,
+        /** [System.currentTimeMillis] adjusted for the round-trip
+         *  delta between this tablet and the server, so the consumer
+         *  can compute "expected position right now" without trusting
+         *  either clock alone. */
+        val adjustedAtMs: Long,
+        val groupId: String,
+    )
+    private val _playbackSync = MutableStateFlow<PlaybackSyncHint?>(null)
+    val playbackSyncFlow: StateFlow<PlaybackSyncHint?> = _playbackSync
 
     /** Per-video download progress. Cleared when a download finishes. */
     data class DownloadProgress(
@@ -379,8 +436,54 @@ class PlayerRepository(
             LogBuffer.i(TAG, "Audio → ${if (state.audioOn) "on" else "off"}")
         }
 
+        // Low data mode flag. The polling loop reads this on every tick
+        // and stretches the sleep interval when it's on; no re-publish.
+        if (state.lowDataMode != _lowDataMode.value) {
+            _lowDataMode.value = state.lowDataMode
+            LogBuffer.i(TAG, "Low data mode → ${if (state.lowDataMode) "on" else "off"}")
+        }
+
+        // Sync group ID. Surface to the staff UI so admins can confirm
+        // membership at a glance. Null = standalone playback.
+        if (state.syncGroup != _syncGroup.value) {
+            _syncGroup.value = state.syncGroup
+            LogBuffer.i(TAG, "Sync group → ${state.syncGroup ?: "(none)"}")
+        }
+
+        // Sync-correction hint. When the server returned a playback
+        // block, push it onto the flow so PlayerController can decide
+        // whether to seek. We adjust the server's timestamp for the
+        // round-trip latency: positionMs was computed at serverNowMs;
+        // by the time the tablet reads it, more time has passed.
+        // Storing the local-clock equivalent lets the consumer compute
+        // "expected position now" with one subtraction.
+        val playback = state.playback
+        if (playback != null && state.syncGroup != null) {
+            val serverNow = state.serverNowMs ?: System.currentTimeMillis()
+            val localNow = System.currentTimeMillis()
+            // adjustedAtMs = localNow → "as of this moment in tablet
+            // clock, the item was at positionMs". Drift from server
+            // clock washes out because both endpoints subtract from
+            // serverNowMs identically.
+            val adjustedPos = playback.positionMs + (localNow - serverNow).coerceAtLeast(0)
+            _playbackSync.value = PlaybackSyncHint(
+                itemId = playback.itemId,
+                itemIndex = playback.itemIndex,
+                positionMs = adjustedPos,
+                adjustedAtMs = localNow,
+                groupId = playback.groupId,
+            )
+        } else {
+            _playbackSync.value = null
+        }
+
         // Per-location splash. Download (or clear) when the URL changes.
-        ensureRemoteSplash(base, state.splashUrl)
+        // Skipped entirely in low-data mode — the per-location splash is
+        // ~70MB for the Smartech 4K asset; the APK-bundled splash is
+        // shown instead.
+        if (!state.lowDataMode) {
+            ensureRemoteSplash(base, state.splashUrl)
+        }
 
         // Execute any pending commands the CMS queued. The server already
         // drained them in the GET response so we won't see them twice.
@@ -609,6 +712,71 @@ class PlayerRepository(
         }
     }
 
+    /** Flip the low-data-mode flag on the server. Tablet picks the new
+     *  value back up on the next state poll; the optimistic local
+     *  update means the staff toggle reflects the new state instantly
+     *  (and the next polling tick uses the new cadence). */
+    suspend fun setLowDataModeOnServer(value: Boolean) {
+        LogBuffer.i(TAG, "setLowDataModeOnServer → $value")
+        _lowDataMode.value = value
+
+        val base = store.liveServerUrl.first()?.trimEnd('/')
+        if (base.isNullOrBlank()) {
+            LogBuffer.w(TAG, "setLowDataModeOnServer skipped — no liveServerUrl set")
+            return
+        }
+        val deviceId = store.ensureDeviceId()
+        val body = """{"lowDataMode":$value}"""
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/screens/${urlEncode(deviceId)}/low-data-mode")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) LogBuffer.w(TAG, "setLowDataModeOnServer HTTP ${r.code}")
+                    else LogBuffer.i(TAG, "setLowDataModeOnServer OK")
+                }
+                lastLiveRevision = -1
+            }.onFailure {
+                LogBuffer.w(TAG, "setLowDataModeOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
+            }
+        }
+    }
+
+    /** Set this screen's sync-group membership on the server. Null or
+     *  blank string detaches the screen from any group. */
+    suspend fun setSyncGroupOnServer(value: String?) {
+        val normalised = value?.trim()?.ifBlank { null }
+        LogBuffer.i(TAG, "setSyncGroupOnServer → ${normalised ?: "(none)"}")
+        _syncGroup.value = normalised
+
+        val base = store.liveServerUrl.first()?.trimEnd('/')
+        if (base.isNullOrBlank()) {
+            LogBuffer.w(TAG, "setSyncGroupOnServer skipped — no liveServerUrl set")
+            return
+        }
+        val deviceId = store.ensureDeviceId()
+        // null encodes as JSON null so the server clears the field.
+        val bodyValue = if (normalised == null) "null" else q(normalised)
+        val body = """{"syncGroup":$bodyValue}"""
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/screens/${urlEncode(deviceId)}/sync-group")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) LogBuffer.w(TAG, "setSyncGroupOnServer HTTP ${r.code}")
+                    else LogBuffer.i(TAG, "setSyncGroupOnServer OK")
+                }
+                lastLiveRevision = -1
+            }.onFailure {
+                LogBuffer.w(TAG, "setSyncGroupOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
+            }
+        }
+    }
+
     private fun urlEncode(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
 
     /**
@@ -626,7 +794,12 @@ class PlayerRepository(
      * JVM keeps running so the relaunch is reliable. For a "true"
      * process restart, use Clear cache + Reboot.
      */
-    private fun scheduleSelfRestart() {
+    /** Public form for the playback watchdog (and any other nuclear-
+     *  option recovery path that needs to bounce the activity without
+     *  killing the JVM). */
+    fun scheduleSelfRestart() = doScheduleSelfRestart()
+
+    private fun doScheduleSelfRestart() {
         val intent = android.content.Intent(appContext, com.smartech.screens.MainActivity::class.java).apply {
             flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK
@@ -827,9 +1000,12 @@ class PlayerRepository(
 
     /**
      * Continuous polling loop. Started once from [com.smartech.screens.ScreensApp].
-     * Polls every [intervalMs] ms; sleeps and retries on errors.
+     * Sleep cadence flips dynamically based on [lowDataMode] — see
+     * [DEFAULT_POLL_MS] / [LOW_DATA_POLL_MS]. Library refresh cadence
+     * scales with the poll interval so a low-data tablet still re-checks
+     * the library roughly every 5 minutes.
      */
-    fun startLiveSync(intervalMs: Long = 3_000L) {
+    fun startLiveSync() {
         liveScope.launch {
             // Register once (best-effort, logs on failure).
             store.liveServerUrl.first()?.let { registerLive(it.trimEnd('/')) }
@@ -845,12 +1021,16 @@ class PlayerRepository(
                 runCatching { refreshPlaylist() }
                     .onFailure { LogBuffer.w(TAG, "Live tick failed: ${it.message}") }
 
-                // Library refresh every 10 ticks (~30s).
+                // Library refresh once every ~5 minutes of wall-clock,
+                // independent of the polling cadence. With a 3s tick
+                // that's every 100 ticks; with a 60s tick that's every 5.
                 libraryRefreshTickCounter++
-                if (libraryRefreshTickCounter % 10 == 1) {
+                val effectiveInterval = if (_lowDataMode.value) LOW_DATA_POLL_MS else DEFAULT_POLL_MS
+                val libraryEvery = (5L * 60_000L / effectiveInterval).coerceAtLeast(1).toInt()
+                if (libraryRefreshTickCounter % libraryEvery == 1) {
                     runCatching { remoteLibrary.refresh(store.liveServerUrl.first()) }
                 }
-                delay(intervalMs)
+                delay(effectiveInterval)
             }
         }
     }
@@ -903,6 +1083,15 @@ class PlayerRepository(
 
     companion object {
         private const val TAG = "PlayerRepository"
+
+        /** Default live-state poll interval. The whole live workflow
+         *  (revision pickup, command delivery, audio + splash toggles)
+         *  hinges on this; ~3 s gives the CMS near-real-time control. */
+        private const val DEFAULT_POLL_MS = 3_000L
+
+        /** Slow poll cadence when low-data mode is on. One minute trades
+         *  near-real-time CMS responsiveness for ~95% less idle traffic. */
+        private const val LOW_DATA_POLL_MS = 60_000L
     }
 }
 

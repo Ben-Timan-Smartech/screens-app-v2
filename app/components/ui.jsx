@@ -222,11 +222,22 @@ const useActivity = () => {
 const useLibrary = () => {
   const [version, setVersion] = React.useState(0);
   const lastSigRef = React.useRef('');
+  // Server-issued ETag we send back as If-None-Match so the next poll
+  // returns 304 + zero body when the library hasn't changed. Without
+  // this we re-download ~450 kB every 60 s.
+  const etagRef = React.useRef(null);
   React.useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       try {
-        const res = await fetch('/api/library', { cache: 'no-store' });
+        const headers = {};
+        if (etagRef.current) headers['If-None-Match'] = etagRef.current;
+        const res = await fetch('/api/library', { cache: 'no-store', headers });
+        // 304 means the library is unchanged since the last successful
+        // fetch — fast-path out, no parse, no rerender.
+        if (res.status === 304) return;
+        const newEtag = res.headers.get('ETag');
+        if (newEtag) etagRef.current = newEtag;
         const body = await res.json();
         const videos = Array.isArray(body.videos) ? body.videos : [];
         const brands = Array.isArray(body.brands) ? body.brands : [];
@@ -250,7 +261,10 @@ const useLibrary = () => {
       }
     };
     tick();
-    const id = setInterval(tick, 10000);
+    // 60 s instead of 10 s. The library changes only when Drive Sync
+    // runs (daily background scan + on-demand from Settings); polling
+    // every 10 s burned ~150 MB/h on every open tab.
+    const id = setInterval(tick, 60000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
   return version;
@@ -371,6 +385,34 @@ const setScreenAudio = async (deviceId, audioOn) => {
     body: JSON.stringify({ audioOn }),
   });
   if (!res.ok) throw new Error(`audio failed: ${res.status}`);
+  return res.json();
+};
+
+// setScreenLowDataMode — POST /api/screens/<id>/low-data-mode. When on,
+// the tablet polls every 60s instead of every 3s and skips the
+// per-location splash download. Cached videos already on disk are
+// unaffected.
+const setScreenLowDataMode = async (deviceId, lowDataMode) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/low-data-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lowDataMode }),
+  });
+  if (!res.ok) throw new Error(`low-data-mode failed: ${res.status}`);
+  return res.json();
+};
+
+// setScreenSyncGroup — POST /api/screens/<id>/sync-group. Tablets that
+// share a syncGroup value get an identical "playback" block from the
+// server on every state poll, so they stay aligned to the same item
+// + position. Pass null or empty string to detach from any group.
+const setScreenSyncGroup = async (deviceId, syncGroup) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/sync-group`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ syncGroup }),
+  });
+  if (!res.ok) throw new Error(`sync-group failed: ${res.status}`);
   return res.json();
 };
 
@@ -1084,6 +1126,6 @@ Object.assign(window, {
   Sidebar, SidebarItem, PageHeader, AppShell, Card, StatCard,
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenAudio, setVideoDefaultUnmute,
+  setScreenAudio, setScreenLowDataMode, setScreenSyncGroup, setVideoDefaultUnmute,
   setScreenPlaylist, PushPicker,
 });

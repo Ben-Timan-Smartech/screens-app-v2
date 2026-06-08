@@ -154,7 +154,80 @@ class PlayerController(context: Context) {
         applyVolumeForCurrentItem()
     }
 
+    /**
+     * Apply a sync-group hint. If we're already on [itemId], seek when
+     * the position drift exceeds [DRIFT_CORRECTION_MS]. If we're on a
+     * different item, jump to that item and seek to the position.
+     *
+     * Splash items in a mix-splash playlist break sync (the bundled
+     * splash isn't part of the server's loop), so we skip the
+     * correction whenever we're currently on splash — the next item
+     * transition naturally lands us back on a sync-tracked item.
+     *
+     * `hint.positionMs` is already latency-adjusted on the way in (see
+     * `PlayerRepository.PlaybackSyncHint`), so we compute "expected
+     * position right now" by adding the time elapsed since the hint
+     * was constructed.
+     */
+    fun applyPlaybackSync(itemId: String, positionMs: Long, adjustedAtMs: Long) {
+        val currentId = player.currentMediaItem?.mediaId ?: return
+        if (currentId == Source.SPLASH) return
+        // How far the expected position has advanced since the hint
+        // landed. Capped at a few seconds to defend against the local
+        // clock being miles off — clamped values just mean we under-
+        // correct rather than panic-seek.
+        val sinceHintMs = (System.currentTimeMillis() - adjustedAtMs).coerceIn(0L, 5_000L)
+        val expectedPositionMs = positionMs + sinceHintMs
+
+        if (currentId != itemId) {
+            // Find the index of the requested item in the current queue
+            // and seek straight to it. If the id isn't in the queue
+            // we're misaligned — the next playlist apply will fix that.
+            val targetIndex = (0 until player.mediaItemCount)
+                .firstOrNull { i -> player.getMediaItemAt(i).mediaId == itemId }
+                ?: return
+            LogBuffer.i(
+                "PlayerController",
+                "Sync jump → item '$itemId' @ ${expectedPositionMs}ms",
+            )
+            player.seekTo(targetIndex, expectedPositionMs)
+            return
+        }
+        // Same item — only seek if drift exceeds the threshold, so we
+        // don't introduce visible micro-stutters every poll.
+        val actualPositionMs = player.currentPosition
+        val driftMs = expectedPositionMs - actualPositionMs
+        if (kotlin.math.abs(driftMs) > DRIFT_CORRECTION_MS) {
+            LogBuffer.i(
+                "PlayerController",
+                "Sync nudge — drift ${driftMs}ms (actual=${actualPositionMs}, expected=${expectedPositionMs})",
+            )
+            player.seekTo(expectedPositionMs)
+        }
+    }
+
+    /** True when the current queue item is the bundled / remote splash
+     *  rather than a real playlist video. Used by [PlaybackWatchdog]
+     *  to scope recovery actions: a hiccup during splash never
+     *  warrants restarting the activity. */
+    fun isOnSplash(): Boolean {
+        val source = currentSource
+        if (source == Source.SPLASH) return true
+        // mix-splash mode: queue is [splash, item1, item2…]. Check the
+        // current media item's id directly.
+        return player.currentMediaItem?.mediaId == Source.SPLASH
+    }
+
     fun release() {
         player.release()
+    }
+
+    private companion object {
+        /** Tablets correct drift on every poll, but only if they're off
+         *  by more than this much. Below the threshold we let ExoPlayer
+         *  ride — small seeks introduce visible stutter on cheap
+         *  Android TV boxes. 1500 ms is roughly one "perceptible drift"
+         *  unit at the kind of viewing distance these screens get. */
+        const val DRIFT_CORRECTION_MS = 1500L
     }
 }

@@ -161,6 +161,7 @@ fun DeviceAdminScreen(
 
     val deviceId by store.deviceId.collectAsState(initial = null)
     val orientation by store.orientationOverride.collectAsState(initial = null)
+    val syncGroup by repository.syncGroupFlow.collectAsState()
     val cacheCap by store.cacheCapBytes.collectAsState(initial = 8L * 1024 * 1024 * 1024)
     val pollSec by store.pollIntervalSec.collectAsState(initial = 60L)
     val info = remember { DeviceInfo.snapshot(ctx) }
@@ -229,8 +230,25 @@ fun DeviceAdminScreen(
                         fontFamily = FontFamily.Monospace,
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
-                    Text("Cancel", color = Muted, fontSize = 16.sp,
-                        modifier = Modifier.clickable { onCancel() }.padding(8.dp))
+                    // "Return to splash" — outlined button so it reads as a
+                    // deliberate action rather than a destructive flag. Wraps
+                    // the same onCancel callback (closes the staff overlay
+                    // back to the player loop, which renders the splash
+                    // until the next playlist tick).
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .border(1.dp, Muted, RoundedCornerShape(6.dp))
+                            .clickable { onCancel() }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            "Return to splash",
+                            color = Muted,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
                 }
             }
 
@@ -244,6 +262,11 @@ fun DeviceAdminScreen(
                     // the human-readable screen code set during onboarding instead;
                     // the device ID above is the real server-side identifier.
                     InfoRow("Screen code", locScreenCode ?: "(not set)")
+                    // Sync group is read-only here; admins set it from the CMS
+                    // screen detail page. Showing it lets staff confirm whether
+                    // this tablet is locked to another screen's playback or
+                    // running independently.
+                    InfoRow("Sync group",  syncGroup ?: "(independent)")
                     InfoRow("Display",     "${info.widthPx} × ${info.heightPx} · ${info.orientation}")
                     InfoRow("RAM",        "${info.ramMb} MB")
                     InfoRow("Cached",     "${repository.cache.cachedIds().size} videos · ${formatBytes(repository.cache.totalBytes())}")

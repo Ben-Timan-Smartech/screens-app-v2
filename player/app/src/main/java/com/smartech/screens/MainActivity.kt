@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.asStateFlow
 class MainActivity : ComponentActivity() {
 
     private lateinit var controller: PlayerController
+    private lateinit var watchdog: com.smartech.screens.player.PlaybackWatchdog
 
     /**
      * Staff-unlock event bus. Emits Unit every time the unlock gesture
@@ -117,6 +118,19 @@ class MainActivity : ComponentActivity() {
 
         controller = PlayerController(this)
         val repo = (application as ScreensApp).repository
+
+        // Background safety net. The watchdog samples ExoPlayer every
+        // 30 s; if playback is stuck (frozen position while we think
+        // we're playing, stuck buffering, or an unrecovered error) it
+        // escalates through prepare() → refreshPlaylist() → activity
+        // restart. Zero-cost when playback is healthy.
+        watchdog = com.smartech.screens.player.PlaybackWatchdog(
+            player = controller.player,
+            onKick = { repo.refreshPlaylist() },
+            onRestart = { repo.scheduleSelfRestart() },
+            isOnSplash = { controller.isOnSplash() },
+        )
+        watchdog.start()
 
         val tvLike = InputMode.isTvLike(this)
         Log.i(
@@ -279,6 +293,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(unlockRunnable)
+        if (::watchdog.isInitialized) watchdog.stop()
         controller.release()
         super.onDestroy()
     }

@@ -68,16 +68,32 @@ const TabletFrame = () => {
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       overflow: 'hidden', position: 'relative',
     }}>
-      {/* Back to admin chip, floats over tablet frame */}
-      <button onClick={() => navigate('/dashboard')} style={{
+      {/* Back to admin chip + "Preview" badge so it's obvious this
+          isn't a live tablet — nothing here pushes content to a real
+          screen. */}
+      <div style={{
         position: 'absolute', top: 16, left: 16, zIndex: 10,
-        display: 'inline-flex', alignItems: 'center', gap: 6,
-        padding: '6px 10px', borderRadius: 4,
-        background: 'var(--ink-10)', border: 'var(--border-strong)',
-        color: 'var(--ink-1)', fontSize: 12, fontWeight: 500, cursor: 'pointer',
+        display: 'inline-flex', alignItems: 'center', gap: 8,
       }}>
-        <Icon.chevL size={12} /> Back to admin
-      </button>
+        <button onClick={() => navigate('/dashboard')} style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          padding: '6px 10px', borderRadius: 4,
+          background: 'var(--ink-10)', border: 'var(--border-strong)',
+          color: 'var(--ink-1)', fontSize: 12, fontWeight: 500, cursor: 'pointer',
+        }}>
+          <Icon.chevL size={12} /> Back to admin
+        </button>
+        <span style={{
+          padding: '4px 9px', borderRadius: 999,
+          background: 'rgba(232, 163, 61, 0.15)',
+          border: '1px solid rgba(232, 163, 61, 0.45)',
+          color: '#B26B0F',
+          fontSize: 11, fontWeight: 500,
+          textTransform: 'uppercase', letterSpacing: 0.6,
+        }}>
+          Preview only — picks don't push to real screens
+        </span>
+      </div>
       <div style={{
         width: 1920, height: 1080,
         transform: `scale(${scale})`, transformOrigin: 'center center',
