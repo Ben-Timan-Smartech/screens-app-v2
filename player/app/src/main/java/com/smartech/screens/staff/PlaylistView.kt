@@ -72,6 +72,7 @@ fun PlaylistView(
     onDone: () -> Unit,
 ) {
     val mixSplash by repository.mixSplashFlow.collectAsState()
+    val audioOn by repository.audioOnFlow.collectAsState()
     // intendedPlaylist mirrors what the server says is on this screen, even
     // when some items are still downloading. That way the row appears the
     // moment the user adds it — with a progress bar — rather than waiting
@@ -171,6 +172,32 @@ fun PlaylistView(
                             }
                         },
                         enabled = true,   // never block the toggle on busy
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Audio on/off toggle. Off (the default) keeps every video
+                // muted unless its Content Library entry has "default unmute"
+                // set. On unmutes everything regardless.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Audio", color = Bone, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            if (audioOn) "All videos play with sound."
+                            else "Muted by default; videos flagged in the library still play sound.",
+                            color = Color(0x99FFFFFF), fontSize = 12.sp,
+                        )
+                    }
+                    DarkToggle(
+                        on = audioOn,
+                        onChange = { value ->
+                            LogBuffer.i("PlaylistView", "Audio tapped → $value")
+                            scope.launch {
+                                repository.setAudioOnServer(value)
+                            }
+                        },
+                        enabled = true,
                     )
                 }
             }

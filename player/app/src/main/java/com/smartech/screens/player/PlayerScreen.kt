@@ -29,9 +29,14 @@ fun PlayerScreen(
 ) {
     val state by repository.state.collectAsState()
     val remoteSplash by repository.remoteSplashFile.collectAsState()
+    val audioOn by repository.audioOnFlow.collectAsState()
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
+
+    // Forward the global audio flag. The controller combines this with each
+    // item's per-video defaultUnmute on every queue transition.
+    LaunchedEffect(audioOn) { controller.setAudioOn(audioOn) }
 
     LaunchedEffect(state, repository.mixSplash) {
         when (val s = state) {

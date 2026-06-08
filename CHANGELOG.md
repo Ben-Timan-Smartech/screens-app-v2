@@ -18,6 +18,25 @@ Rules:
 
 ---
 
+## v0.1.4
+
+Sound on the screens, plus the splash finally lands on 4K.
+
+- **Mute by default, unmute per-video or per-screen.** New videos play
+  silently — that's the safe default for tablets dropped into a store.
+  Two ways to turn sound on:
+    1. **Per video, in the Content Library.** Open any video preview and
+       flip **Default to unmute** on. That video now plays with sound
+       wherever it appears, regardless of the screen's audio setting.
+       The flag is sticky across Drive rescans.
+    2. **Per screen, on the screen detail page or the tablet's staff
+       overlay.** Flipping **Audio** to On unmutes every video the
+       screen plays, overriding the per-video default.
+- **4K splash downloads work now.** The Smartech splash is ~70 MB, which
+  was sailing past Cloud Run's 32 MB Content-Length response buffer and
+  failing with HTTP 500. The splash endpoint now streams chunked, same
+  pattern we used for the video proxy in v0.1.3.
+
 ## v0.1.3
 
 Video downloads actually work now, plus a handful of polish.

@@ -529,6 +529,25 @@ def main():
     # Replace the placeholder list with real folder discovery on every run.
     BRANDS.clear()
 
+    # Preserve per-video flags the CMS may have set on a prior scan
+    # (e.g. defaultUnmute, set via PATCH /api/library/videos/<id>).
+    # Without this, the next scan-videos.py run wipes user choices.
+    sticky_flags: dict[str, dict] = {}
+    if LIBRARY_JSON.is_file():
+        try:
+            prev = json.loads(LIBRARY_JSON.read_text(encoding="utf-8"))
+            for v in prev.get("videos") or []:
+                vid = v.get("id")
+                if not vid:
+                    continue
+                kept: dict = {}
+                if v.get("defaultUnmute"):
+                    kept["defaultUnmute"] = True
+                if kept:
+                    sticky_flags[vid] = kept
+        except Exception as e:
+            print(f"Couldn't read previous library.json for sticky flags: {e}", flush=True)
+
     cloud_mode = bool(DRIVE_BRANDS_FOLDER_ID and drive_client and drive_client.is_configured())
     if cloud_mode:
         print(f"Cloud mode: scanning Drive folder {DRIVE_BRANDS_FOLDER_ID}", flush=True)
@@ -540,6 +559,17 @@ def main():
         print(f"Discovered {len(BRANDS)} brand folders under {DRIVE_ROOT}")
         videos = collect_videos()
     print(f"Collected {len(videos)} videos across {len({v['brand'] for v in videos})} brands")
+
+    # Re-apply the sticky flags from the previous scan.
+    if sticky_flags:
+        preserved = 0
+        for v in videos:
+            kept = sticky_flags.get(v.get("id"))
+            if kept:
+                for key, val in kept.items():
+                    v[key] = val
+                preserved += 1
+        print(f"Preserved {preserved} per-video flag(s) from previous library.json")
     OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     OUT_FILE.write_text(emit_jsx(videos), encoding="utf-8")
     print(f"Wrote {OUT_FILE}")

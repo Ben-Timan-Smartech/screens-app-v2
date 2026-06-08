@@ -360,6 +360,33 @@ const setMixSplash = async (deviceId, mixSplash) => {
   return res.json();
 };
 
+// setScreenAudio — POST /api/screens/<id>/audio to flip the global "play
+// with sound" flag on a screen. When off (the default), individual
+// videos can still play with sound if their library entry has
+// defaultUnmute set.
+const setScreenAudio = async (deviceId, audioOn) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/audio`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audioOn }),
+  });
+  if (!res.ok) throw new Error(`audio failed: ${res.status}`);
+  return res.json();
+};
+
+// setVideoDefaultUnmute — PATCH /api/library/videos/<id> to flip the
+// per-video "default to unmute" flag. Persists in library.json so it
+// survives Drive rescans (scan-videos.py preserves sticky flags).
+const setVideoDefaultUnmute = async (videoId, defaultUnmute) => {
+  const res = await fetch(`/api/library/videos/${encodeURIComponent(videoId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ defaultUnmute }),
+  });
+  if (!res.ok) throw new Error(`library patch failed: ${res.status}`);
+  return res.json();
+};
+
 // ─────────────────────────────────────────────────────────────
 // PushPicker — modal that lets the user choose which screens to push
 // to (any registered tablet, online or offline; the server queues per
@@ -1057,5 +1084,6 @@ Object.assign(window, {
   Sidebar, SidebarItem, PageHeader, AppShell, Card, StatCard,
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
+  setScreenAudio, setVideoDefaultUnmute,
   setScreenPlaylist, PushPicker,
 });
