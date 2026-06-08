@@ -295,19 +295,47 @@ def _ensure_screen_state(device_id: str) -> dict:
 # Library cache. scan-videos.py writes app/components/library.json; we read
 # it on demand and serve via /api/library so the tablet's staff overlay can
 # list the same brands and videos as the CMS.
-_LIBRARY_CACHE: dict = {"mtime": 0.0, "data": None}
+# Also indexed by Drive file ID so /media/<id> can answer size/mimetype
+# requests without a redundant Drive API call (Drive throttles those
+# aggressively when tablets + CMS all stream concurrently after a scan).
+_LIBRARY_CACHE: dict = {"mtime": 0.0, "data": None, "by_drive_id": None}
 
 
 def _load_library() -> dict:
-    """Cached library read. Re-loads only when the file's mtime bumps."""
+    """Cached library read. Re-loads only when the file's mtime bumps,
+    and rebuilds the drive-id → entry index alongside the videos list."""
     if not LIBRARY_JSON.is_file():
         return {"brands": [], "videos": []}
     mtime = LIBRARY_JSON.stat().st_mtime
     if _LIBRARY_CACHE["mtime"] != mtime or _LIBRARY_CACHE["data"] is None:
         with open(LIBRARY_JSON, "r", encoding="utf-8") as f:
-            _LIBRARY_CACHE["data"] = json.load(f)
+            data = json.load(f)
+        # Build the drive-id index from `mediaUrl` (cloud-mode shape is
+        # "/media/<drive_file_id>"). Skip filesystem-mode entries where
+        # mediaUrl points at "/media/<brand>/<file.mp4>".
+        index: dict[str, dict] = {}
+        for v in data.get("videos") or []:
+            url = v.get("mediaUrl") or ""
+            if not url.startswith("/media/"):
+                continue
+            tail = url[len("/media/"):].strip("/")
+            if "/" in tail:
+                continue   # filesystem-shape URL, not a Drive ID
+            if not tail:
+                continue
+            index[tail] = v
+        _LIBRARY_CACHE["data"] = data
+        _LIBRARY_CACHE["by_drive_id"] = index
         _LIBRARY_CACHE["mtime"] = mtime
     return _LIBRARY_CACHE["data"]
+
+
+def _library_lookup_by_drive_id(drive_file_id: str) -> dict | None:
+    """Return the cached library entry for a Drive file ID, or None.
+    Side-effect: ensures the library cache is warm."""
+    _load_library()
+    idx = _LIBRARY_CACHE.get("by_drive_id") or {}
+    return idx.get(drive_file_id)
 
 
 # ── Splash registry ──────────────────────────────────────────────────
@@ -1650,18 +1678,42 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         download is buffered server-side (acceptable for typical brand
         videos under ~100MB; the player APK caches client-side on first
         download anyway, so it's a one-time hit per video per device).
+
+        Metadata (size + mime) comes from library.json when available —
+        avoids a per-request Drive `files.get()` round-trip that
+        Drive's per-user QPS limit was 404ing under load (we saw
+        ~50/24/3 split of 404/200/500 across recent /media/ requests
+        after a fresh scan). Falls back to a live API call only when
+        the file isn't in the cached library.
         """
         if drive_client is None:
             self.send_error(500, "Drive client unavailable")
             return
-        try:
-            meta = drive_client.get_metadata(file_id)
-        except Exception as e:
-            self.send_error(404, f"Drive file not found: {e}")
-            return
 
-        size = int(meta.get("size") or 0)
-        ctype = meta.get("mimeType") or "video/mp4"
+        size = 0
+        ctype = "video/mp4"
+        cached = _library_lookup_by_drive_id(file_id)
+        if cached:
+            try:
+                size = int((cached.get("sizeMb") or 0) * 1024 * 1024)
+            except Exception:
+                size = 0
+            # The library doesn't store mimetype; fall back to mp4
+            # which all our brand content uses. Real Range handling
+            # comes from the upstream response anyway.
+        else:
+            # Not in library — fall back to Drive for metadata. This
+            # still pays the rate-limit tax but only for files we
+            # didn't index in the last scan (rare).
+            try:
+                meta = drive_client.get_metadata(file_id)
+                size = int(meta.get("size") or 0)
+                ctype = meta.get("mimeType") or "video/mp4"
+            except Exception as e:
+                print(f"[/media] metadata lookup failed for {file_id}: {e}", file=sys.stderr)
+                self.send_error(404, f"Drive file not found: {e}")
+                return
+
         range_header = self.headers.get("Range")
 
         # HEAD doesn't transfer bytes — just respond with metadata.
@@ -1680,36 +1732,51 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         # GET: stream the body. Headers go out on the first chunk so we
-        # can echo the actual status (206 vs 200) Drive returned.
+        # can echo the actual status (206 vs 200) Drive returned. We
+        # retry once on the well-known "'NoneType' object has no
+        # attribute 'read'" failure inside google-api-python-client +
+        # httplib2 — it's a transient auth-refresh race that nearly
+        # always succeeds on a second try.
         headers_sent = False
-        try:
-            for status, start, end, chunk in drive_client.stream_file(
-                file_id, range_header=range_header
-            ):
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                for status, start, end, chunk in drive_client.stream_file(
+                    file_id, range_header=range_header
+                ):
+                    if not headers_sent:
+                        if status == 206:
+                            self.send_response(206)
+                            self.send_header("Content-Range", f"bytes {start}-{end}/{size or (end + 1)}")
+                            self.send_header("Content-Length", str(end - start + 1))
+                        else:
+                            self.send_response(200)
+                            if size:
+                                self.send_header("Content-Length", str(size))
+                        self.send_header("Content-Type", ctype)
+                        self.send_header("Accept-Ranges", "bytes")
+                        self.send_header("Cache-Control", "public, max-age=3600")
+                        self.end_headers()
+                        headers_sent = True
+                    try:
+                        self.wfile.write(chunk)
+                    except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
+                        # Client cancelled (seek, navigation, polling reset).
+                        return
+                # Success — drop out of the retry loop.
+                break
+            except Exception as e:
+                if not headers_sent and attempt < 2:
+                    # Retry once. Most failures we've seen are the
+                    # NoneType-has-no-read flake; if it persists on
+                    # attempt 2, surface as a 500.
+                    print(f"[/media] stream attempt {attempt} failed for {file_id}: {e} — retrying", file=sys.stderr)
+                    continue
                 if not headers_sent:
-                    if status == 206:
-                        self.send_response(206)
-                        self.send_header("Content-Range", f"bytes {start}-{end}/{size or (end + 1)}")
-                        self.send_header("Content-Length", str(end - start + 1))
-                    else:
-                        self.send_response(200)
-                        if size:
-                            self.send_header("Content-Length", str(size))
-                    self.send_header("Content-Type", ctype)
-                    self.send_header("Accept-Ranges", "bytes")
-                    self.send_header("Cache-Control", "public, max-age=3600")
-                    self.end_headers()
-                    headers_sent = True
-                try:
-                    self.wfile.write(chunk)
-                except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
-                    # Client cancelled (seek, navigation, polling reset).
-                    return
-        except Exception as e:
-            if not headers_sent:
-                self.send_error(500, f"Drive stream failed: {e}")
-            else:
-                # Already started writing body — can't change status. Just drop.
+                    print(f"[/media] stream failed for {file_id}: {e}", file=sys.stderr)
+                    self.send_error(500, f"Drive stream failed: {e}")
+                # Headers already out — can't change status. Just drop.
                 return
 
     # Quieter than the default stdlib log line.
