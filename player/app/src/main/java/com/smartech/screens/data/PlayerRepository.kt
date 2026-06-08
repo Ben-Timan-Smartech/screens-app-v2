@@ -160,6 +160,49 @@ class PlayerRepository(
             local.isEmpty() -> State.Empty("No cached videos yet")
             else -> State.Playing(local, playlist.revision)
         }
+        // Persist a copy of every successful publish() with content so a
+        // cold boot can rehydrate without waiting for the network. Saved
+        // on the same liveScope to keep DataStore I/O off the caller's
+        // coroutine.
+        if (playlist.items.isNotEmpty()) {
+            liveScope.launch {
+                runCatching {
+                    store.saveLastPlaylistJson(playlistJson.encodeToString(PlaylistResponse.serializer(), playlist))
+                }.onFailure { LogBuffer.w(TAG, "saveLastPlaylistJson failed: ${it.message}") }
+            }
+        }
+    }
+
+    /** Strict Json instance for persisting the last-known playlist — sticks
+     *  to defaults so the on-disk format is stable across builds. */
+    private val playlistJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    /**
+     * Restore the most recent successful playlist from DataStore. Called
+     * once at app launch (from [com.smartech.screens.ScreensApp]) before
+     * the first network round-trip lands.
+     *
+     * Only publishes if cached video files for the items still exist on
+     * disk. If they don't (clear-cache action, eviction), we fall back
+     * to the splash loop until the live poll completes.
+     */
+    suspend fun rehydrateFromCache() {
+        val raw = runCatching { store.lastPlaylistJson() }.getOrNull() ?: return
+        if (raw.isBlank()) return
+        val playlist = runCatching {
+            playlistJson.decodeFromString(PlaylistResponse.serializer(), raw)
+        }.getOrElse {
+            LogBuffer.w(TAG, "lastPlaylistJson decode failed: ${it.message}")
+            return
+        }
+        // Restore lastLiveRevision so the empty-items guard in
+        // refreshLivePlaylist can detect a backward jump (post-deploy wipe).
+        val parsedRev = playlist.revision.removePrefix("live-").toIntOrNull()
+        if (parsedRev != null) lastLiveRevision = parsedRev
+        lastPlaylist = playlist
+        publish(playlist)
+        val playingCount = (state.value as? State.Playing)?.items?.size ?: 0
+        LogBuffer.i(TAG, "Rehydrated playlist from cache — $playingCount of ${playlist.items.size} items playable")
     }
 
     /** Best-effort heartbeat. Silently swallows network errors. */
@@ -357,9 +400,36 @@ class PlayerRepository(
         _intendedPlaylist.value = items
 
         if (items.isEmpty()) {
-            _state.value = State.Empty("Waiting for content from the CMS")
+            // Distinguish "the server has actively cleared this screen"
+            // from "the server lost its state" (e.g. a Cloud Run redeploy
+            // before /data/per_screen.json persistence shipped — see
+            // serve.py's _load_state_from_disk). The first warrants
+            // dropping to splash; the second should keep playing what we
+            // have until the server confirms a real change.
+            //
+            // Heuristic: an empty playlist is only trusted when the
+            // server's revision is BOTH >0 AND strictly greater than the
+            // last revision we acted on. Revision 0 = fresh in-memory
+            // state; a non-monotonic step backwards means state was lost.
+            val trustsTheClear =
+                state.revision > 0 && state.revision > lastLiveRevision
+            if (trustsTheClear) {
+                _state.value = State.Empty("Waiting for content from the CMS")
+                runCatching { store.clearLastPlaylistJson() }
+                lastPlaylist = null
+                lastLiveRevision = state.revision
+            } else {
+                LogBuffer.w(
+                    TAG,
+                    "Server returned empty items at rev ${state.revision} " +
+                        "(local rev $lastLiveRevision) — keeping last good playlist",
+                )
+                // Re-publish whatever we last had so the player doesn't
+                // accidentally fall through to splash on a subsequent
+                // state-flow recomposition.
+                lastPlaylist?.let { publish(it) }
+            }
             sendHeartbeat(base, state.revision)
-            lastLiveRevision = state.revision
             return
         }
 

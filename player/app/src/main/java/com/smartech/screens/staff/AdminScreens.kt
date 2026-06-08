@@ -160,7 +160,6 @@ fun DeviceAdminScreen(
     val store = repository.store
 
     val deviceId by store.deviceId.collectAsState(initial = null)
-    val screenId by store.screenId.collectAsState(initial = null)
     val orientation by store.orientationOverride.collectAsState(initial = null)
     val cacheCap by store.cacheCapBytes.collectAsState(initial = 8L * 1024 * 1024 * 1024)
     val pollSec by store.pollIntervalSec.collectAsState(initial = 60L)
@@ -238,9 +237,14 @@ fun DeviceAdminScreen(
             // Info card
             item {
                 CardSection("Device info") {
-                    InfoRow("Device ID",  deviceId ?: "—")
-                    InfoRow("Screen ID",  screenId ?: "demo (no backend)")
-                    InfoRow("Display",    "${info.widthPx} × ${info.heightPx} · ${info.orientation}")
+                    InfoRow("Device ID",   deviceId ?: "—")
+                    // "Screen ID" historically came from the legacy /device/register
+                    // flow which the live-server path never hits, so it always read
+                    // "demo (no backend)" even on a fully-registered tablet. Show
+                    // the human-readable screen code set during onboarding instead;
+                    // the device ID above is the real server-side identifier.
+                    InfoRow("Screen code", locScreenCode ?: "(not set)")
+                    InfoRow("Display",     "${info.widthPx} × ${info.heightPx} · ${info.orientation}")
                     InfoRow("RAM",        "${info.ramMb} MB")
                     InfoRow("Cached",     "${repository.cache.cachedIds().size} videos · ${formatBytes(repository.cache.totalBytes())}")
                     InfoRow("Free disk",  formatBytes(ctx.filesDir.usableSpace))

@@ -43,6 +43,12 @@ class DeviceStore(private val context: Context) {
         // the player polls /api/state from this URL instead of the demo Cloudflare
         // playlist. Settable via Device admin → Configuration.
         val LiveServerUrl = stringPreferencesKey("live_server_url")
+
+        // Last-known-good playlist (JSON-encoded PlaylistResponse). Repopulated
+        // on every successful publish() so we can rehydrate playback before
+        // the first network round-trip completes — and so an offline launch
+        // doesn't drop the tablet to the splash loop.
+        val LastPlaylistJson = stringPreferencesKey("last_playlist_json")
     }
 
     /** Ensures a stable per-install device id. Called exactly once at first launch. */
@@ -266,6 +272,24 @@ class DeviceStore(private val context: Context) {
 
     suspend fun lastFcmToken(): String? =
         context.dataStore.data.map { it[Keys.LastFcmToken] }.first()
+
+    /** JSON-encoded PlaylistResponse from the most recent successful
+     *  publish(). Used to rehydrate playback on cold boot before any
+     *  network round-trip completes — see [PlayerRepository.rehydrateFromCache]. */
+    suspend fun saveLastPlaylistJson(json: String) {
+        context.dataStore.edit { it[Keys.LastPlaylistJson] = json }
+    }
+
+    suspend fun lastPlaylistJson(): String? =
+        context.dataStore.data.map { it[Keys.LastPlaylistJson] }.first()
+
+    /** Drop the cached playlist. Called when the server has explicitly
+     *  pushed an empty playlist (revision > 0 AND items == []) — i.e.
+     *  "stop showing anything," distinct from "I happen to have no
+     *  state for you yet." */
+    suspend fun clearLastPlaylistJson() {
+        context.dataStore.edit { it.remove(Keys.LastPlaylistJson) }
+    }
 
     /** Bearer-token getter used by [ApiClient]'s interceptor. Blocking on purpose — runs once per request. */
     fun tokenBlocking(): String? = runCatching {

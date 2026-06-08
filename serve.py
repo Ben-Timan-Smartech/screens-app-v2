@@ -218,6 +218,19 @@ LIBRARY_JSON = Path(os.environ.get(
     str(APP_DIR / "components" / "library.json"),
 ))
 
+# Per-screen playlist state + tablet registry. Both live next to
+# library.json — point at /data/* on Cloud Run so deploys / container
+# restarts don't wipe every screen's playlist and registration. Falls
+# back to a sibling of the CMS source for local dev.
+PER_SCREEN_JSON = Path(os.environ.get(
+    "SCREENS_PER_SCREEN_PATH",
+    str(APP_DIR / "components" / "per_screen.json"),
+))
+SCREENS_JSON = Path(os.environ.get(
+    "SCREENS_REGISTRY_PATH",
+    str(APP_DIR / "components" / "screens.json"),
+))
+
 # Cloud Run injects $PORT (defaults to 8080); on a laptop we keep 8765.
 PORT = int(os.environ.get("PORT", "8765"))
 BIND = "0.0.0.0"   # Listen on all interfaces so the tablet can reach us on LAN.
@@ -234,6 +247,61 @@ RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
 _STATE_LOCK = threading.RLock()
 _per_screen: dict[str, dict] = {}   # deviceId -> {revision, items, pushedAt, mixSplash, pendingCommands}
 _screens: dict[str, dict] = {}      # deviceId -> registry (last heartbeat, device info, etc.)
+
+
+# ── State persistence ────────────────────────────────────────────────
+# Both dicts get atomically written to disk on every mutation. On Cloud
+# Run the env-var-overridden paths land on the FUSE-mounted bucket so a
+# redeploy (container restart) doesn't wipe playlists, registrations,
+# or per-screen audio/splash flags. For ~50 tablets the files are <100kB
+# each so writing on every heartbeat is fine. Atomic write = write to
+# .tmp then rename; readers always see a complete file.
+
+def _atomic_write_json(path: Path, data: object) -> None:
+    """Atomic JSON write. Caller does NOT need to hold _STATE_LOCK —
+    callers in this module already do, but this helper doesn't assume."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as e:
+        # We don't want a disk hiccup to crash an API request — log and
+        # continue. Worst case the next mutation re-tries the write.
+        print(f"[state] atomic write to {path} failed: {e}", file=sys.stderr)
+
+
+def _save_per_screen() -> None:
+    """Persist _per_screen. Call inside _STATE_LOCK after any mutation."""
+    _atomic_write_json(PER_SCREEN_JSON, _per_screen)
+
+
+def _save_screens() -> None:
+    """Persist _screens. Call inside _STATE_LOCK after any mutation."""
+    _atomic_write_json(SCREENS_JSON, _screens)
+
+
+def _load_state_from_disk() -> None:
+    """One-shot loader, called once on module import. Best-effort —
+    a missing or corrupt file just means we start with empty state,
+    same as fresh boot before persistence existed."""
+    global _per_screen, _screens
+    with _STATE_LOCK:
+        for path, target_name in [(PER_SCREEN_JSON, "_per_screen"), (SCREENS_JSON, "_screens")]:
+            if not path.is_file():
+                continue
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    print(f"[state] {path}: top-level isn't a dict, skipping", file=sys.stderr)
+                    continue
+                if target_name == "_per_screen":
+                    _per_screen = raw
+                else:
+                    _screens = raw
+                print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
+            except Exception as e:
+                print(f"[state] load {path} failed: {e}", file=sys.stderr)
 
 
 # ── Activity log ─────────────────────────────────────────────────────
@@ -290,6 +358,7 @@ def _ensure_screen_state(device_id: str) -> dict:
             "pendingCommands": [],                 # list of pending commands for this screen
         }
         _per_screen[device_id] = s
+        _save_per_screen()
     return s
 
 
@@ -1030,6 +1099,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # tablet sees them in one round-trip.
                     commands = list(s["pendingCommands"])
                     s["pendingCommands"] = []
+                    if commands:
+                        # Drained queue is a state change worth persisting —
+                        # otherwise a redeploy after a command was emitted
+                        # but before it was drained could re-fire it.
+                        _save_per_screen()
                     # Per-screen splash resolution from the device's location.
                     screen_meta = _screens.get(screen_id, {})
                     location = screen_meta.get("location") or {}
@@ -1302,6 +1376,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     s["pushedAt"] = time.time()
                     pushed += 1
                 top_rev = max((s["revision"] for s in _per_screen.values()), default=0)
+                if pushed:
+                    _save_per_screen()
             print(f"[push] mode={mode} items={len(items)} -> {pushed} screens", file=sys.stderr)
             verb = "Replaced playlist on" if mode == "replace" else "Added to"
             _log_activity(
@@ -1332,6 +1408,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 }
                 is_new = "registeredAt" not in (_screens.get(device_id, {}))
                 _ensure_screen_state(device_id)
+                _save_screens()
             print(f"[register] {device_id} ({name})", file=sys.stderr)
             _log_activity(
                 kind="register",
@@ -1368,6 +1445,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         s[key] = val
                 s["lastHeartbeat"] = time.time()
                 state = _ensure_screen_state(device_id)
+                _save_screens()
             self._send_json({
                 "ok":          True,
                 "revision":    state["revision"],
@@ -1408,6 +1486,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # the new splash without needing a poll-induced delay.
                 for s in _per_screen.values():
                     s["revision"] += 1
+                _save_per_screen()
             self._send_json({"ok": True, "cityBrand": dict(_city_brand)})
             return
 
@@ -1444,6 +1523,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         self.send_error(400, "Unknown command"); return
                     state = _ensure_screen_state(device_id)
                     state["pendingCommands"].append({"command": cmd, "at": time.time()})
+                    _save_per_screen()
                     print(f"[command] {device_id} -> {cmd}", file=sys.stderr)
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     label = {
@@ -1479,6 +1559,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         state["items"] = list(items)
                     state["revision"] += 1
                     state["pushedAt"] = time.time()
+                    _save_per_screen()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     verb = "Replaced playlist on" if mode == "replace" else "Added to"
                     _log_activity(
@@ -1493,11 +1574,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state = _ensure_screen_state(device_id)
                     state["mixSplash"] = bool(body.get("mixSplash", True))
                     state["revision"] += 1                  # bump so player picks up flag change
+                    _save_per_screen()
                     self._send_json({"ok": True, "mixSplash": state["mixSplash"]})
                     return
                 if action == "audio":
                     state = _ensure_screen_state(device_id)
                     state["audioOn"] = bool(body.get("audioOn", False))
+                    _save_per_screen()
                     # Don't bump revision — audio toggles shouldn't
                     # force a full playlist re-init on the tablet.
                     # The player polls /api/state every ~3s and reads
@@ -1948,6 +2031,10 @@ def main() -> None:
             print(f"[splash] hydrated from Drive into {cache}")
 
     _build_splash_registry()
+    # Restore per-screen playlists + tablet registry from the last
+    # process's persisted state. Without this every Cloud Run redeploy
+    # would wipe every screen's playlist and audio/splash flags.
+    _load_state_from_disk()
     # Daily re-scan in a background thread. Doesn't run on boot — the
     # existing library.json from the last run is used; Drive Sync UI lets
     # the user trigger an on-demand scan if needed.
