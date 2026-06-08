@@ -370,6 +370,7 @@ def run_library_scan() -> dict:
     _sync_state so the Drive Sync UI can render a live count."""
     with _SYNC_LOCK:
         if _sync_state["running"]:
+            print("[sync] run_library_scan: already running — skip", file=sys.stderr, flush=True)
             return {"ok": False, "error": "already running"}
         _sync_state["running"] = True
         _sync_state["progressCurrent"] = None
@@ -378,6 +379,7 @@ def run_library_scan() -> dict:
     tail: list[str] = []        # last few lines for error reporting
     try:
         scan_script = PROJECT / "scan-videos.py"
+        print(f"[sync] launching {scan_script}", file=sys.stderr, flush=True)
         proc = subprocess.Popen(
             [sys.executable, "-u", str(scan_script)],   # -u = unbuffered stdout
             cwd=str(PROJECT),
@@ -388,6 +390,7 @@ def run_library_scan() -> dict:
             encoding="utf-8",
             errors="replace",
         )
+        print(f"[sync] scan-videos.py subprocess started (pid={proc.pid})", file=sys.stderr, flush=True)
         assert proc.stdout is not None
         for raw in proc.stdout:
             line = raw.rstrip()
@@ -401,10 +404,15 @@ def run_library_scan() -> dict:
                     _sync_state["progressLabel"] = m.group(3)
                 continue
             # Keep a rolling tail of regular log lines so we can surface
-            # the script's stderr if something goes wrong.
+            # the script's stderr if something goes wrong AND echo each
+            # line to our own stderr so it shows up in Cloud Run logs
+            # while the scan is running (otherwise debugging boot-time
+            # scan failures is impossible — they vanish into the tail
+            # array and only surface in /api/library/info).
             tail.append(line)
             if len(tail) > 30:
                 tail.pop(0)
+            print(f"[sync] {line}", file=sys.stderr, flush=True)
         proc.wait(timeout=900)
         ok = proc.returncode == 0
 
