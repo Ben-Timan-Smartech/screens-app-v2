@@ -1645,16 +1645,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return
                 partial = True
 
+        length = end - start + 1
+        # Cloud Run buffers responses with an explicit Content-Length
+        # up to ~32 MB. Splash files often exceed that (4K Smartech
+        # splash is 69 MB), so for full-file GETs above the threshold
+        # we drop Content-Length and signal connection-close. Range
+        # responses keep their length — the range is bounded by the
+        # client's request, never exceeds 32 MB in normal use, and
+        # clients rely on the exact byte count for seeking.
+        STREAM_THRESHOLD = 32 * 1024 * 1024
+        stream_no_length = (not partial) and (length > STREAM_THRESHOLD)
+
         if partial:
             self.send_response(206)
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         else:
             self.send_response(200)
 
-        length = end - start + 1
         self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Length", str(length))
+        if stream_no_length:
+            self.send_header("Connection", "close")
+            self.close_connection = True
+        else:
+            self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "public, max-age=3600")
         self.end_headers()
 
