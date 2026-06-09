@@ -18,6 +18,68 @@ Rules:
 
 ---
 
+## v0.1.13
+
+Sync groups, again — closing the last ~1 second of drift.
+
+### The remaining drift was network latency, not clock skew
+
+v0.1.12 moved sync math to the tablet but still measured server time
+naively: take `serverNowMs` from the response, subtract
+`System.currentTimeMillis()` once, call that the offset. The problem
+is that the server stamps `serverNowMs` *before* the response is
+sent — by the time the tablet reads its own clock to compare, the
+response has already spent ~50–500 ms in transit. All of that
+one-way latency was being charged to "clock offset," so two tablets
+on different network paths (one on Wi-Fi, one on Ethernet; one
+closer to the CDN edge; whatever) computed offsets that disagreed
+by the difference of their one-way latencies. Result: tablets that
+should have been frame-locked drifted apart by roughly RTT/2 — the
+~1 second the user was seeing.
+
+### NTP-style two-timestamp sync
+
+The tablet now records `t1` immediately before the request goes out
+and `t4` immediately after the response body is read, alongside
+`t3 = serverNowMs` from the body. Round-trip time is `t4 - t1`, and
+under the symmetric-latency assumption the server's actual clock at
+the moment of `t4` was `t3 + RTT/2`. So:
+
+```
+offset = (t3 + RTT/2) - t4
+```
+
+That removes the one-way bias instead of pretending it doesn't
+exist.
+
+### Best-of-N smoothing
+
+Single-sample offsets still vary with whatever the network was
+doing at the instant of the poll — a Wi-Fi retransmit, a GC pause
+on the server, a momentarily-congested AP. The tablet keeps a
+rolling window of the last 8 samples and uses the one with the
+**smallest RTT** as the canonical offset. That's the classic NTP
+heuristic: a low-RTT sample tightens the symmetric-latency
+assumption (worst-case offset error is ±RTT/2), so it's the most
+trustworthy sample we have. Outliers are simply ignored until
+something better arrives.
+
+### Server didn't change
+
+`/api/state` already returned `serverNowMs`. No new endpoints, no
+new fields — the entire fix is on the tablet, in
+`PlayerRepository.ClockSync`. Older tablets keep working with the
+v0.1.12 single-sample math; only v0.1.13+ devices get the bias
+removed.
+
+### Diagnostics
+
+One log line per offset change shows `offset`, `best-rtt`, and the
+sample count. RTT under ~80 ms on Wi-Fi is healthy; consistently
+higher RTT points at a network problem rather than a sync problem,
+and the log makes that distinction visible without scraping packet
+captures.
+
 ## v0.1.12
 
 Sync groups, third time. Architectural simplification + a guard against

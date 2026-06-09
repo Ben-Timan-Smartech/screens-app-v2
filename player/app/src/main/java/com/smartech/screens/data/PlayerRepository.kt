@@ -376,6 +376,81 @@ class PlayerRepository(
     private val _groupSync = MutableStateFlow<GroupSyncAnchor?>(null)
     val groupSyncFlow: StateFlow<GroupSyncAnchor?> = _groupSync
 
+    /**
+     * NTP-style clock synchronization. Every /api/state response gives
+     * us three timestamps:
+     *   t1 = local clock just before we send the request
+     *   t3 = server clock when the response was built (`serverNowMs`)
+     *   t4 = local clock just after the response body arrived
+     * Round-trip time RTT = t4 - t1. Assuming the upstream and
+     * downstream legs took roughly equal time, the server's clock at
+     * the moment t4 happened was `t3 + RTT/2`, so:
+     *   offset = (t3 + RTT/2) - t4
+     * Adding this offset to `System.currentTimeMillis()` reconstructs
+     * the server's wall-clock with the half-RTT bias removed.
+     *
+     * v0.1.12 used `serverOffsetMs = serverNow - localNow` — a single
+     * sample with no latency correction at all. That attributed the
+     * entire response transit to clock skew, so two tablets on
+     * different network paths landed on different offsets and
+     * disagreed about "where in the loop we should be" by the
+     * difference of their one-way latencies. The symptom was the ~1 s
+     * drift the user reported on v0.1.12.
+     *
+     * Best-of-N: we keep a small rolling window and use the sample
+     * with the smallest RTT as the canonical offset. The classic NTP
+     * heuristic — a low-RTT sample tightens the symmetric-latency
+     * assumption (the worst-case error in the offset is bounded by
+     * ±RTT/2), so the lowest-RTT recent sample is the one we trust.
+     * Outlier samples (Wi-Fi retransmit, GC pause, captive-portal
+     * redirect, etc.) get ignored automatically.
+     */
+    private class ClockSync(private val capacity: Int = 8) {
+        private data class Sample(val offsetMs: Long, val rttMs: Long)
+        private val samples = ArrayDeque<Sample>()
+
+        @Volatile var bestOffsetMs: Long = 0L
+            private set
+        @Volatile var bestRttMs: Long = Long.MAX_VALUE
+            private set
+        @Volatile var sampleCount: Int = 0
+            private set
+
+        @Synchronized
+        fun record(t1Local: Long, t3Server: Long, t4Local: Long): Long {
+            // Sanity guards: clock went backwards mid-call, or the
+            // server timestamp is obviously wrong (zero / pre-2000).
+            if (t4Local < t1Local) return bestOffsetMs
+            if (t3Server <= 0L) return bestOffsetMs
+            val rtt = (t4Local - t1Local).coerceAtLeast(0L)
+            val offset = t3Server + rtt / 2L - t4Local
+            samples.addLast(Sample(offset, rtt))
+            while (samples.size > capacity) samples.removeFirst()
+            // Pick the sample with the smallest RTT in the window.
+            var bestOffset = offset
+            var bestRtt = rtt
+            for (s in samples) {
+                if (s.rttMs < bestRtt) {
+                    bestRtt = s.rttMs
+                    bestOffset = s.offsetMs
+                }
+            }
+            bestOffsetMs = bestOffset
+            bestRttMs = bestRtt
+            sampleCount = samples.size
+            return bestOffset
+        }
+
+        @Synchronized
+        fun clear() {
+            samples.clear()
+            bestOffsetMs = 0L
+            bestRttMs = Long.MAX_VALUE
+            sampleCount = 0
+        }
+    }
+    private val clockSync = ClockSync()
+
     /** Per-video download progress. Cleared when a download finishes. */
     data class DownloadProgress(
         val videoId: String,
@@ -429,11 +504,20 @@ class PlayerRepository(
     private suspend fun refreshLivePlaylist(serverUrl: String) {
         val base = serverUrl.trimEnd('/')
         val deviceId = store.ensureDeviceId()
+        // Capture t1/t4 around the round-trip so we can debias the
+        // server-clock offset for one-way latency. See [ClockSync].
+        // t1 is taken as late as possible before the byte goes on the
+        // wire; t4 as soon as possible after the body has been read.
+        var t1Local = 0L
+        var t4Local = 0L
         val resp = runCatching {
             val req = Request.Builder().url("$base/api/state?screenId=$deviceId").build()
+            t1Local = System.currentTimeMillis()
             httpClient.newCall(req).execute().use { r ->
                 if (!r.isSuccessful) throw IllegalStateException("HTTP ${r.code}")
-                r.body?.string() ?: ""
+                val body = r.body?.string() ?: ""
+                t4Local = System.currentTimeMillis()
+                body
             }
         }.getOrElse {
             LogBuffer.w(TAG, "Live state fetch failed: ${it.message}")
@@ -446,6 +530,14 @@ class PlayerRepository(
                 _connection.value = ConnectionStatus.OFFLINE
                 return
             }
+
+        // Feed the round-trip into the clock-sync helper. Best-of-N
+        // smoothing happens inside; we just hand it the three
+        // timestamps and pull the latency-corrected offset out
+        // wherever we need it (below, in the GroupSyncAnchor).
+        state.serverNowMs?.let { t3 ->
+            clockSync.record(t1Local = t1Local, t3Server = t3, t4Local = t4Local)
+        }
         // Reachable + parseable. Flag online; the rest of this method may
         // do downloads but those don't change the "is the server reachable"
         // signal.
@@ -494,19 +586,36 @@ class PlayerRepository(
         // transitions, which is when seeks are invisible.
         val playback = state.playback
         if (playback != null && state.syncGroup != null && playback.loopStartedAtMs > 0) {
-            val serverNow = state.serverNowMs ?: System.currentTimeMillis()
-            val localNow = System.currentTimeMillis()
-            // `serverOffsetMs` is "how far ahead is the server clock?"
-            // Add it to System.currentTimeMillis() to get "what time
-            // does the server think it is right now." Letting the
-            // tablet trust its own monotonic clock plus this single
-            // offset makes the math drift-free across poll intervals.
-            val serverOffsetMs = serverNow - localNow
-            _groupSync.value = GroupSyncAnchor(
+            // Pull the latency-corrected offset out of the clock-sync
+            // helper. `bestOffsetMs` is the smallest-RTT sample in the
+            // recent window — the one whose symmetric-latency
+            // assumption (the math assumes upstream and downstream
+            // legs took equal time) is tightest. Falls back to a
+            // single-sample compute when we don't have any clock-sync
+            // history yet (very first poll after launch).
+            val serverOffsetMs = if (clockSync.sampleCount > 0) {
+                clockSync.bestOffsetMs
+            } else {
+                val sn = state.serverNowMs
+                if (sn != null) sn - System.currentTimeMillis() else 0L
+            }
+            val prev = _groupSync.value
+            val next = GroupSyncAnchor(
                 groupId = playback.groupId.ifEmpty { state.syncGroup },
                 loopStartedAtMs = playback.loopStartedAtMs,
                 serverOffsetMs = serverOffsetMs,
             )
+            _groupSync.value = next
+            // One concise diagnostic line per poll so we can see if
+            // sync is healthy without scraping logs. RTT under ~80 ms
+            // on Wi-Fi is normal; if best-RTT stays high something is
+            // off (CDN cold path, congested AP, etc.).
+            if (prev == null || prev.serverOffsetMs != next.serverOffsetMs) {
+                LogBuffer.i(
+                    TAG,
+                    "Clock sync — offset=${serverOffsetMs}ms, best-rtt=${clockSync.bestRttMs}ms, samples=${clockSync.sampleCount}",
+                )
+            }
         } else {
             _groupSync.value = null
         }
