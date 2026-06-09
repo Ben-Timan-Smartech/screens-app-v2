@@ -425,11 +425,37 @@ def _save_sync_groups() -> None:
     _atomic_write_json(SYNC_GROUPS_JSON, _sync_groups)
 
 
-def _compute_playback(items: list, group_id: str, current_revision: int, now: float) -> dict | None:
-    """Return {itemId, itemIndex, positionMs, itemStartedAtMs, loopDurationSec}
-    for the item the given sync group should be on right now, or None
-    when the group has no items to play. Caller must hold _STATE_LOCK."""
+def _group_loop_epoch(items: list, group_id: str, current_revision: int, now: float) -> dict | None:
+    """Return the group's loop anchor as `{groupId, loopStartedAtMs}` —
+    nothing more. The tablet computes "which item am I on?" locally
+    using this epoch + the item durations it already has.
+
+    Resets `loopStartedAt` to `now` whenever the playlist revision
+    moves forward (so a new push restarts the loop in lockstep across
+    every screen in the group). Caller must hold _STATE_LOCK."""
     if not items:
+        return None
+    group = _sync_groups.get(group_id)
+    if group is None or group.get("lastRevision") != current_revision:
+        # First time we've seen this group, or the playlist just changed
+        # underneath it — restart the loop from now so every screen in
+        # the group is in lockstep.
+        group = {"loopStartedAt": now, "lastRevision": current_revision}
+        _sync_groups[group_id] = group
+        _save_sync_groups()
+    return {
+        "groupId":          group_id,
+        "loopStartedAtMs":  int(float(group["loopStartedAt"]) * 1000),
+    }
+
+
+def _compute_playback(items: list, group_id: str, current_revision: int, now: float) -> dict | None:
+    """Legacy: returns the same epoch info plus a server-computed
+    `(item, position)` block for older tablets that haven't picked up
+    the v0.1.12 client-side sync logic. Newer tablets read
+    `loopStartedAtMs` directly and ignore everything else here."""
+    epoch = _group_loop_epoch(items, group_id, current_revision, now)
+    if epoch is None:
         return None
     # Coerce durations to a sensible default — 15 s for any item that's
     # missing durationSec keeps the loop math from blowing up.
@@ -437,15 +463,7 @@ def _compute_playback(items: list, group_id: str, current_revision: int, now: fl
     total = sum(durations)
     if total <= 0:
         return None
-    group = _sync_groups.get(group_id)
-    if group is None or group.get("lastRevision") != current_revision:
-        # First time we've seen this group, or the playlist just changed
-        # underneath it — restart the loop from now so every screen in
-        # the group is in lockstep on the next poll.
-        group = {"loopStartedAt": now, "lastRevision": current_revision}
-        _sync_groups[group_id] = group
-        _save_sync_groups()
-    loop_started_at = float(group["loopStartedAt"])
+    loop_started_at = epoch["loopStartedAtMs"] / 1000.0
     elapsed = max(0.0, now - loop_started_at)
     offset = elapsed % total
     cumulative = 0.0
@@ -453,22 +471,21 @@ def _compute_playback(items: list, group_id: str, current_revision: int, now: fl
         if offset < cumulative + dur:
             position_in_item = offset - cumulative
             return {
+                **epoch,
                 "itemId":           items[i].get("id"),
                 "itemIndex":        i,
                 "positionMs":       int(position_in_item * 1000),
                 "itemStartedAtMs":  int((now - position_in_item) * 1000),
                 "loopDurationSec":  total,
-                "groupId":          group_id,
             }
         cumulative += dur
-    # Floating-point edge case — fall through to last item.
     return {
+        **epoch,
         "itemId":           items[-1].get("id"),
         "itemIndex":        len(items) - 1,
         "positionMs":       int(durations[-1] * 1000) - 1,
         "itemStartedAtMs":  int((now - durations[-1]) * 1000),
         "loopDurationSec":  total,
-        "groupId":          group_id,
     }
 
 

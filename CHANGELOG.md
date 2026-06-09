@@ -18,6 +18,60 @@ Rules:
 
 ---
 
+## v0.1.12
+
+Sync groups, third time. Architectural simplification + a guard against
+the most common way to break sync by accident.
+
+### Sync math moved off the server
+
+Up to v0.1.11, every poll the server computed "this tablet should be on
+item X at position Y right now" and sent it. The tablet then seeked
+ExoPlayer if its actual position diverged. The seek was visible (a
+buffer flash on cheap Android TV boxes), and corrections only happened
+at the poll cadence — once a minute in Normal mode, once every 10
+minutes in Slow mode.
+
+v0.1.12 inverts the flow:
+- Server sends just the loop epoch (`loopStartedAtMs`) and the server
+  clock (already in `serverNowMs`).
+- Tablet computes locally on every `onMediaItemTransition`: "given the
+  current wall-clock and the loop epoch, which item should I be on?
+  Snap to it now, while ExoPlayer is changing items anyway."
+- No more mid-item seeks. The corrective jump happens at item
+  boundaries, where ExoPlayer is already swapping content — invisible.
+- Sync quality is independent of poll frequency. Slow mode (10 min
+  polls) syncs as tightly as Fast mode (10 s).
+
+Net effect: visible sync improves dramatically. Two screens in the
+same group transition between items within a frame or two of each
+other. Mid-item drift is sub-second by the time the next transition
+arrives.
+
+### Content-match guard
+
+Sync is meaningless when the two screens are playing different
+playlists — they'd land on the same offset but show different videos.
+The picker now compares item IDs in order before joining:
+- **Match** (including both empty) → joins silently.
+- **Mismatch** → opens a "Different content — replace it?" modal.
+  Confirming pushes this screen's playlist to the candidate (replace
+  mode), then joins the group. Cancelling is a no-op.
+
+The push happens via the existing `/api/screens/<id>/playlist` endpoint
+in replace mode, then the join happens via the existing
+`/api/screens/<id>/sync-group` endpoint. No new server endpoints —
+just better client-side gating.
+
+### Cleanup
+
+- Removed the now-unused `DRIFT_CORRECTION_MS` constant on the tablet
+  (3 s threshold from v0.1.11). The new snap-at-transition model
+  doesn't need a threshold — every transition corrects to perfect.
+- `_compute_playback` on the server kept as a legacy fallback for any
+  tablets still on v0.1.11 or earlier, but new tablets only read
+  `loopStartedAtMs` and ignore the rest of the playback block.
+
 ## v0.1.11
 
 Sync groups, properly. Both the mechanism and the UI.
