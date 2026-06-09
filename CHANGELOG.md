@@ -18,6 +18,32 @@ Rules:
 
 ---
 
+## v0.1.7
+
+Hotfix for two issues spotted right after the v0.1.6 cut.
+
+- **CMS playlist no longer disappears on deploy.** v0.1.5 and v0.1.6
+  added state persistence to `_per_screen.json` / `screens.json` /
+  `sync_groups.json`, but only the library file's Cloud Run env var
+  was actually set, so the new state files were quietly writing to
+  the ephemeral container filesystem and getting wiped on every
+  redeploy. Defaults now derive from `LIBRARY_JSON`'s parent
+  directory — one `SCREENS_LIBRARY_PATH=/data/library.json` env var
+  pins all four files on the FUSE-mounted bucket. Explicit env vars
+  still win when set.
+- **Tablet staff overlay now shows the live playlist.** A stale
+  empty response from the server briefly wiped the staff overlay's
+  playlist view (even though the player kept looping the cached
+  items from disk), which made it look like the playlist was gone
+  and tempted users into pushing an empty list back to the server.
+  The view now updates only when the server's response is actually
+  trusted.
+- **"Poll interval" setting removed** from Device admin → Config.
+  It was a leftover from the legacy `/device/settings` flow; the
+  live-server path uses a hardcoded 3 s (or 60 s when Low data mode
+  is on), so editing the field did nothing.
+- "Schedules" feature shifts to v0.1.8.
+
 ## v0.1.6
 
 Multi-screen sync, low-data mode, playback watchdog, and a UI cleanup pass.

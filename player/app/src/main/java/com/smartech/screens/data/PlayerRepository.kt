@@ -497,11 +497,6 @@ class PlayerRepository(
 
         val items = state.items.map { it.toVideoItem(base) }
 
-        // Update intent flow first so the staff playlist view shows the new
-        // item the moment the server confirms it — even before the bytes
-        // start arriving on the tablet.
-        _intendedPlaylist.value = items
-
         if (items.isEmpty()) {
             // Distinguish "the server has actively cleared this screen"
             // from "the server lost its state" (e.g. a Cloud Run redeploy
@@ -517,6 +512,9 @@ class PlayerRepository(
             val trustsTheClear =
                 state.revision > 0 && state.revision > lastLiveRevision
             if (trustsTheClear) {
+                // Genuine clear — wipe the intent flow too so the staff
+                // overlay shows the empty state.
+                _intendedPlaylist.value = emptyList()
                 _state.value = State.Empty("Waiting for content from the CMS")
                 runCatching { store.clearLastPlaylistJson() }
                 lastPlaylist = null
@@ -529,12 +527,25 @@ class PlayerRepository(
                 )
                 // Re-publish whatever we last had so the player doesn't
                 // accidentally fall through to splash on a subsequent
-                // state-flow recomposition.
-                lastPlaylist?.let { publish(it) }
+                // state-flow recomposition. Restore the intent flow too
+                // — without this, the staff overlay's playlist view
+                // would show empty even while the player keeps looping
+                // the cached items, and the user could then accidentally
+                // push that empty list back to the server.
+                val cached = lastPlaylist
+                if (cached != null) {
+                    publish(cached)
+                    _intendedPlaylist.value = cached.items
+                }
             }
             sendHeartbeat(base, state.revision)
             return
         }
+
+        // Non-empty response — surface to the staff overlay immediately
+        // so the new playlist is visible before the bytes finish
+        // downloading.
+        _intendedPlaylist.value = items
 
         LogBuffer.i(TAG, "Live revision ${state.revision} — ${items.size} items")
         for (v in items) {

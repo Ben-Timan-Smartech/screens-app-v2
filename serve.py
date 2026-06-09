@@ -218,21 +218,29 @@ LIBRARY_JSON = Path(os.environ.get(
     str(APP_DIR / "components" / "library.json"),
 ))
 
-# Per-screen playlist state + tablet registry. Both live next to
-# library.json — point at /data/* on Cloud Run so deploys / container
-# restarts don't wipe every screen's playlist and registration. Falls
-# back to a sibling of the CMS source for local dev.
+# Per-screen playlist state, tablet registry, and sync-group epochs
+# default to siblings of LIBRARY_JSON so a single existing
+# `SCREENS_LIBRARY_PATH=/data/library.json` env var pins all four
+# files on the FUSE-mounted bucket. Without this auto-derivation the
+# v0.1.5/v0.1.6 state files were silently writing to the ephemeral
+# container filesystem on Cloud Run — wiped on every redeploy, even
+# though the persistence code was in place. Explicit env vars still
+# win when set (useful for local-dev split-paths or staging swaps).
+def _state_path_default(filename: str) -> str:
+    """Sibling of LIBRARY_JSON with the given filename."""
+    return str(LIBRARY_JSON.parent / filename)
+
 PER_SCREEN_JSON = Path(os.environ.get(
     "SCREENS_PER_SCREEN_PATH",
-    str(APP_DIR / "components" / "per_screen.json"),
+    _state_path_default("per_screen.json"),
 ))
 SCREENS_JSON = Path(os.environ.get(
     "SCREENS_REGISTRY_PATH",
-    str(APP_DIR / "components" / "screens.json"),
+    _state_path_default("screens.json"),
 ))
 SYNC_GROUPS_JSON = Path(os.environ.get(
     "SCREENS_SYNC_GROUPS_PATH",
-    str(APP_DIR / "components" / "sync_groups.json"),
+    _state_path_default("sync_groups.json"),
 ))
 
 # Cloud Run injects $PORT (defaults to 8080); on a laptop we keep 8765.
