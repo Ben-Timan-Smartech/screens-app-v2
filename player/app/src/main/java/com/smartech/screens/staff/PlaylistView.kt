@@ -73,7 +73,7 @@ fun PlaylistView(
 ) {
     val mixSplash by repository.mixSplashFlow.collectAsState()
     val audioOn by repository.audioOnFlow.collectAsState()
-    val lowDataMode by repository.lowDataModeFlow.collectAsState()
+    val pollMode by repository.pollModeFlow.collectAsState()
     // intendedPlaylist mirrors what the server says is on this screen, even
     // when some items are still downloading. That way the row appears the
     // moment the user adds it — with a progress bar — rather than waiting
@@ -204,29 +204,80 @@ fun PlaylistView(
 
                 Spacer(Modifier.height(12.dp))
 
-                // Low data mode toggle. Polls every 60 s instead of 3 s
-                // and skips the per-location splash. Cached videos
-                // already on disk are unaffected.
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Low data mode", color = Bone, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Text(
-                            if (lowDataMode)
-                                "Polling every 60 s; skipping the per-location splash download."
-                            else
-                                "Polls the server every ~3 s for new playlist + commands.",
-                            color = Color(0x99FFFFFF), fontSize = 12.sp,
-                        )
-                    }
-                    DarkToggle(
-                        on = lowDataMode,
-                        onChange = { value ->
-                            LogBuffer.i("PlaylistView", "Low data tapped → $value")
-                            scope.launch {
-                                repository.setLowDataModeOnServer(value)
-                            }
+                // Poll mode — three discrete cadences instead of the
+                // old binary low-data toggle. Fast = 10 s (install / debug),
+                // Normal = 60 s (default), Slow = 10 min (cellular / metered;
+                // also skips the ~70 MB per-location splash).
+                Column {
+                    Text("Poll mode", color = Bone, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        when (pollMode) {
+                            PlayerRepository.PollMode.FAST   -> "Checking the server every 10 s."
+                            PlayerRepository.PollMode.NORMAL -> "Checking the server every 60 s. Default."
+                            PlayerRepository.PollMode.SLOW   -> "Checking every 10 min; skipping the per-location splash to save data."
                         },
-                        enabled = true,
+                        color = Color(0x99FFFFFF), fontSize = 12.sp,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(
+                            "Fast" to PlayerRepository.PollMode.FAST,
+                            "Normal" to PlayerRepository.PollMode.NORMAL,
+                            "Slow" to PlayerRepository.PollMode.SLOW,
+                        ).forEach { (label, mode) ->
+                            val selected = pollMode == mode
+                            Box(
+                                Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (selected) Bone else Color(0x1AFFFFFF))
+                                    .border(
+                                        1.dp,
+                                        if (selected) Bone else Color(0x33FFFFFF),
+                                        RoundedCornerShape(6.dp),
+                                    )
+                                    .clickable {
+                                        if (!selected) {
+                                            LogBuffer.i("PlaylistView", "Poll mode tapped → ${mode.wire}")
+                                            scope.launch { repository.setPollModeOnServer(mode) }
+                                        }
+                                    }
+                                    .padding(vertical = 10.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    label,
+                                    color = if (selected) Ink else Bone,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+
+                // Refresh now — fires a one-shot poll bypass-style so
+                // staff can see a pushed playlist land without waiting
+                // for the next poll tick (up to 10 minutes in Slow mode).
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(6.dp))
+                        .border(1.dp, Bone, RoundedCornerShape(6.dp))
+                        .clickable {
+                            LogBuffer.i("PlaylistView", "Refresh now tapped")
+                            repository.refreshNow()
+                        }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "Refresh now",
+                        color = Bone,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
                     )
                 }
             }

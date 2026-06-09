@@ -148,6 +148,62 @@ const SyncGroupRow = ({ value, suggested, onCommit, disabled, isLive }) => {
   );
 };
 
+// PollModeRow — three discrete poll cadences replacing the old binary
+// Low Data Mode toggle. Visual is a segmented control so it reads as
+// a single choice rather than a stack of options. Slow also skips the
+// per-location splash download.
+const PollModeRow = ({ value, onChange, disabled, isLive }) => {
+  const modes = [
+    { key: 'fast',   label: 'Fast',   detail: '10 s'   },
+    { key: 'normal', label: 'Normal', detail: '60 s'   },
+    { key: 'slow',   label: 'Slow',   detail: '10 min' },
+  ];
+  const sub = ({
+    fast:   'Tablet checks the server every 10 s. Use for install / debugging.',
+    normal: 'Tablet checks the server every 60 s. Default for most screens.',
+    slow:   'Tablet checks every 10 min and skips the per-location splash. Use for cellular / metered installs.',
+  })[value] || '';
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0' }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Poll mode</div>
+        <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>
+          {sub}
+          {!isLive && ' Saves now, applies when the tablet reconnects.'}
+        </div>
+      </div>
+      <div style={{
+        display: 'inline-flex',
+        border: 'var(--border-strong)', borderRadius: 6, overflow: 'hidden',
+        opacity: disabled ? 0.5 : 1,
+      }}>
+        {modes.map((m, i) => {
+          const selected = value === m.key;
+          return (
+            <button
+              key={m.key}
+              disabled={disabled}
+              onClick={() => { if (!selected) onChange(m.key); }}
+              style={{
+                padding: '6px 12px',
+                background: selected ? 'var(--ink-0)' : 'var(--ink-10)',
+                color: selected ? 'var(--on-accent)' : 'var(--ink-2)',
+                fontSize: 12,
+                fontWeight: selected ? 600 : 500,
+                cursor: disabled ? 'not-allowed' : (selected ? 'default' : 'pointer'),
+                borderLeft: i === 0 ? 'none' : '1px solid var(--ink-7)',
+                minWidth: 60,
+              }}>
+              {m.label}
+              <div style={{ fontSize: 10, fontWeight: 400, opacity: 0.7, marginTop: 1 }}>{m.detail}</div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 // Toggle row — used for "Mix splash into playlist".
 const ToggleRow = ({ label, sub, value, onChange, disabled }) => (
   <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0' }}>
@@ -304,14 +360,34 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
-  const handleLowDataModeToggle = async (next) => {
+  const handlePollModeChange = async (mode) => {
     if (!targetDeviceId) return;
     try {
-      await setScreenLowDataMode(targetDeviceId, next);
+      await setScreenPollMode(targetDeviceId, mode);
+      const label = { fast: 'Fast (10 s)', normal: 'Normal (60 s)', slow: 'Slow (10 min)' }[mode] || mode;
       showToast(
         isLive
-          ? (next ? 'Low data mode on — polling slowed to 60 s' : 'Low data mode off — polling restored to 3 s')
-          : (next ? 'Low data mode will engage on reconnect' : 'Low data mode will disengage on reconnect'),
+          ? `Poll mode → ${label}`
+          : `Poll mode will switch to ${label} on reconnect`,
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
+  const handleRefreshNow = async () => {
+    if (!targetDeviceId) return;
+    try {
+      await sendScreenCommand(targetDeviceId, 'refresh');
+      // ETA depends on current poll mode — be honest about how long
+      // the tablet might take to pick up the refresh command.
+      const mode = hasHistory ? lastKnown.pollMode : 'normal';
+      const eta = { fast: '~10 s', normal: '~60 s', slow: '~10 min' }[mode] || '~60 s';
+      showToast(
+        isLive
+          ? `Refresh queued — tablet picks it up in ${eta}`
+          : `Refresh queued — runs when the tablet reconnects`,
         'ok',
       );
     } catch (e) {
@@ -463,6 +539,13 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                   </div>
                 </div>
                 <Button
+                  variant="secondary" size="sm" icon={<Icon.refresh size={12} />}
+                  disabled={!canEdit}
+                  onClick={handleRefreshNow}
+                  title="Tells the tablet to re-poll. Useful in Slow mode when you want a push to land before the next 10-minute tick.">
+                  Refresh now
+                </Button>
+                <Button
                   variant="secondary" size="sm" icon={<Icon.trash size={12} />}
                   disabled={!canEdit || playlist.length === 0}
                   onClick={handleClearAll}>
@@ -590,16 +673,11 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 onChange={handleAudioToggle}
                 disabled={!canEdit}
               />
-              <ToggleRow
-                label="Low data mode"
-                sub={canEdit
-                  ? (isLive
-                    ? 'Tablet polls every 60 s instead of 3 s and skips the per-location splash download. Cached videos already on disk are unaffected.'
-                    : 'Tablet polls every 60 s instead of 3 s and skips the per-location splash download. Cached videos already on disk are unaffected. Applies when the tablet reconnects.')
-                  : 'When on, tablet polls every 60 s and skips the per-location splash.'}
-                value={hasHistory ? !!lastKnown.lowDataMode : false}
-                onChange={handleLowDataModeToggle}
+              <PollModeRow
+                value={hasHistory ? (lastKnown.pollMode || 'normal') : 'normal'}
+                onChange={handlePollModeChange}
                 disabled={!canEdit}
+                isLive={isLive}
               />
               <SyncGroupRow
                 value={hasHistory ? (lastKnown.syncGroup || '') : ''}

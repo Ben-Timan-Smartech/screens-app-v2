@@ -18,6 +18,43 @@ Rules:
 
 ---
 
+## v0.1.8
+
+Three poll modes, a refresh-now button, and a properly-decoupled heartbeat.
+
+- **Three poll cadences** replace the old binary low-data toggle:
+  - **Fast** — 10 s. Install / debugging.
+  - **Normal** — 60 s. The new default for most screens.
+  - **Slow** — 10 min. Cellular / metered installs. Also skips the
+    per-location splash download to save data.
+  Default flips from 3 s to 60 s — the old 3 s polling was burning
+  ~150 MB/day per tablet for almost no functional benefit. CMS pushes
+  now feel marginally slower (up to a minute) in exchange — that's
+  what the Refresh now button below is for. Existing screens with
+  `lowDataMode: true` migrate to Slow; everything else to Normal.
+- **Refresh now button**, both on the screen detail page in the CMS
+  and in the tablet's staff overlay.
+  - **Tablet button**: fires an immediate playlist re-poll. Instant —
+    useful for on-site staff who just want to see a push land
+    without waiting.
+  - **CMS button**: queues a `refresh` command. The tablet picks it
+    up on its next poll and re-fetches state. ETA in the toast tells
+    you when to expect it ("~10 s" / "~60 s" / "~10 min" depending on
+    the screen's poll mode). For truly-instant CMS pushes we'd need
+    FCM push (queued for a future release).
+- **Heartbeats no longer get blocked by downloads.** The heartbeat
+  used to fire at the very end of the playlist-refresh function —
+  *after* every video had finished downloading. A multi-video pull
+  on a fresh tablet would stall heartbeats for the duration, and
+  the CMS would flip the screen to Offline mid-install. The
+  heartbeat now lives on its own 10 s coroutine, completely
+  decoupled from playlist work. CMS shows the screen online even
+  during a long download.
+- **Poll Interval setting removed from Device admin** — finished
+  the cleanup started in v0.1.7. It was a leftover from the legacy
+  `/device/settings` flow and the live path ignores it entirely;
+  Poll Mode is the real control now.
+
 ## v0.1.7
 
 Hotfix for two issues spotted right after the v0.1.6 cut.
