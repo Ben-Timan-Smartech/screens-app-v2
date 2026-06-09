@@ -30,7 +30,7 @@ fun PlayerScreen(
     val state by repository.state.collectAsState()
     val remoteSplash by repository.remoteSplashFile.collectAsState()
     val audioOn by repository.audioOnFlow.collectAsState()
-    val playbackSync by repository.playbackSyncFlow.collectAsState()
+    val groupSync by repository.groupSyncFlow.collectAsState()
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
@@ -46,17 +46,30 @@ fun PlayerScreen(
         }
     }
 
-    // Sync-group correction. Re-runs every poll because the repository
-    // emits a fresh PlaybackSyncHint each /api/state response. The
-    // controller decides internally whether the drift is worth a seek.
-    // No-op when the tablet isn't in a sync group (flow is null).
-    LaunchedEffect(playbackSync) {
-        val hint = playbackSync ?: return@LaunchedEffect
-        controller.applyPlaybackSync(
-            itemId = hint.itemId,
-            positionMs = hint.positionMs,
-            adjustedAtMs = hint.adjustedAtMs,
-        )
+    // Forward the group sync anchor. The controller does the actual
+    // sync math locally on every onMediaItemTransition; we just keep
+    // the latest epoch + server-clock-offset in sync with what the
+    // server told us. When the screen isn't in a sync group the flow
+    // is null and the controller clears its anchor.
+    val playing = state
+    LaunchedEffect(groupSync, playing) {
+        val anchor = groupSync
+        val items = (playing as? PlayerRepository.State.Playing)?.items ?: emptyList()
+        if (anchor != null && items.isNotEmpty()) {
+            controller.applyGroupSync(
+                loopStartedAtMs = anchor.loopStartedAtMs,
+                serverOffsetMs = anchor.serverOffsetMs,
+                itemIds = items.map { it.item.id },
+                itemDurationsMs = items.map { (it.item.durationSec ?: 15).toLong() * 1000L },
+            )
+        } else {
+            controller.applyGroupSync(
+                loopStartedAtMs = null,
+                serverOffsetMs = 0L,
+                itemIds = emptyList(),
+                itemDurationsMs = emptyList(),
+            )
+        }
     }
 
     Box(

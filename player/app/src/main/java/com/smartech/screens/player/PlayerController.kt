@@ -47,13 +47,38 @@ class PlayerController(context: Context) {
      *  volume (muted by default). */
     private val defaultUnmuteById = mutableMapOf<String, Boolean>()
 
+    /** v0.1.12 client-side sync state. When non-null, the player snaps to
+     *  the group-correct item on every queue transition; the math runs
+     *  locally instead of every poll asking the server "where should I
+     *  be?". See [applyGroupSync]. */
+    private data class GroupSyncState(
+        val loopStartedAtMs: Long,
+        val serverOffsetMs: Long,
+        /** Item ids in order, matching the current queue (skipping splash
+         *  if mix-splash is on — but mix-splash is forced off in sync
+         *  groups, see serve.py). */
+        val itemIds: List<String>,
+        /** Per-item duration in ms, parallel to [itemIds]. */
+        val itemDurationsMs: List<Long>,
+        /** Sum of durations. Cached to avoid recomputing on every
+         *  transition. */
+        val totalDurationMs: Long,
+    )
+
+    @Volatile
+    private var groupSync: GroupSyncState? = null
+
     init {
         // Re-apply volume whenever the player moves to the next item in the
         // queue. Without this listener, the first MediaItem's volume sticks
-        // for the whole loop.
+        // for the whole loop. The same listener also handles sync snap —
+        // see [snapToGroupExpectedItem] — so group corrections only happen
+        // at natural item boundaries where ExoPlayer is already changing
+        // items (i.e. visible jumps become invisible).
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 applyVolumeForCurrentItem()
+                snapToGroupExpectedItem()
             }
         })
     }
@@ -155,55 +180,115 @@ class PlayerController(context: Context) {
     }
 
     /**
-     * Apply a sync-group hint. If we're already on [itemId], seek when
-     * the position drift exceeds [DRIFT_CORRECTION_MS]. If we're on a
-     * different item, jump to that item and seek to the position.
+     * Apply (or clear) a group-sync anchor.
      *
-     * Splash items in a mix-splash playlist break sync (the bundled
-     * splash isn't part of the server's loop), so we skip the
-     * correction whenever we're currently on splash — the next item
-     * transition naturally lands us back on a sync-tracked item.
+     * New in v0.1.12: the tablet now does ALL "which item should I be
+     * on?" math locally using just `loopStartedAtMs` + the item
+     * durations it already has. Sync correction happens in
+     * [snapToGroupExpectedItem], which is only called at media-item
+     * transitions — so the corrective seek is invisible (ExoPlayer is
+     * already changing items at exactly that moment).
      *
-     * `hint.positionMs` is already latency-adjusted on the way in (see
-     * `PlayerRepository.PlaybackSyncHint`), so we compute "expected
-     * position right now" by adding the time elapsed since the hint
-     * was constructed.
+     * Pass `null` to clear: the screen is no longer in a sync group
+     * and should play through its queue without correction.
      */
-    fun applyPlaybackSync(itemId: String, positionMs: Long, adjustedAtMs: Long) {
-        val currentId = player.currentMediaItem?.mediaId ?: return
-        if (currentId == Source.SPLASH) return
-        // How far the expected position has advanced since the hint
-        // landed. Capped at a few seconds to defend against the local
-        // clock being miles off — clamped values just mean we under-
-        // correct rather than panic-seek.
-        val sinceHintMs = (System.currentTimeMillis() - adjustedAtMs).coerceIn(0L, 5_000L)
-        val expectedPositionMs = positionMs + sinceHintMs
-
-        if (currentId != itemId) {
-            // Find the index of the requested item in the current queue
-            // and seek straight to it. If the id isn't in the queue
-            // we're misaligned — the next playlist apply will fix that.
-            val targetIndex = (0 until player.mediaItemCount)
-                .firstOrNull { i -> player.getMediaItemAt(i).mediaId == itemId }
-                ?: return
-            LogBuffer.i(
-                "PlayerController",
-                "Sync jump → item '$itemId' @ ${expectedPositionMs}ms",
-            )
-            player.seekTo(targetIndex, expectedPositionMs)
+    fun applyGroupSync(
+        loopStartedAtMs: Long?,
+        serverOffsetMs: Long,
+        itemIds: List<String>,
+        itemDurationsMs: List<Long>,
+    ) {
+        if (loopStartedAtMs == null || itemIds.isEmpty()) {
+            if (groupSync != null) LogBuffer.i("PlayerController", "Group sync cleared")
+            groupSync = null
             return
         }
-        // Same item — only seek if drift exceeds the threshold, so we
-        // don't introduce visible micro-stutters every poll.
-        val actualPositionMs = player.currentPosition
-        val driftMs = expectedPositionMs - actualPositionMs
-        if (kotlin.math.abs(driftMs) > DRIFT_CORRECTION_MS) {
+        val total = itemDurationsMs.sum().coerceAtLeast(1L)
+        val next = GroupSyncState(
+            loopStartedAtMs = loopStartedAtMs,
+            serverOffsetMs = serverOffsetMs,
+            itemIds = itemIds,
+            itemDurationsMs = itemDurationsMs,
+            totalDurationMs = total,
+        )
+        val prev = groupSync
+        groupSync = next
+        // First time we got an anchor, or the loop epoch changed (new
+        // playlist push, group reset) — snap immediately rather than
+        // waiting for the next natural transition. This is the only
+        // time we issue a mid-item seek; from here on, snapping
+        // happens at queue boundaries only.
+        if (prev == null || prev.loopStartedAtMs != next.loopStartedAtMs) {
             LogBuffer.i(
                 "PlayerController",
-                "Sync nudge — drift ${driftMs}ms (actual=${actualPositionMs}, expected=${expectedPositionMs})",
+                "Group sync acquired — loopStartedAtMs=$loopStartedAtMs, " +
+                    "${itemIds.size} items, total=${total}ms",
             )
-            player.seekTo(expectedPositionMs)
+            snapToGroupExpectedItem(force = true)
         }
+    }
+
+    /**
+     * If we're in a sync group, jump to the item the group should be
+     * on right now. Called from [Player.Listener.onMediaItemTransition]
+     * — i.e. only at natural item boundaries, where ExoPlayer is
+     * already swapping items and a seek is invisible. The one
+     * exception is when [applyGroupSync] receives a new epoch, which
+     * forces an immediate snap (see `force=true`).
+     *
+     * Splash items in a mix-splash queue aren't part of the group
+     * loop, so the snap is skipped while splash is the current item
+     * — the next real-item transition will land us on the correct
+     * group position. (Mix-splash is forced off in groups by the
+     * server anyway, but defensive check stays.)
+     */
+    private fun snapToGroupExpectedItem(force: Boolean = false) {
+        val state = groupSync ?: return
+        val currentId = player.currentMediaItem?.mediaId ?: return
+        if (currentId == Source.SPLASH) return
+
+        // Server's "now" = local now + offset. Use it to compute where
+        // in the loop we should be.
+        val serverNowMs = System.currentTimeMillis() + state.serverOffsetMs
+        val elapsed = (serverNowMs - state.loopStartedAtMs).coerceAtLeast(0L)
+        val offset = elapsed % state.totalDurationMs
+
+        // Walk durations to find which item the loop is currently on.
+        var cumulative = 0L
+        var expectedIndex = -1
+        var positionInItem = 0L
+        for (i in state.itemDurationsMs.indices) {
+            val d = state.itemDurationsMs[i]
+            if (offset < cumulative + d) {
+                expectedIndex = i
+                positionInItem = offset - cumulative
+                break
+            }
+            cumulative += d
+        }
+        if (expectedIndex < 0) {
+            expectedIndex = state.itemDurationsMs.size - 1
+            positionInItem = state.itemDurationsMs.last() - 1
+        }
+        val expectedId = state.itemIds[expectedIndex]
+        if (currentId == expectedId && !force) return
+        if (currentId == expectedId && force) {
+            // We're on the right item but were just told to re-anchor —
+            // seek to the right position-in-item.
+            player.seekTo(positionInItem)
+            return
+        }
+        // Find the queue index of the expected item. If it's not in
+        // our queue, we're playing the wrong playlist — the next
+        // refreshLivePlaylist() will fix that.
+        val targetQueueIndex = (0 until player.mediaItemCount)
+            .firstOrNull { i -> player.getMediaItemAt(i).mediaId == expectedId }
+            ?: return
+        LogBuffer.i(
+            "PlayerController",
+            "Group sync snap → item '$expectedId' at ${positionInItem}ms",
+        )
+        player.seekTo(targetQueueIndex, positionInItem)
     }
 
     /** True when the current queue item is the bundled / remote splash
@@ -220,21 +305,5 @@ class PlayerController(context: Context) {
 
     fun release() {
         player.release()
-    }
-
-    private companion object {
-        /** Tablets correct drift on every poll, but only if they're off
-         *  by more than this much. Below the threshold we let ExoPlayer
-         *  ride — seeks introduce a visible buffer flash on cheap
-         *  Android TV boxes, so seeking on every poll for sub-second
-         *  drift looks worse than the drift itself.
-         *
-         *  3 s is the perceptible-but-not-jarring zone: at typical
-         *  viewing distance two screens that are 3 s out of sync read
-         *  as obviously different; below 3 s the eye fills in the
-         *  difference. Bumped from 1.5 s in v0.1.11 after sync groups
-         *  shipped — the 1.5 s threshold was firing on basically every
-         *  poll, producing constant micro-glitches. */
-        const val DRIFT_CORRECTION_MS = 3000L
     }
 }

@@ -271,16 +271,22 @@ class PlayerRepository(
         val splashName: String? = null,
     )
 
-    /** Server-computed "what should be on screen right now" for a
-     *  sync group. Fields mirror server's _compute_playback output. */
+    /** Server-emitted group sync info. As of v0.1.12 the only field
+     *  the tablet actually uses is [loopStartedAtMs] + [groupId] —
+     *  everything else (itemId, position, etc.) is legacy that older
+     *  clients consumed before client-side sync math. The tablet
+     *  computes the rest locally from the playlist it already has. */
     @Serializable
     data class LivePlayback(
-        val itemId: String,
-        val itemIndex: Int,
-        val positionMs: Long,
-        val itemStartedAtMs: Long,
+        val itemId: String = "",
+        val itemIndex: Int = 0,
+        val positionMs: Long = 0,
+        val itemStartedAtMs: Long = 0,
         val loopDurationSec: Double = 0.0,
         val groupId: String = "",
+        /** Wall-clock ms when this group's loop started. Reset on every
+         *  playlist revision bump. The only field needed for sync. */
+        val loopStartedAtMs: Long = 0,
     )
 
     @Serializable
@@ -346,23 +352,29 @@ class PlayerRepository(
     private val _syncGroup = MutableStateFlow<String?>(null)
     val syncGroupFlow: StateFlow<String?> = _syncGroup
 
-    /** Sync-correction hint. Emitted once per /api/state poll when the
-     *  server returned a playback block. PlayerController collects this
-     *  and seeks ExoPlayer if it has drifted past the correction
-     *  threshold. */
-    data class PlaybackSyncHint(
-        val itemId: String,
-        val itemIndex: Int,
-        val positionMs: Long,
-        /** [System.currentTimeMillis] adjusted for the round-trip
-         *  delta between this tablet and the server, so the consumer
-         *  can compute "expected position right now" without trusting
-         *  either clock alone. */
-        val adjustedAtMs: Long,
+    /** Group sync anchor — just the loop's wall-clock epoch + the
+     *  groupId. The tablet computes "which item should I be on?"
+     *  locally using this + its own playlist + durations.
+     *
+     *  Replaces the v0.1.6-v0.1.11 server-driven `PlaybackSyncHint`
+     *  approach (where the server computed the per-tablet "you
+     *  should be at item X position Y" block on every poll). The
+     *  client-side approach lets sync corrections happen ONLY at
+     *  natural item transitions (invisible) instead of every poll
+     *  (visible buffer flash). Server poll frequency no longer
+     *  affects sync quality. */
+    data class GroupSyncAnchor(
         val groupId: String,
+        /** Loop epoch in wall-clock ms. Tablet computes its position
+         *  in the loop as `(System.currentTimeMillis() + serverOffsetMs - loopStartedAtMs) mod totalDurationMs`. */
+        val loopStartedAtMs: Long,
+        /** Difference between server clock and local clock, in ms.
+         *  Added to System.currentTimeMillis() to get "what time is
+         *  it on the server right now." Updated on every poll. */
+        val serverOffsetMs: Long,
     )
-    private val _playbackSync = MutableStateFlow<PlaybackSyncHint?>(null)
-    val playbackSyncFlow: StateFlow<PlaybackSyncHint?> = _playbackSync
+    private val _groupSync = MutableStateFlow<GroupSyncAnchor?>(null)
+    val groupSyncFlow: StateFlow<GroupSyncAnchor?> = _groupSync
 
     /** Per-video download progress. Cleared when a download finishes. */
     data class DownloadProgress(
@@ -474,31 +486,29 @@ class PlayerRepository(
             LogBuffer.i(TAG, "Sync group → ${state.syncGroup ?: "(none)"}")
         }
 
-        // Sync-correction hint. When the server returned a playback
-        // block, push it onto the flow so PlayerController can decide
-        // whether to seek. We adjust the server's timestamp for the
-        // round-trip latency: positionMs was computed at serverNowMs;
-        // by the time the tablet reads it, more time has passed.
-        // Storing the local-clock equivalent lets the consumer compute
-        // "expected position now" with one subtraction.
+        // Group sync anchor. The tablet does all "which item should I
+        // be on right now?" math locally using this epoch + the items
+        // it already has. The legacy `playback` block also carries an
+        // explicit itemId/position from the server — we ignore that
+        // here and rely on local computation triggered at media-item
+        // transitions, which is when seeks are invisible.
         val playback = state.playback
-        if (playback != null && state.syncGroup != null) {
+        if (playback != null && state.syncGroup != null && playback.loopStartedAtMs > 0) {
             val serverNow = state.serverNowMs ?: System.currentTimeMillis()
             val localNow = System.currentTimeMillis()
-            // adjustedAtMs = localNow → "as of this moment in tablet
-            // clock, the item was at positionMs". Drift from server
-            // clock washes out because both endpoints subtract from
-            // serverNowMs identically.
-            val adjustedPos = playback.positionMs + (localNow - serverNow).coerceAtLeast(0)
-            _playbackSync.value = PlaybackSyncHint(
-                itemId = playback.itemId,
-                itemIndex = playback.itemIndex,
-                positionMs = adjustedPos,
-                adjustedAtMs = localNow,
-                groupId = playback.groupId,
+            // `serverOffsetMs` is "how far ahead is the server clock?"
+            // Add it to System.currentTimeMillis() to get "what time
+            // does the server think it is right now." Letting the
+            // tablet trust its own monotonic clock plus this single
+            // offset makes the math drift-free across poll intervals.
+            val serverOffsetMs = serverNow - localNow
+            _groupSync.value = GroupSyncAnchor(
+                groupId = playback.groupId.ifEmpty { state.syncGroup },
+                loopStartedAtMs = playback.loopStartedAtMs,
+                serverOffsetMs = serverOffsetMs,
             )
         } else {
-            _playbackSync.value = null
+            _groupSync.value = null
         }
 
         // Per-location splash. Download (or clear) when the URL changes.
