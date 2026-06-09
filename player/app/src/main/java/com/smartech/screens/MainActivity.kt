@@ -16,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
 import com.smartech.screens.player.PlayerController
 import com.smartech.screens.player.PlayerScreen
@@ -23,8 +24,10 @@ import com.smartech.screens.staff.HoldProgressIndicator
 import com.smartech.screens.staff.OnboardingScreen
 import com.smartech.screens.staff.StaffOverlay
 import com.smartech.screens.update.UpdaterOverlay
+import com.smartech.screens.util.DisplayModes
 import com.smartech.screens.util.InputMode
 import com.smartech.screens.util.LogBuffer
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -131,6 +134,23 @@ class MainActivity : ComponentActivity() {
             isOnSplash = { controller.isOnSplash() },
         )
         watchdog.start()
+
+        // v0.1.14: apply the CMS-pushed HDMI mode override on every
+        // change. Reads PlayerRepository.displayModeFlow — null means
+        // "auto, leave the box alone." Non-null is a Display.Mode.modeId
+        // the tablet itself reported in its heartbeat. The collector
+        // runs on the main thread because Window.attributes must be
+        // mutated there; lifecycleScope.launch wraps it safely without
+        // a Compose recomposition cost.
+        lifecycleScope.launch {
+            repo.displayModeFlow.collect { mode ->
+                if (mode == null) {
+                    DisplayModes.apply(this@MainActivity, 0)
+                } else {
+                    DisplayModes.apply(this@MainActivity, mode)
+                }
+            }
+        }
 
         val tvLike = InputMode.isTvLike(this)
         Log.i(

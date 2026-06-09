@@ -280,6 +280,23 @@ fun PlaylistView(
                         fontWeight = FontWeight.Medium,
                     )
                 }
+
+                Spacer(Modifier.height(14.dp))
+
+                // Build number — small, low-contrast, monospaced. Lets a
+                // staff member confirm what version is on the tablet
+                // without leaving the playlist screen (e.g. "is this
+                // already on v0.1.14 with the resolution picker?"). The
+                // value comes from BuildConfig.VERSION_NAME, which is
+                // driven by the top-level VERSION file at build time —
+                // so it auto-bumps on every release without any manual
+                // edit here.
+                Text(
+                    "v${com.smartech.screens.BuildConfig.VERSION_NAME}",
+                    color = Color(0x66FFFFFF),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
             }
         }
 

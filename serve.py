@@ -379,6 +379,15 @@ def _ensure_screen_state(device_id: str) -> dict:
             "audioOn": False,                     # screen-wide audio is muted by default — see /api/screens/<id>/audio
             "pollMode": DEFAULT_POLL_MODE,        # "fast" | "normal" | "slow" — see /api/screens/<id>/poll-mode
             "syncGroup": None,                    # see _compute_playback / /api/screens/<id>/sync-group
+            # v0.1.14: per-screen display mode override. When set, the
+            # tablet calls Window.LayoutParams.preferredDisplayModeId =
+            # <int> so the system picks the matching HDMI mode at the
+            # next surface attach. Value is the Display.Mode.modeId
+            # reported by the device's own heartbeat (see
+            # supportedModes there). None = auto, let the box keep its
+            # current mode. Boxes like the TX3 Mini boot in 720p but
+            # support 1080p — this override is how the CMS flips them.
+            "displayMode": None,
             "pendingCommands": [],                 # list of pending commands for this screen
         }
         _per_screen[device_id] = s
@@ -397,6 +406,8 @@ def _ensure_screen_state(device_id: str) -> dict:
         s["lowDataMode"] = (s.get("pollMode") == "slow")
     if "syncGroup" not in s:
         s["syncGroup"] = None
+    if "displayMode" not in s:
+        s["displayMode"] = None
     return s
 
 
@@ -1286,6 +1297,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "syncGroup":   sync_group_id,
                         "playback":    playback,
                         "serverNowMs": int(time.time() * 1000),
+                        # Display mode override (v0.1.14). null means
+                        # "leave it alone." Non-null is a modeId the
+                        # tablet previously reported in its heartbeat
+                        # under supportedModes — the tablet sets
+                        # Window.LayoutParams.preferredDisplayModeId to
+                        # this value, which makes the system switch
+                        # HDMI output to the matching mode.
+                        "displayMode": s.get("displayMode"),
                         "commands":    commands,
                         "splashUrl":   splash["url"] if splash else None,
                         "splashName":  splash["name"] if splash else None,
@@ -1322,6 +1341,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "pollMode":              state.get("pollMode", DEFAULT_POLL_MODE),
                         "lowDataMode":           state.get("pollMode", DEFAULT_POLL_MODE) == "slow",
                         "syncGroup":             state.get("syncGroup"),
+                        # The override the CMS most recently chose (or
+                        # null for auto). The heartbeat carries the
+                        # current ACTUAL active mode separately
+                        # (activeDisplayMode in the **s spread above)
+                        # — useful when the override hasn't taken
+                        # effect yet because the tablet hasn't seen
+                        # the new /api/state poll.
+                        "displayMode":           state.get("displayMode"),
                     }
                     screens.append(record)
             self._send_json({"screens": screens})
@@ -1648,6 +1675,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "ramMb", "screenWidth", "screenHeight", "orientation",
                     "tier", "cachedVideoIds", "cacheBytes", "freeStorageBytes",
                     "currentRevision", "status",
+                    # v0.1.14: HDMI modes the box can output. Tablet
+                    # enumerates Display.getSupportedModes() and pushes
+                    # them up so the CMS can render a picker. Shape:
+                    # [{"id": <int>, "w": <int>, "h": <int>, "hz": <float>}, ...]
+                    # plus "activeDisplayMode": <int> for the currently-
+                    # selected mode id (useful for showing a checkmark
+                    # in the picker without the tablet first acking the
+                    # override).
+                    "supportedModes", "activeDisplayMode",
                 ):
                     val = body.get(key)
                     if val is not None:
@@ -1707,7 +1743,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/poll-mode       { pollMode: "fast"|"normal"|"slow" }
         # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }   (legacy — writes pollMode)
         # POST /api/screens/<deviceId>/sync-group      { syncGroup: string | null }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|poll-mode|low-data-mode|sync-group)$", path)
+        # POST /api/screens/<deviceId>/display-mode    { displayMode: int | null }
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|poll-mode|low-data-mode|sync-group|display-mode)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -1721,7 +1758,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # `command` is privileged either way (reboot, unregister)
             # and stays user-only.
             is_self_edit = (
-                action in ("playlist", "mix-splash", "audio", "poll-mode", "low-data-mode", "sync-group")
+                action in ("playlist", "mix-splash", "audio", "poll-mode", "low-data-mode", "sync-group", "display-mode")
                 and device_id in _screens
             )
             if not is_self_edit:
@@ -1910,6 +1947,55 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         target=device_id,
                     )
                     self._send_json({"ok": True, "syncGroup": new_group})
+                    return
+                if action == "display-mode":
+                    # Pick an HDMI mode for this screen. null = auto
+                    # (leave the box alone). Non-null must be an int
+                    # matching a Display.Mode.modeId the tablet
+                    # previously reported in `supportedModes`. We
+                    # don't validate it against that list here — the
+                    # tablet does that on the receiving end and falls
+                    # back to "no change" if the id has disappeared
+                    # (e.g. a different cable / TV is now attached so
+                    # the supported list is different).
+                    raw_mode = body.get("displayMode")
+                    new_mode: int | None
+                    if raw_mode is None:
+                        new_mode = None
+                    elif isinstance(raw_mode, bool):
+                        # Bool is a subclass of int in Python — guard
+                        # explicitly so True/False can't sneak in as
+                        # mode id 1/0.
+                        self.send_error(400, "displayMode must be int or null"); return
+                    elif isinstance(raw_mode, int):
+                        new_mode = raw_mode
+                    else:
+                        self.send_error(400, "displayMode must be int or null"); return
+                    state = _ensure_screen_state(device_id)
+                    state["displayMode"] = new_mode
+                    _save_per_screen()
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    # Try to render a human label using the modes the
+                    # tablet has reported — purely for the activity log.
+                    label = "auto"
+                    if new_mode is not None:
+                        modes = (_screens.get(device_id) or {}).get("supportedModes") or []
+                        for mm in modes:
+                            try:
+                                if int(mm.get("id")) == new_mode:
+                                    label = f"{mm.get('w')}×{mm.get('h')} @ {round(float(mm.get('hz') or 0))}Hz"
+                                    break
+                            except Exception:
+                                pass
+                        else:
+                            label = f"mode {new_mode}"
+                    _log_activity(
+                        kind="settings",
+                        text=f"Display mode → {label} on {screen_name}",
+                        icon="settings",
+                        target=device_id,
+                    )
+                    self._send_json({"ok": True, "displayMode": new_mode})
                     return
 
         self.send_error(404, "Unknown API endpoint")

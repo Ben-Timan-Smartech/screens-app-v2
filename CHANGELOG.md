@@ -18,6 +18,63 @@ Rules:
 
 ---
 
+## v0.1.14
+
+Two small features off the back of the v0.1.13 install on the TX3
+Mini: see the running build at a glance, and override the HDMI
+output when the box undershoots its capability.
+
+### Build number on the on-tablet admin
+
+The on-tablet "What's on this screen" page (the first stage after PIN
+entry) now shows the running version as a small monospaced footer in
+the dark left rail — e.g. `v0.1.14`. Comes straight from
+`BuildConfig.VERSION_NAME`, which is driven by the top-level
+`VERSION` file at build time, so the number bumps automatically on
+every release without a manual edit. Lets staff confirm a
+just-installed update without leaving the playlist screen ("did the
+new resolution picker land?").
+
+### CMS-side display resolution override
+
+Cheap Android boxes ship with HDMI output fixed to a single mode at
+boot — the TX3 Mini, for example, comes up at 720p even when the
+panel and the box both support 1080p. The previous device-info
+heuristic faithfully reported 720p (which was true: the active mode
+was 720p) but with no way to flip it without plugging a keyboard
+into the box.
+
+New flow:
+- **Tablet enumerates supported modes** on every heartbeat using
+  `Display.getSupportedModes()` and reports them as
+  `[{id, w, h, hz}, ...]`, plus the currently active mode id.
+- **CMS Screen detail page** shows a new "Display resolution" card
+  listing every supported mode + an "Auto" row that means "don't
+  touch the box". Picking a row writes the chosen mode id to a new
+  `displayMode` per-screen field via
+  `POST /api/screens/<id>/display-mode`.
+- **Server echoes** `displayMode` in `/api/state` so the tablet sees
+  changes on its next poll. The endpoint accepts a self-edit from
+  the tablet too, matching the pattern the other per-screen toggles
+  use.
+- **Tablet applies** the override by setting
+  `Window.LayoutParams.preferredDisplayModeId` to the requested mode
+  id. Android then asks the HDMI sink to switch to that mode at the
+  next surface attach. Validation against `supportedModes` happens
+  on the tablet itself — a stale id (e.g. cable swapped between
+  CMS-push and tablet-apply) just clears the preference rather than
+  locking the box into an unrenderable state.
+- The card auto-hides on screens whose tablet hasn't reported
+  supportedModes yet (older app, or a device whose Display API
+  doesn't expose them).
+
+### No state migration
+
+`displayMode` defaults to `null` (auto) for every existing screen,
+and `_ensure_screen_state` back-fills the field on read — so a
+rolling deploy doesn't touch already-persisted records until the
+operator picks a mode.
+
 ## v0.1.13
 
 Sync groups, again — closing the last ~1 second of drift.
