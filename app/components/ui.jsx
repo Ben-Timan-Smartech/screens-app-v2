@@ -442,6 +442,25 @@ const setScreenSyncGroup = async (deviceId, syncGroup) => {
   return res.json();
 };
 
+// calibrateSyncGroup — POST /api/sync-groups/<groupId>/calibrate.
+// Lights up every member of the group with a giant ticking clock
+// overlay (the latency-corrected server time) for `durationSec`
+// seconds. Lets staff stand in front of two screens and visually
+// confirm clock-sync is working — if the digits match to the same
+// fractional second, the v0.1.13 NTP offset is healthy and any
+// remaining playback drift is a content/queue issue, not a clock
+// issue. groupId can also be a deviceId — calibrating a lone screen
+// is fine for an eye-check of one tablet's clock vs. yours.
+const calibrateSyncGroup = async (groupId, durationSec = 60) => {
+  const res = await fetch(`/api/sync-groups/${encodeURIComponent(groupId)}/calibrate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ durationSec }),
+  });
+  if (!res.ok) throw new Error(`calibrate failed: ${res.status}`);
+  return res.json();
+};
+
 // setScreenDisplayMode — POST /api/screens/<id>/display-mode. modeId
 // is an int from the screen's supportedModes list, or null to clear
 // the override (auto). Cheap boxes like the TX3 Mini boot at 720p
@@ -1287,6 +1306,6 @@ Object.assign(window, {
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setVideoDefaultUnmute,
+  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, calibrateSyncGroup, setVideoDefaultUnmute,
   setScreenPlaylist, PushPicker,
 });

@@ -178,7 +178,7 @@ const playlistsMatch = (a, b) => {
 // The server tracks the group label as a string — clients never
 // need to type it. The UI invents sensible labels when a group
 // needs to be created.
-const SyncGroupCard = ({ screen, allScreens, onSetGroup, onSetGroupForDevice, onRequestJoinWithDifferentContent, canEdit, isLive }) => {
+const SyncGroupCard = ({ screen, allScreens, onSetGroup, onSetGroupForDevice, onRequestJoinWithDifferentContent, onCalibrate, canEdit, isLive }) => {
   const groupId = screen.syncGroup || null;
   // Members = every screen in this group (including the current one).
   // Other screens = all other registered screens, sorted by name.
@@ -296,16 +296,31 @@ const SyncGroupCard = ({ screen, allScreens, onSetGroup, onSetGroupForDevice, on
         </div>
       )}
 
-      {groupId && (
-        <div style={{ marginTop: 12 }}>
+      {/* Calibrate — lights up every group member (or this one screen
+          if it's solo) with a giant ticking server-corrected clock
+          overlay for 60 s. Staff visually confirm whether the screens
+          tick on the same wall-clock second; if they do, clock sync
+          is healthy and any visible drift in playback is a content
+          / queue issue rather than a clock issue. Always available
+          when the screen is live — useful even pre-sync to eyeball
+          a single tablet's clock against your watch. */}
+      <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <Button
+          variant="secondary" size="sm"
+          disabled={!canEdit || !isLive}
+          onClick={() => onCalibrate && onCalibrate()}
+          title={isLive ? 'Show a giant synced clock on every group member for 60 s' : 'Available once the screen reconnects.'}>
+          Calibrate screens
+        </Button>
+        {groupId && (
           <Button
             variant="ghost" size="sm"
             disabled={!canEdit}
             onClick={() => onSetGroup(null)}>
             Stop syncing this screen
           </Button>
-        </div>
-      )}
+        )}
+      </div>
     </Card>
   );
 };
@@ -662,6 +677,28 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
       );
     } catch (e) {
       showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
+  // Fire the calibration overlay on every group member (or just this
+  // screen if it's solo). Targets the group when there is one — falls
+  // back to the deviceId so the staff can eye-check a single tablet
+  // against their own watch. 60-second window: long enough to walk to
+  // each screen, short enough that the overlay doesn't get stuck if
+  // the staff forgets to dismiss it (it auto-hides on the tablet
+  // when correctedNow() passes the cutoff).
+  const handleCalibrate = async () => {
+    if (!targetDeviceId) return;
+    const groupOrSelf = lastKnown?.syncGroup || targetDeviceId;
+    try {
+      const res = await calibrateSyncGroup(groupOrSelf, 60);
+      const n = res.screensTargeted || 1;
+      showToast(
+        `Calibration started on ${n} screen${n === 1 ? '' : 's'} for 60s — watch the digits match.`,
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Calibrate failed: ${e.message}`, 'err');
     }
   };
 
@@ -1056,6 +1093,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 onSetGroup={handleSetSyncGroup}
                 onSetGroupForDevice={handleSetSyncGroupForDevice}
                 onRequestJoinWithDifferentContent={(other) => setSyncJoinTarget(other)}
+                onCalibrate={handleCalibrate}
                 canEdit={canEdit}
                 isLive={isLive}
               />

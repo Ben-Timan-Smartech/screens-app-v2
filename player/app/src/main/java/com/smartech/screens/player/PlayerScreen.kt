@@ -31,6 +31,8 @@ fun PlayerScreen(
     val remoteSplash by repository.remoteSplashFile.collectAsState()
     val audioOn by repository.audioOnFlow.collectAsState()
     val groupSync by repository.groupSyncFlow.collectAsState()
+    val calibrateUntilMs by repository.calibrateUntilMsFlow.collectAsState()
+    val serverOffsetMs by repository.serverOffsetMsFlow.collectAsState()
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
@@ -91,6 +93,14 @@ fun PlayerScreen(
                     )
                 }
             },
+        )
+        // v0.1.15: giant ticking clock on top of the player when the
+        // CMS has put this screen in calibration mode. Renders nothing
+        // when calibrateUntilMs is null / past, so the cost on the
+        // normal playback path is just collecting two StateFlows.
+        CalibrationOverlay(
+            calibrateUntilMs = calibrateUntilMs,
+            serverOffsetMs = serverOffsetMs,
         )
     }
 }

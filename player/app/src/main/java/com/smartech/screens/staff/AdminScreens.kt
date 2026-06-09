@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -251,6 +252,18 @@ fun DeviceAdminScreen(
                 }
             }
 
+            // Recent activity — hoisted to the top on v0.1.15 so it's
+            // visible on first render on Android TV / TX3-class boxes.
+            // The whole right pane is a LazyColumn and the original
+            // position (just before the bottom spacer) was below the
+            // fold. On a TV remote you scroll a LazyColumn by D-padding
+            // to a focusable child below — and the InfoRow / log entry
+            // rows aren't focusable, so D-pad couldn't reach them and
+            // the panel was invisible. Putting it second-from-top
+            // sidesteps that entirely; tablet users still see the
+            // info card right below it.
+            item { LogPanel() }
+
             // Info card
             item {
                 CardSection("Device info") {
@@ -433,9 +446,6 @@ fun DeviceAdminScreen(
                     )
                 }
             }
-
-            // Log feed
-            item { LogPanel() }
 
             item { Spacer(Modifier.height(40.dp)) }
         }
@@ -622,25 +632,51 @@ private fun LogPanel() {
             )
         }
         Spacer(Modifier.height(10.dp))
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color.White)
-                .border(1.dp, BoneLine, RoundedCornerShape(12.dp))
-                .padding(vertical = 6.dp),
-        ) {
-            if (entries.isEmpty()) {
+        // v0.1.15: the entries used to live in a plain Column, which on
+        // Android TV gave D-pad nothing to land on — entries existed in
+        // the layout tree but were invisible because the parent
+        // LazyColumn (right pane) couldn't be scrolled past the "Clear"
+        // button. Switching to a bounded LazyColumn whose rows carry
+        // `Modifier.clickable {}` (no-op) gives each row a focus target
+        // so the remote scrolls through them naturally. Tablet users
+        // pay nothing — the clickable is inert, the focus ring (amber
+        // TvFocusIndication) only fires on actual focus traversal,
+        // which touch input doesn't produce.
+        if (entries.isEmpty()) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.White)
+                    .border(1.dp, BoneLine, RoundedCornerShape(12.dp))
+                    .padding(18.dp),
+            ) {
                 Text(
                     "No activity yet — uploads, pushes, and errors appear here.",
                     color = Muted, fontSize = 13.sp,
-                    modifier = Modifier.padding(18.dp),
                 )
-            } else {
-                entries.take(50).forEach { e ->
+            }
+        } else {
+            androidx.compose.foundation.lazy.LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 0.dp, max = 360.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.White)
+                    .border(1.dp, BoneLine, RoundedCornerShape(12.dp)),
+            ) {
+                val rows = entries.take(50)
+                items(rows.size) { i ->
+                    val e = rows[i]
                     Row(
                         Modifier
                             .fillMaxWidth()
+                            // No-op clickable so D-pad can land on each
+                            // row and the LazyColumn auto-scrolls as
+                            // focus moves down. TvFocusIndication paints
+                            // the amber border; touch users never see it
+                            // because they never produce focus events.
+                            .clickable(onClick = {})
                             .padding(horizontal = 18.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.Top,
                     ) {
@@ -665,7 +701,7 @@ private fun LogPanel() {
                             )
                         }
                     }
-                    Divider()
+                    if (i < rows.size - 1) Divider()
                 }
             }
         }

@@ -18,6 +18,65 @@ Rules:
 
 ---
 
+## v0.1.15
+
+Two new ways to make sync trustworthy, plus a long-standing
+Android-TV bug fixed.
+
+### Calibrate button — visually verify clock sync
+
+The fundamental sync question is: do all the tablets in a group
+agree on what time it is right now? v0.1.13 fixed the maths
+(latency-corrected NTP offset), but you couldn't actually *see*
+whether two tablets agreed. The new **Calibrate screens** button on
+the Sync group card lights up every group member with a giant
+ticking server-corrected clock for 60 seconds. Stand in front of
+two screens — if the digits match to the same fractional second,
+clock sync is working and any remaining drift in real playback is a
+content / queue issue, not a clock issue. Also works on a single
+screen (eye-check against your watch).
+
+Server-side it's a new `POST /api/sync-groups/<id>/calibrate`
+endpoint that sets a per-screen `calibrateUntilMs` cutoff and
+queues a refresh command so the tablet picks it up on the very next
+poll instead of waiting up to the poll interval. The tablet's new
+`CalibrationOverlay` composable renders the corrected wall-clock in
+huge digits + a smaller ms tail; it auto-hides the moment the
+corrected clock passes the cutoff.
+
+### Coordinated start — playlists now actually start together
+
+When a playlist was pushed to a sync group, the server reset the
+loop epoch to `now`. The first tablet to poll saw the new epoch
+and started immediately; the second tablet polled 10–60 seconds
+later, saw the same epoch, and instantly snap-seeked to "wherever
+in the loop the math says you should be by now." That's a
+staircase, not a synchronised start.
+
+v0.1.15 anchors the epoch 5 seconds in the future and the tablet
+treats a future epoch as a coordinated-start signal: seek to
+(item 0, position 0), pause, and resume at the exact wall-clock
+instant. Every member of the group does the same thing, so when
+wall-clock catches up to the epoch they all start frame-0
+simultaneously. No staircase. Same flow whether the push originates
+from the CMS or the tablet's staff overlay — the server-side reset
+is the only thing that changed.
+
+### Android TV — Recent activity is finally visible
+
+The Recent activity log inside Device admin → right pane never
+showed on Android TV / TX3-class boxes. The right pane is a
+`LazyColumn`; on a TV remote you scroll it by D-padding focus to a
+child below the fold, but the log entry rows were plain `Text`
+with no focusable modifier, so D-pad couldn't traverse into them
+and the panel was invisible. Two fixes:
+- Hoisted the panel to the top of the right pane so it's above the
+  fold on first render.
+- Switched the entries to a bounded LazyColumn whose rows are
+  `Modifier.clickable {}` (no-op), giving D-pad a focus target on
+  every row. The amber `TvFocusIndication` border highlights which
+  entry is being read; touch users see no change.
+
 ## v0.1.14
 
 Two small features off the back of the v0.1.13 install on the TX3

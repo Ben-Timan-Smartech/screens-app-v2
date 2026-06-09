@@ -388,6 +388,12 @@ def _ensure_screen_state(device_id: str) -> dict:
             # current mode. Boxes like the TX3 Mini boot in 720p but
             # support 1080p — this override is how the CMS flips them.
             "displayMode": None,
+            # v0.1.15: wall-clock ms at which the calibration overlay
+            # (giant synchronised clock) should stop showing. Null or
+            # past = no overlay. Set by POST /api/sync-groups/<id>/
+            # calibrate to (now + duration). The tablet renders the
+            # overlay until `correctedNow()` passes this value.
+            "calibrateUntilMs": None,
             "pendingCommands": [],                 # list of pending commands for this screen
         }
         _per_screen[device_id] = s
@@ -408,6 +414,8 @@ def _ensure_screen_state(device_id: str) -> dict:
         s["syncGroup"] = None
     if "displayMode" not in s:
         s["displayMode"] = None
+    if "calibrateUntilMs" not in s:
+        s["calibrateUntilMs"] = None
     return s
 
 
@@ -430,6 +438,29 @@ def _ensure_screen_state(device_id: str) -> dict:
 
 _sync_groups: dict[str, dict] = {}
 
+# v0.1.15: coordinated-start lookahead. When the loop epoch resets
+# (new revision, fresh group), we anchor `loopStartedAt` to a moment
+# in the near future rather than the current instant. That gives
+# every screen in the group time to:
+#   • Receive the next /api/state poll (cadence depends on pollMode —
+#     fast=10 s, normal=60 s).
+#   • See the bumped revision and the future epoch.
+#   • Prepare ExoPlayer (queue media items, prepare(), seek to 0).
+# When wall-clock reaches `loopStartedAt`, every prepared tablet is
+# already sitting on frame 0 of item 0 and starts together.
+#
+# Previously the epoch was `now`. The first tablet to poll saw the
+# new epoch and started immediately; the second tablet, polling a few
+# seconds later, saw the same epoch but with N seconds already
+# elapsed, so its first snap-on-transition was already mid-item. The
+# new behaviour eliminates that staircase.
+#
+# 5 s is a balance: long enough for one slow-poll-mode tick (Fast is
+# 10 s — but the staff "Calibrate / push" flow forces a refresh
+# command so tablets re-poll immediately), short enough that a push
+# still feels responsive in the CMS.
+COORDINATED_START_DELAY_SEC = 5.0
+
 
 def _save_sync_groups() -> None:
     """Persist _sync_groups. Call inside _STATE_LOCK after any mutation."""
@@ -441,17 +472,21 @@ def _group_loop_epoch(items: list, group_id: str, current_revision: int, now: fl
     nothing more. The tablet computes "which item am I on?" locally
     using this epoch + the item durations it already has.
 
-    Resets `loopStartedAt` to `now` whenever the playlist revision
-    moves forward (so a new push restarts the loop in lockstep across
-    every screen in the group). Caller must hold _STATE_LOCK."""
+    Resets `loopStartedAt` to `now + COORDINATED_START_DELAY_SEC`
+    whenever the playlist revision moves forward — see the constant's
+    docstring for why we anchor in the near future rather than now.
+    Caller must hold _STATE_LOCK."""
     if not items:
         return None
     group = _sync_groups.get(group_id)
     if group is None or group.get("lastRevision") != current_revision:
         # First time we've seen this group, or the playlist just changed
-        # underneath it — restart the loop from now so every screen in
-        # the group is in lockstep.
-        group = {"loopStartedAt": now, "lastRevision": current_revision}
+        # underneath it — schedule a coordinated start so every screen
+        # in the group starts on item 0 at the same wall-clock instant.
+        group = {
+            "loopStartedAt": now + COORDINATED_START_DELAY_SEC,
+            "lastRevision": current_revision,
+        }
         _sync_groups[group_id] = group
         _save_sync_groups()
     return {
@@ -1305,6 +1340,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # this value, which makes the system switch
                         # HDMI output to the matching mode.
                         "displayMode": s.get("displayMode"),
+                        # v0.1.15: wall-clock cutoff for the giant-clock
+                        # calibration overlay. Tablet renders the overlay
+                        # until correctedNow() passes this; null = no
+                        # overlay. Cleared automatically the moment the
+                        # value falls into the past — we don't bother
+                        # writing it back to null until the next time
+                        # the field is set.
+                        "calibrateUntilMs": s.get("calibrateUntilMs"),
                         "commands":    commands,
                         "splashUrl":   splash["url"] if splash else None,
                         "splashName":  splash["name"] if splash else None,
@@ -1654,6 +1697,50 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 target=device_id,
             )
             self._send_json({"ok": True, "screenId": device_id})
+            return
+
+        # v0.1.15: light up every member of a sync group with a giant
+        # synchronised clock so staff can stand in front of two screens
+        # and visually confirm they tick on the same wall-clock second.
+        # Body: { durationSec?: int (default 60) }. Returns the list of
+        # screens affected.
+        if path.startswith("/api/sync-groups/") and path.endswith("/calibrate"):
+            if self._require_perm("screens.command") is None:
+                return
+            group_id = urllib.parse.unquote(path[len("/api/sync-groups/"):-len("/calibrate")])
+            try:
+                duration_sec = int(body.get("durationSec") or 60)
+            except (TypeError, ValueError):
+                self.send_error(400, "durationSec must be an integer"); return
+            duration_sec = max(5, min(600, duration_sec))   # clamp 5 s – 10 min
+            until_ms = int((time.time() + duration_sec) * 1000)
+            with _STATE_LOCK:
+                # Match every screen currently tagged with this group.
+                # Also accept a single-screen group_id (deviceId) so the
+                # CMS can calibrate a lone screen for an eye-check of
+                # the clock-sync math.
+                targets = [
+                    d for d, s in _per_screen.items()
+                    if s.get("syncGroup") == group_id
+                ]
+                if not targets and group_id in _per_screen:
+                    targets = [group_id]
+                for tid in targets:
+                    st = _ensure_screen_state(tid)
+                    st["calibrateUntilMs"] = until_ms
+                    # Queue a refresh command so the tablet picks up the
+                    # new field on its very next /api/state poll rather
+                    # than waiting up to the poll interval. The tablet's
+                    # poll loop drains pendingCommands and re-fetches.
+                    st["pendingCommands"].append({"command": "refresh", "at": time.time()})
+                _save_per_screen()
+            _log_activity(
+                kind="settings",
+                text=f"Calibration started on {len(targets)} screen(s) in '{group_id}' ({duration_sec}s)",
+                icon="settings",
+                target=group_id,
+            )
+            self._send_json({"ok": True, "calibrateUntilMs": until_ms, "screensTargeted": len(targets)})
             return
 
         if path == "/api/screens/heartbeat":

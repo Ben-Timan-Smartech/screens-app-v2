@@ -68,6 +68,21 @@ class PlayerController(context: Context) {
     @Volatile
     private var groupSync: GroupSyncState? = null
 
+    /** v0.1.15: Pending coordinated-start resume.
+     *
+     *  When the server reset the group's loop epoch to a moment in the
+     *  near future (see `COORDINATED_START_DELAY_SEC` in serve.py), the
+     *  tablet seeks ExoPlayer to (item 0, position 0), pauses, and
+     *  schedules this Runnable to fire `play()` at the exact wall-clock
+     *  instant. Every member of the group does the same thing — so when
+     *  the epoch hits, every prepared tablet resumes simultaneously
+     *  from frame 0.
+     *
+     *  Stored so we can cancel it if a new anchor arrives (e.g. another
+     *  rev bump during the wait). Always touched on the main thread. */
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var pendingCoordinatedStart: Runnable? = null
+
     init {
         // Re-apply volume whenever the player moves to the next item in the
         // queue. Without this listener, the first MediaItem's volume sticks
@@ -224,7 +239,47 @@ class PlayerController(context: Context) {
                 "Group sync acquired — loopStartedAtMs=$loopStartedAtMs, " +
                     "${itemIds.size} items, total=${total}ms",
             )
-            snapToGroupExpectedItem(force = true)
+            // Cancel any pending coordinated-start runnable from a prior
+            // anchor — a new epoch supersedes the old wait.
+            pendingCoordinatedStart?.let { mainHandler.removeCallbacks(it) }
+            pendingCoordinatedStart = null
+
+            // Is the epoch in the (near) future? If so, this is a
+            // coordinated-start signal from the server: seek to item 0
+            // position 0, pause, and resume at the exact wall-clock
+            // instant. Every tablet in the group does the same thing,
+            // so when wall-clock catches up to loopStartedAtMs they all
+            // resume from frame 0 simultaneously — no staircase based
+            // on who polled first.
+            val serverNowMs = System.currentTimeMillis() + serverOffsetMs
+            val msUntilStart = loopStartedAtMs - serverNowMs
+            // Guard band: 60 s. Anything further out is almost certainly
+            // a clock-skew anomaly rather than an intentional coordinated
+            // start; fall through to the normal snap path, which clamps
+            // elapsed to 0 and lands on item 0 anyway.
+            if (msUntilStart in 1L..60_000L) {
+                LogBuffer.i(
+                    "PlayerController",
+                    "Coordinated start in ${msUntilStart}ms — pausing on item 0",
+                )
+                // Seek to (item 0, position 0). The first item in the
+                // queue may be splash (mix-splash off in groups, but
+                // defensive) — skip past it to the first real item.
+                val target = (0 until player.mediaItemCount).firstOrNull { i ->
+                    player.getMediaItemAt(i).mediaId != Source.SPLASH
+                } ?: 0
+                player.seekTo(target, 0L)
+                player.playWhenReady = false
+                val resume = Runnable {
+                    LogBuffer.i("PlayerController", "Coordinated start firing")
+                    player.playWhenReady = true
+                    pendingCoordinatedStart = null
+                }
+                pendingCoordinatedStart = resume
+                mainHandler.postDelayed(resume, msUntilStart)
+            } else {
+                snapToGroupExpectedItem(force = true)
+            }
         }
     }
 
@@ -304,6 +359,8 @@ class PlayerController(context: Context) {
     }
 
     fun release() {
+        pendingCoordinatedStart?.let { mainHandler.removeCallbacks(it) }
+        pendingCoordinatedStart = null
         player.release()
     }
 }

@@ -271,6 +271,11 @@ class PlayerRepository(
          *  list (reported in heartbeat). MainActivity applies it to
          *  the Window's preferredDisplayModeId on change. */
         val displayMode: Int? = null,
+        /** v0.1.15: wall-clock cutoff for the calibration overlay
+         *  (giant ticking server-time clock). When this is in the
+         *  future relative to `correctedNow()` the tablet renders
+         *  the overlay on top of the player; otherwise it hides. */
+        val calibrateUntilMs: Long? = null,
         val commands: List<LiveCommand> = emptyList(),
         val splashUrl: String? = null,
         val splashName: String? = null,
@@ -367,6 +372,19 @@ class PlayerRepository(
      *  supports 1080p) is the canonical case for needing this. */
     private val _displayMode = MutableStateFlow<Int?>(null)
     val displayModeFlow: StateFlow<Int?> = _displayMode
+
+    /** v0.1.15: wall-clock cutoff for the calibration overlay. The
+     *  PlayerScreen collects this + the corrected server clock and
+     *  renders a full-screen giant-time overlay when this is in the
+     *  future. Null or past = no overlay. */
+    private val _calibrateUntilMs = MutableStateFlow<Long?>(null)
+    val calibrateUntilMsFlow: StateFlow<Long?> = _calibrateUntilMs
+
+    /** v0.1.15: latency-corrected server offset, surfaced so the
+     *  calibration overlay can render correctedNow() = local + offset.
+     *  Mirrors ClockSync.bestOffsetMs but as an observable. */
+    private val _serverOffsetMs = MutableStateFlow(0L)
+    val serverOffsetMsFlow: StateFlow<Long> = _serverOffsetMs
 
     /** Group sync anchor — just the loop's wall-clock epoch + the
      *  groupId. The tablet computes "which item should I be on?"
@@ -601,6 +619,26 @@ class PlayerRepository(
         if (state.displayMode != _displayMode.value) {
             _displayMode.value = state.displayMode
             LogBuffer.i(TAG, "Display mode → ${state.displayMode ?: "(auto)"}")
+        }
+
+        // v0.1.15: calibration overlay window. Pushed straight through
+        // — the PlayerScreen collects this flow + a ticker and hides
+        // the overlay automatically the moment the wall-clock catches
+        // up to the cutoff, so we don't need to write null back here.
+        if (state.calibrateUntilMs != _calibrateUntilMs.value) {
+            _calibrateUntilMs.value = state.calibrateUntilMs
+            if (state.calibrateUntilMs != null) {
+                LogBuffer.i(TAG, "Calibrate until ${state.calibrateUntilMs}")
+            }
+        }
+
+        // Expose the latency-corrected offset so the calibration
+        // overlay can render correctedNow(). Only updates when the
+        // offset actually moves, which is rarely — keeps observers
+        // cheap.
+        val freshOffset = if (clockSync.sampleCount > 0) clockSync.bestOffsetMs else 0L
+        if (freshOffset != _serverOffsetMs.value) {
+            _serverOffsetMs.value = freshOffset
         }
 
         // Group sync anchor. The tablet does all "which item should I
