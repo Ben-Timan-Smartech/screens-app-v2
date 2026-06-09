@@ -18,6 +18,57 @@ Rules:
 
 ---
 
+## v0.1.9
+
+Whole release focused on the CMS being usable from any screen size — phone,
+tablet, laptop, desktop.
+
+- **Mobile sidebar drawer.** On phones and tablets the sidebar is now a
+  slide-in drawer rather than a fixed left rail. A hamburger button + page
+  title appear in a sticky header at the top. Tapping anywhere outside the
+  drawer dismisses it; navigating to a new page auto-closes it.
+- **Responsive breakpoints** added to the design tokens: mobile (≤640 px),
+  tablet (≤1024 px), laptop (≤1440 px), desktop (>1440 px). Components
+  branch on `useViewport()` for markup changes and use new utility classes
+  (`.scr-mobile-hide`, `.scr-mobile-only`, etc.) for visibility.
+- **Dashboard** — stat band wraps to 2×2 on tablet / 1-col stack on mobile.
+  Quick actions go from 4-up to 2-up to 1-up. Stores + Activity stack
+  vertically on compact viewports. Per-store status chips hide on
+  phones (the progress bar conveys the same info more compactly).
+- **Content Library** — brand sidebar collapses to a slide-down panel
+  controlled by a "Brands" chip in the toolbar on compact viewports.
+  Video grid columns adapt (140 px min on phones for a 2-col layout,
+  200 px on larger). Page size drops from 24 → 12 on mobile so paging
+  feels less laggy.
+- **Screens list** — store rows hide per-status chip clutter on mobile;
+  the progress bar tightens to fit narrow phones.
+- **Screen Detail** — 2-column main+rail layout collapses to a single
+  stacked column on compact viewports. Padding tightens for phone screens.
+- **Settings** — left tab nav becomes a horizontal scrolling strip across
+  the top on compact viewports.
+- **Users & permissions** — invite form stacks all four fields on mobile;
+  user row grid simplifies to avatar + identity primary, with role / status
+  / actions reflowing into a second row.
+- **Activity log** — tighter padding on mobile.
+- **PageHeader** — title + actions stack on compact viewports; actions
+  flex-wrap so a row of buttons can't overflow.
+- **Modals go full-screen on mobile** — PushPicker, AddContentModal,
+  PreviewModal, UploadPanel, SyncPicker all opt into `.scr-modal-panel`
+  which forces 100% width/height + zero border-radius at ≤640 px. No more
+  modal-inside-tiny-modal on phones.
+- **Touch hit-targets** — utility class `.scr-touch` enforces a 40 px floor
+  on phones for components that opt in.
+
+Behavior on laptop/desktop is unchanged unless a layout was actively
+broken at narrower-but-still-desktop sizes — in which case the new
+flex-wrap or auto-fill behavior fixes it gracefully without altering
+the wide layout.
+
+Out of scope for this release (queued for later if useful):
+- PWA / install-to-homescreen
+- Service-worker offline support
+- Native touch gestures (swipe-to-dismiss drawer, etc.)
+
 ## v0.1.8
 
 Three poll modes, a refresh-now button, and a properly-decoupled heartbeat.

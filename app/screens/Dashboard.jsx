@@ -1,8 +1,19 @@
 /* eslint-disable */
 // Dashboard artboard — fleet health + activity + quick actions.
 
-const DashStat = ({ label, value, sub, tone }) => (
-  <div style={{ padding: '20px 22px', borderRight: 'var(--border)', flex: 1, minWidth: 0 }}>
+// DashStat — single value in the stats band. On compact viewports
+// the divider becomes a bottom border instead of a right border so
+// the band can stack vertically.
+const DashStat = ({ label, value, sub, tone, lastInRow }) => (
+  <div style={{
+    padding: '20px 22px',
+    flex: '1 1 50%',
+    minWidth: 0,
+    // Use background overlay for the divider instead of an explicit
+    // border so we can let CSS handle it adaptively via inset shadow
+    // — keeps things clean on the wrap.
+    boxShadow: lastInRow ? 'none' : 'inset -1px 0 0 0 var(--bone-line)',
+  }}>
     <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 12 }}>{label}</div>
     <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
       <span className="tnum" style={{ fontSize: 30, fontWeight: 500, color: tone === 'err' ? 'var(--err)' : tone === 'warn' ? 'var(--warn)' : 'var(--ink-1)', letterSpacing: -0.8, lineHeight: 1 }}>{value}</span>
@@ -24,14 +35,16 @@ const StoreHealthRow = ({ store }) => {
       <StatusDot status={health === 'ok' ? 'online' : health === 'warn' ? 'warn' : 'offline'} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{store.name}</div>
-        <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>{store.city} · {store.country} · {store.region}</div>
+        <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{store.city} · {store.country} · {store.region}</div>
       </div>
-      <div style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--ink-3)' }}>
+      {/* Per-status count chips hide on mobile; the progress bar on
+          the right already conveys "online / total" at a glance. */}
+      <div className="scr-mobile-hide" style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--ink-3)' }}>
         <span className="tnum"><span style={{ color: 'var(--ok)' }}>●</span> {store.online} online</span>
         {store.warn > 0 && <span className="tnum"><span style={{ color: 'var(--warn)' }}>●</span> {store.warn}</span>}
         {store.offline > 0 && <span className="tnum"><span style={{ color: 'var(--err)' }}>●</span> {store.offline}</span>}
       </div>
-      <div style={{ width: 92, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--ink-4)' }}>
+      <div style={{ width: 76, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--ink-4)', flexShrink: 0 }}>
         <div style={{ flex: 1, height: 3, background: 'var(--ink-8)', borderRadius: 2, overflow: 'hidden' }}>
           <div style={{ width: `${onlineRatio * 100}%`, height: '100%', background: health === 'err' ? 'var(--err)' : health === 'warn' ? 'var(--warn)' : 'var(--ok)' }}/>
         </div>
@@ -104,6 +117,9 @@ const Dashboard = () => {
   // Live activity from /api/activity. Empty list when nothing's happened
   // since boot — we render an empty-state row instead of fake data.
   const activity = useActivity();
+  const vp = useViewport();
+  const compact = vp.isCompact;
+  const isMobile = vp.tier === 'mobile';
 
   return (
     <AppShell current="dashboard">
@@ -116,10 +132,14 @@ const Dashboard = () => {
           </>
         }
       />
-      <div style={{ flex: 1, overflow: 'auto', padding: '28px 32px 40px' }}>
+      <div style={{
+        flex: 1, overflow: 'auto',
+        // Tighter padding on mobile so cards have real estate.
+        padding: isMobile ? '16px 14px 32px' : compact ? '20px 18px 36px' : '28px 32px 40px',
+      }}>
         {/* Greeting */}
-        <div style={{ marginBottom: 26 }}>
-          <div style={{ fontSize: 24, fontWeight: 500, color: 'var(--ink-1)', letterSpacing: -0.5, marginBottom: 4 }}>Good morning, Alex</div>
+        <div style={{ marginBottom: compact ? 20 : 26 }}>
+          <div style={{ fontSize: compact ? 20 : 24, fontWeight: 500, color: 'var(--ink-1)', letterSpacing: -0.5, marginBottom: 4 }}>Good morning, Alex</div>
           <div style={{ fontSize: 13, color: 'var(--ink-4)' }}>
             {online === 0
               ? 'No screens online yet — install the player to bring the demo screen up.'
@@ -127,16 +147,28 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* Stats band */}
-        <div style={{ display: 'flex', border: 'var(--border)', borderRadius: 12, marginBottom: 24, background: 'var(--ink-10)' }}>
-          <DashStat label="Total screens" value={total} sub={`across ${stores.length} stores · 2 regions`} />
+        {/* Stats band — 4-up on laptop+, 2x2 on mobile/tablet via
+            flex-wrap. The DashStat divider becomes a right-edge
+            shadow that's inactive on wrap-end items. */}
+        <div style={{
+          display: 'flex', flexWrap: 'wrap',
+          border: 'var(--border)', borderRadius: 12,
+          marginBottom: 24, background: 'var(--ink-10)',
+          overflow: 'hidden',
+        }}>
+          <DashStat label="Total screens" value={total} sub={`across ${stores.length} stores · 2 regions`} lastInRow={compact} />
           <DashStat label="Online now" value={online} sub={total > 0 ? `${Math.round(online/total*100)}% of fleet` : '—'} />
-          <DashStat label="Needs attention" value={warn + offline} tone="warn" sub={`${warn} warning · ${offline} offline`} />
-          <DashStat label="Library" value={(window.MOCK_VIDEOS || []).length} sub={`videos across ${(window.MOCK_BRANDS || []).length} brands`} />
+          <DashStat label="Needs attention" value={warn + offline} tone="warn" sub={`${warn} warning · ${offline} offline`} lastInRow={compact} />
+          <DashStat label="Library" value={(window.MOCK_VIDEOS || []).length} sub={`videos across ${(window.MOCK_BRANDS || []).length} brands`} lastInRow />
         </div>
 
-        {/* Quick actions */}
-        <div style={{ display: 'flex', gap: 12, marginBottom: 28 }}>
+        {/* Quick actions — wrap on smaller viewports. */}
+        <div style={{
+          display: 'grid',
+          // 4 on laptop+, 2 on tablet, 1 on mobile.
+          gridTemplateColumns: isMobile ? '1fr' : compact ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)',
+          gap: 12, marginBottom: compact ? 22 : 28,
+        }}>
           <QuickAction icon={<Icon.library size={18} />} label="Browse content" desc={`${(window.MOCK_VIDEOS || []).length} videos across ${(window.MOCK_BRANDS || []).length} brands`} to="/library" />
           <QuickAction icon={<Icon.screens size={18} />} label="Manage screens" desc={`${total} screens in ${stores.length} stores`} to="/screens" />
           <QuickAction icon={<Icon.schedule size={18} />} label="Create schedule" desc="Time-based content rotation" to="/schedules/new" />
@@ -162,8 +194,13 @@ const Dashboard = () => {
           </div>
         )}
 
-        {/* Two columns: Stores + Activity */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16, alignItems: 'start' }}>
+        {/* Two columns on laptop+, single stacked column on
+            mobile / tablet. */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: compact ? '1fr' : '1.4fr 1fr',
+          gap: 16, alignItems: 'start',
+        }}>
           {/* Stores */}
           <div style={{ border: 'var(--border)', borderRadius: 12, background: 'var(--ink-10)' }}>
             <div style={{ display: 'flex', alignItems: 'center', padding: '14px 20px 12px', borderBottom: 'var(--border)' }}>

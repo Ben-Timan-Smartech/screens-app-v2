@@ -114,8 +114,8 @@ const ScreensStoreView = ({ storeId }) => {
             <span className="tnum" style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{store.offline}</span>
             <span style={{ fontSize: 12, color: 'var(--ink-4)' }}>offline</span>
           </div>
-          <span style={{ flex: 1 }} />
-          <Input placeholder="Search screens or content…" leadingIcon={<Icon.search size={13} />} size="sm" style={{ width: 260 }} />
+          <span style={{ flex: 1 }} className="scr-mobile-hide" />
+          <Input placeholder="Search screens or content…" leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 160, maxWidth: 260 }} />
           <Button variant="ghost" size="sm" icon={<Icon.grid size={13} />} />
           <Button variant="ghost" size="sm" icon={<Icon.list size={13} />} />
         </div>
@@ -171,9 +171,9 @@ const StoresIndex = () => {
         actions={<Button variant="primary" size="sm" icon={<Icon.plus size={13} />}>Add store</Button>}
       />
       <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 40px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18 }}>
-          <Input placeholder="Search stores or cities…" leadingIcon={<Icon.search size={13} />} size="sm" style={{ width: 300 }} />
-          <span style={{ flex: 1 }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18, flexWrap: 'wrap' }}>
+          <Input placeholder="Search stores or cities…" leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 180, maxWidth: 300 }} />
+          <span style={{ flex: 1 }} className="scr-mobile-hide" />
           <Button variant="ghost" size="sm" icon={<Icon.filter size={12} />}>Region</Button>
         </div>
         <div style={{ border: 'var(--border)', borderRadius: 12, background: 'var(--ink-10)', overflow: 'hidden' }}>
@@ -192,12 +192,12 @@ const StoresIndex = () => {
                   <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{store.name}</div>
                   <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>{store.city} · {store.country} · {store.region}</div>
                 </div>
-                <div style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--ink-3)' }}>
+                <div className="scr-mobile-hide" style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--ink-3)' }}>
                   <span className="tnum"><span style={{ color: 'var(--ok)' }}>●</span> {store.online} online</span>
                   {store.warn > 0 && <span className="tnum"><span style={{ color: 'var(--warn)' }}>●</span> {store.warn}</span>}
                   {store.offline > 0 && <span className="tnum"><span style={{ color: 'var(--err)' }}>●</span> {store.offline}</span>}
                 </div>
-                <div style={{ width: 110, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--ink-4)' }}>
+                <div style={{ width: 86, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--ink-4)', flexShrink: 0 }}>
                   <div style={{ flex: 1, height: 3, background: 'var(--ink-8)', borderRadius: 2, overflow: 'hidden' }}>
                     <div style={{ width: `${ratio * 100}%`, height: '100%', background: health === 'err' ? 'var(--err)' : health === 'warn' ? 'var(--warn)' : 'var(--ok)' }}/>
                   </div>

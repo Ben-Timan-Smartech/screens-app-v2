@@ -373,7 +373,7 @@ const SplashesTab = () => {
           background: 'rgba(9,9,11,0.72)', backdropFilter: 'blur(4px)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
         }}>
-          <div onClick={(e) => e.stopPropagation()} style={{
+          <div onClick={(e) => e.stopPropagation()} className="scr-modal-panel" style={{
             width: 'min(960px, 90%)', background: 'var(--ink-10)', borderRadius: 12, overflow: 'hidden',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', borderBottom: 'var(--border)' }}>
@@ -549,26 +549,51 @@ const Settings = () => {
     { k: 'drive', label: 'Drive sync' },
     { k: 'notify', label: 'Notifications' },
   ];
+  const vp = useViewport();
+  const compactNav = vp.isCompact;
   return (
     <AppShell current="settings">
       <PageHeader title="Settings" subtitle="Organisation · Smartech Group" />
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        {/* Side nav */}
-        <div style={{ width: 200, borderRight: 'var(--border)', padding: '16px 10px', background: 'var(--ink-9)' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <div style={{
+        flex: 1, display: 'flex',
+        flexDirection: compactNav ? 'column' : 'row',
+        overflow: 'hidden',
+      }}>
+        {/* Side nav — vertical column on laptop+, horizontal scroll
+            strip on mobile / tablet. */}
+        <div style={{
+          width: compactNav ? '100%' : 200,
+          borderRight: compactNav ? 'none' : 'var(--border)',
+          borderBottom: compactNav ? 'var(--border)' : 'none',
+          padding: compactNav ? '8px 12px' : '16px 10px',
+          background: 'var(--ink-9)',
+          overflowX: compactNav ? 'auto' : 'visible',
+          flexShrink: 0,
+        }}>
+          <div style={{
+            display: 'flex',
+            flexDirection: compactNav ? 'row' : 'column',
+            gap: compactNav ? 4 : 1,
+            minWidth: compactNav ? 'min-content' : 'auto',
+          }}>
             {tabs.map(t => (
               <button key={t.k} onClick={() => setTab(t.k)} style={{
-                display: 'flex', alignItems: 'center', padding: '7px 10px', borderRadius: 6,
+                display: 'flex', alignItems: 'center', padding: compactNav ? '8px 14px' : '7px 10px', borderRadius: 6,
                 background: tab === t.k ? 'var(--ink-8)' : 'transparent',
                 fontSize: 13, fontWeight: tab === t.k ? 500 : 400,
                 color: tab === t.k ? 'var(--ink-1)' : 'var(--ink-3)',
                 textAlign: 'left',
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
               }}>{t.label}</button>
             ))}
           </div>
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto', padding: '24px 28px 40px' }}>
+        <div style={{
+          flex: 1, overflow: 'auto',
+          padding: compactNav ? '18px 16px 32px' : '24px 28px 40px',
+        }}>
           {tab === 'brands' && (
             <>
               <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>

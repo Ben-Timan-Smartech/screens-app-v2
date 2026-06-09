@@ -38,8 +38,9 @@ const SyncPicker = ({ onClose }) => {
       position: 'absolute', inset: 0, background: 'rgba(9,9,11,0.4)', backdropFilter: 'blur(2px)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 20, padding: 20,
     }}>
-      <div style={{
-        width: 560, maxHeight: '85%', background: 'var(--ink-10)',
+      <div className="scr-modal-panel" style={{
+        width: 560, maxWidth: '92%', maxHeight: '85%',
+        background: 'var(--ink-10)',
         borderRadius: 14, border: 'var(--border)',
         display: 'flex', flexDirection: 'column',
         boxShadow: '0 24px 64px rgba(9,9,11,0.24)',
