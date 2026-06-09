@@ -249,6 +249,7 @@ const formatSecondsAgo = (s) => {
 };
 
 const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
+  const vp = useViewport();
   const live = useLiveScreens();
   // The screenId in the URL is the tablet's deviceId. Look it up directly.
   const lastKnown = (live.screens || []).find((s) => s.deviceId === screenId) || null;
@@ -495,8 +496,18 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
         />
       )}
       <PreviewModal video={previewVideo} onClose={() => setPreviewVideo(null)} />
-      <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 40px' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 20, alignItems: 'start' }}>
+      <div style={{
+        flex: 1, overflow: 'auto',
+        padding: vp.isCompact ? '16px 14px 32px' : '20px 24px 40px',
+      }}>
+        <div style={{
+          display: 'grid',
+          // Two-column on laptop+ (main playlist + status/config rail);
+          // single stacked column on mobile/tablet so the rail flows
+          // beneath the main content.
+          gridTemplateColumns: vp.isCompact ? '1fr' : '1fr 300px',
+          gap: 20, alignItems: 'start',
+        }}>
           {/* Main column */}
           <div>
             {/* Now playing preview */}

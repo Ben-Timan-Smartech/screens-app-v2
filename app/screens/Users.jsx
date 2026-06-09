@@ -110,6 +110,8 @@ const Users = () => {
     return [];
   }, [actor, state.roles]);
 
+  const vp = useViewport();
+  const compact = vp.isCompact;
   return (
     <AppShell current="settings">
       <PageHeader
@@ -120,13 +122,25 @@ const Users = () => {
           { label: 'Users' },
         ]}
       />
-      <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 40px' }}>
+      <div style={{
+        flex: 1, overflow: 'auto',
+        padding: compact ? '16px 14px 32px' : '20px 24px 40px',
+      }}>
         {can(actor, 'users.invite') && (
-          <Card padding={18} style={{ marginBottom: 16 }}>
+          <Card padding={compact ? 14 : 18} style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink-1)', marginBottom: 10 }}>
               Invite a teammate
             </div>
-            <form onSubmit={onInvite} style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr auto', gap: 8 }}>
+            <form
+              onSubmit={onInvite}
+              style={{
+                display: 'grid',
+                // Mobile stacks every input; tablet shows email + name
+                // on one row, role + button on next; laptop+ keeps the
+                // current 4-column layout.
+                gridTemplateColumns: compact ? '1fr' : '1.4fr 1fr 1fr auto',
+                gap: 8,
+              }}>
               <Input
                 placeholder="email@smartechworld.com"
                 value={draft.email}
@@ -181,7 +195,12 @@ const Users = () => {
                   .split(/\s+/).map((p) => p[0]).join('').slice(0, 2).toUpperCase();
                 return (
                   <div key={u.id} style={{
-                    display: 'grid', gridTemplateColumns: '36px 1.6fr 1.2fr 0.8fr auto',
+                    display: 'grid',
+                    // Mobile: avatar + identity on row 1, role / status / actions
+                    // span row 2 via flex. Laptop+: the existing 5-col layout.
+                    gridTemplateColumns: compact
+                      ? '36px 1fr'
+                      : '36px 1.6fr 1.2fr 0.8fr auto',
                     gap: 10, alignItems: 'center', padding: '12px 16px',
                     borderBottom: 'var(--border-faint)',
                     opacity: u.status === 'disabled' ? 0.55 : 1,

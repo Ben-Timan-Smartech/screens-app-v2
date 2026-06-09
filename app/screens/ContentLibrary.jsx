@@ -232,7 +232,7 @@ const AddContentModal = ({ targetDeviceId, targetName, onClose }) => {
       background: 'rgba(9,9,11,0.4)', backdropFilter: 'blur(2px)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
     }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
+      <div onClick={(e) => e.stopPropagation()} className="scr-modal-panel" style={{
         width: 'min(1080px, 92%)', height: 'min(720px, 90%)',
         background: 'var(--ink-10)', borderRadius: 14, border: 'var(--border)',
         display: 'flex', flexDirection: 'column',
@@ -462,6 +462,7 @@ const PreviewModal = ({ video, onClose }) => {
       }}>
       <div
         onClick={(e) => e.stopPropagation()}
+        className="scr-modal-panel"
         style={{
           width: 'min(960px, 90%)', maxHeight: '90%',
           background: 'var(--ink-10)', border: 'var(--border)', borderRadius: 12,
@@ -549,16 +550,23 @@ const BrandNavRow = ({ brand, active, onClick }) => (
 // in there + running Settings → Drive Sync → Sync now is the real
 // workflow. This panel becomes a real uploader once the
 // /api/library/upload endpoint ships.
-const UploadPanel = ({ open, onClose }) => (
+const UploadPanel = ({ open, onClose }) => {
+  const vp = useViewport();
+  const compact = vp.isCompact;
+  // Phone / small tablet: full-width sheet that takes the whole pane.
+  // Laptop+: 420 px slide-over from the right.
+  const panelWidth = compact ? '100%' : 420;
+  return (
   <div style={{
-    position: 'absolute', top: 0, right: 0, bottom: 0,
-    width: open ? 420 : 0,
-    background: 'var(--ink-10)', borderLeft: open ? 'var(--border)' : 'none',
+    position: 'absolute', top: 0, right: 0, bottom: 0, left: compact && open ? 0 : 'auto',
+    width: open ? panelWidth : 0,
+    background: 'var(--ink-10)', borderLeft: open && !compact ? 'var(--border)' : 'none',
     overflow: 'hidden',
     transition: 'width .2s ease',
     display: 'flex', flexDirection: 'column',
+    zIndex: 25,
   }}>
-    <div style={{ width: 420, display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div style={{ width: panelWidth, maxWidth: '100%', display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '14px 20px', borderBottom: 'var(--border)' }}>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink-1)' }}>Upload content</div>
@@ -604,7 +612,8 @@ const UploadPanel = ({ open, onClose }) => (
       </div>
     </div>
   </div>
-);
+  );
+};
 
 const ContentLibrary = () => {
   // 'all' = show every brand. Otherwise, brand id (e.g. 'sonos').
@@ -617,7 +626,15 @@ const ContentLibrary = () => {
   const [brandQuery, setBrandQuery] = React.useState('');
   const [view, setView] = React.useState('grid'); // 'grid' | 'list'
   const [page, setPage] = React.useState(0);
-  const PAGE_SIZE = 24;
+  // Mobile collapses the brand sidebar into a slide-down panel
+  // toggled by a chip in the toolbar; this tracks the open/closed
+  // state. On tablet+ the sidebar is always visible and this is
+  // ignored.
+  const [brandsOpenMobile, setBrandsOpenMobile] = React.useState(false);
+  const vp = useViewport();
+  const compact = vp.isCompact;
+  const isMobile = vp.tier === 'mobile';
+  const PAGE_SIZE = isMobile ? 12 : 24;
 
   // When navigated here from a screen detail page (Add content), the URL
   // carries ?target=<deviceId>. In that mode the Push button skips the
@@ -692,8 +709,26 @@ const ContentLibrary = () => {
         </div>
       )}
       <div style={{ flex: 1, display: 'flex', position: 'relative', minHeight: 0 }}>
-        {/* Left pane — brand + product nav */}
-        <div style={{ width: 220, borderRight: 'var(--border)', padding: '14px 10px', background: 'var(--ink-9)', overflow: 'auto', flexShrink: 0 }}>
+        {/* Left pane — brand + product nav. On compact viewports
+            (tablet / mobile) this is hidden by default and exposed
+            via a "Brands" chip in the toolbar that slides it down
+            from the top of the main pane. */}
+        <div style={{
+          // On compact viewports, render as an overlay slide-down
+          // panel instead of a column. On laptop+ it's always
+          // visible as a left rail.
+          width: compact ? '100%' : 220,
+          borderRight: compact ? 'none' : 'var(--border)',
+          borderBottom: compact ? 'var(--border)' : 'none',
+          padding: '14px 10px', background: 'var(--ink-9)',
+          overflow: 'auto', flexShrink: 0,
+          display: compact && !brandsOpenMobile ? 'none' : 'block',
+          position: compact ? 'absolute' : 'static',
+          top: 0, left: 0, right: 0,
+          maxHeight: compact ? '60%' : 'none',
+          zIndex: compact ? 20 : 'auto',
+          boxShadow: compact ? '0 12px 32px -8px rgba(20,20,20,0.18)' : 'none',
+        }}>
           <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '2px 10px 6px' }}>Brands</div>
           <div style={{ padding: '0 4px 8px' }}>
             <Input
@@ -706,9 +741,9 @@ const ContentLibrary = () => {
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 16 }}>
             {!brandQuery && (
-              <BrandNavRow brand={{ id: 'all', name: 'All', videos: totalCount }} active={isAll} onClick={() => setActiveBrand('all')} />
+              <BrandNavRow brand={{ id: 'all', name: 'All', videos: totalCount }} active={isAll} onClick={() => { setActiveBrand('all'); setBrandsOpenMobile(false); }} />
             )}
-            {filteredBrands.map(b => <BrandNavRow key={b.id} brand={b} active={b.id === activeBrand} onClick={() => setActiveBrand(b.id)} />)}
+            {filteredBrands.map(b => <BrandNavRow key={b.id} brand={b} active={b.id === activeBrand} onClick={() => { setActiveBrand(b.id); setBrandsOpenMobile(false); }} />)}
             {brandQuery && filteredBrands.length === 0 && (
               <div style={{ padding: '12px 10px', fontSize: 11, color: 'var(--ink-4)', fontStyle: 'italic' }}>
                 No brands match "{brandQuery}"
@@ -734,11 +769,40 @@ const ContentLibrary = () => {
         </div>
 
         {/* Main grid */}
-        <div style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: '20px 24px 100px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-            <Input placeholder={isAll ? 'Search all videos…' : `Search ${brand.name} videos…`} leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, maxWidth: 280 }} />
-            <span style={{ flex: 1 }} />
-            <span style={{ fontSize: 12, color: 'var(--ink-4)' }}>{visibleVideos.length} video{visibleVideos.length === 1 ? '' : 's'} · sorted by recent</span>
+        <div style={{
+          flex: 1, minWidth: 0, overflow: 'auto',
+          padding: isMobile ? '14px 12px 100px' : compact ? '16px 18px 100px' : '20px 24px 100px',
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 10,
+            marginBottom: 16,
+          }}>
+            {/* Brands chip — only on compact viewports. Tapping it
+                slides the brand picker down from the top of the
+                main pane. Hidden on laptop+ where the sidebar is
+                always visible. */}
+            {compact && (
+              <button
+                onClick={() => setBrandsOpenMobile((v) => !v)}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  height: 30, padding: '0 12px',
+                  border: 'var(--border-strong)', borderRadius: 6,
+                  background: brandsOpenMobile ? 'var(--ink-8)' : 'var(--ink-10)',
+                  color: 'var(--ink-1)', fontSize: 12, fontWeight: 500,
+                  cursor: 'pointer',
+                }}>
+                <Icon.library size={13} />
+                <span>{isAll ? 'All brands' : brand.name}</span>
+                <Icon.chevD size={11} />
+              </button>
+            )}
+            <Input placeholder={isAll ? 'Search all videos…' : `Search ${brand?.name || ''} videos…`} leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 140, maxWidth: 280 }} />
+            <span style={{ flex: 1 }} className="scr-mobile-hide" />
+            <span style={{ fontSize: 12, color: 'var(--ink-4)' }} className="scr-mobile-hide">{visibleVideos.length} video{visibleVideos.length === 1 ? '' : 's'} · sorted by recent</span>
             <Button
               variant={view === 'grid' ? 'secondary' : 'ghost'}
               size="sm"
@@ -761,8 +825,13 @@ const ContentLibrary = () => {
           ) : view === 'grid' ? (
             <div style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
-              gap: 10,
+              // Smaller minmax on phones so we get 2 columns rather than
+              // 1 huge tile per row. minmax handles the wrap from 2 → 3
+              // → 4+ as the viewport grows.
+              gridTemplateColumns: isMobile
+                ? 'repeat(auto-fill, minmax(140px, 1fr))'
+                : 'repeat(auto-fill, minmax(200px, 1fr))',
+              gap: isMobile ? 8 : 10,
             }}>
               {pagedVideos.map(v => (
                 <VideoTile

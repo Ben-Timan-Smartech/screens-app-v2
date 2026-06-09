@@ -11,10 +11,14 @@ const ActivityLog = () => {
   // Empty on a freshly-booted server with no events yet; we show an
   // explicit empty state below rather than falling back to fake data.
   const items = useActivity();
+  const vp = useViewport();
   return (
     <AppShell current="activity">
       <PageHeader title="Activity log" subtitle="Every change, every screen event. Newest first." actions={<Button variant="secondary" size="sm" icon={<Icon.filter size={12} />}>Filter</Button>} />
-      <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 40px' }}>
+      <div style={{
+        flex: 1, overflow: 'auto',
+        padding: vp.isCompact ? '16px 14px 32px' : '20px 24px 40px',
+      }}>
         {items.length === 0 ? (
           <div style={{ border: 'var(--border)', borderRadius: 12, background: 'var(--ink-10)', padding: 32, textAlign: 'center', color: 'var(--ink-4)', fontSize: 13 }}>
             No activity yet. Push some content, register a screen, or trigger a sync to see events here.

@@ -540,8 +540,9 @@ const PushPicker = ({ videos, onClose }) => {
       background: 'rgba(9,9,11,0.4)', backdropFilter: 'blur(2px)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
     }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        width: 560, maxHeight: '85%', background: 'var(--ink-10)',
+      <div onClick={(e) => e.stopPropagation()} className="scr-modal-panel" style={{
+        width: 560, maxWidth: '92%', maxHeight: '85%',
+        background: 'var(--ink-10)',
         borderRadius: 14, border: 'var(--border)',
         display: 'flex', flexDirection: 'column',
         boxShadow: '0 24px 64px rgba(9,9,11,0.24)',
@@ -911,6 +912,54 @@ const ROLE_LABELS_SIDEBAR = {
   brand_partner: 'Brand partner',
 };
 
+// ─────────────────────────────────────────────────────────────
+// useViewport — reports the current viewport "tier" using the same
+// breakpoints as tokens.css. Components that need to switch markup
+// (not just styles) read this; pure CSS changes use media queries
+// on the utility classes in tokens.css instead.
+//
+//   tier === 'mobile'  → <= 640 px
+//   tier === 'tablet'  → 641–1024 px
+//   tier === 'laptop'  → 1025–1440 px
+//   tier === 'desktop' → > 1440 px
+//
+// `isCompact` is a convenience for "mobile OR tablet" — usually the
+// dividing line for "sidebar lives in a drawer, content is single-
+// column."
+// ─────────────────────────────────────────────────────────────
+const useViewport = () => {
+  const compute = () => {
+    if (typeof window === 'undefined') return { width: 1440, tier: 'desktop', isCompact: false };
+    const w = window.innerWidth;
+    if (w <= 640)  return { width: w, tier: 'mobile',  isCompact: true };
+    if (w <= 1024) return { width: w, tier: 'tablet',  isCompact: true };
+    if (w <= 1440) return { width: w, tier: 'laptop',  isCompact: false };
+    return { width: w, tier: 'desktop', isCompact: false };
+  };
+  const [vp, setVp] = React.useState(compute);
+  React.useEffect(() => {
+    let raf = 0;
+    const onResize = () => {
+      // Coalesce — Safari fires resize during scroll on iOS, which
+      // would otherwise re-render every frame.
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => setVp(compute()));
+    };
+    window.addEventListener('resize', onResize);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener('resize', onResize); };
+  }, []);
+  return vp;
+};
+
+// ─────────────────────────────────────────────────────────────
+// Drawer state — lives at the AppShell level. Pages reach into
+// it via `useDrawer()` so any mobile-header inside the page can
+// toggle the sidebar. Defaults to closed; only meaningful while
+// the viewport is compact (tablet/mobile).
+// ─────────────────────────────────────────────────────────────
+const DrawerContext = React.createContext({ open: false, setOpen: () => {} });
+const useDrawer = () => React.useContext(DrawerContext);
+
 const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
   // Dynamic counts. Library polls /api/library; Screens reads the live
   // registry; Schedules counts the (currently empty) MOCK_SCHEDULES.
@@ -930,8 +979,10 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
     .split(/\s+/).map((p) => p[0]).join('').slice(0, 2).toUpperCase();
   const [menuOpen, setMenuOpen] = React.useState(false);
 
+  // Drawer auto-closes on route change (AppShell handles it via a
+  // useEffect on `current`); the sidebar itself can stay agnostic.
   return (
-  <aside style={{
+  <aside className="scr-sidebar" style={{
     width: 'var(--sidebar-w)', height: '100%',
     borderRight: 'var(--border)', background: 'var(--bone)',
     display: 'flex', flexDirection: 'column',
@@ -1044,14 +1095,25 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Page header — top bar with title + actions
+// Page header — top bar with title + actions.
+//
+// Responsive behaviour: above 1024 px the header is a single tall
+// row with actions on the right. On tablet/mobile the actions wrap
+// underneath the title (still on a single horizontal row, so a
+// row of buttons doesn't overflow) and the header grows taller.
 // ─────────────────────────────────────────────────────────────
-const PageHeader = ({ title, subtitle, crumbs, actions, kicker }) => (
+const PageHeader = ({ title, subtitle, crumbs, actions, kicker }) => {
+  const vp = useViewport();
+  const compact = vp.isCompact;
+  return (
   <header style={{
-    height: 'var(--header-h)', minHeight: 'var(--header-h)',
-    padding: '0 24px',
+    minHeight: 'var(--header-h)',
+    padding: compact ? '12px 16px' : '0 24px',
     borderBottom: 'var(--border)',
-    display: 'flex', alignItems: 'center', gap: 16,
+    display: 'flex',
+    alignItems: compact ? 'flex-start' : 'center',
+    flexDirection: compact ? 'column' : 'row',
+    gap: compact ? 10 : 16,
     background: 'var(--ink-10)',
     flexShrink: 0,
   }}>
@@ -1076,24 +1138,79 @@ const PageHeader = ({ title, subtitle, crumbs, actions, kicker }) => (
         </div>
       )}
       {kicker && <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{kicker}</div>}
-      {title && <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 600, color: 'var(--ink-0)', letterSpacing: '-0.02em' }}>{title}</h1>}
+      {title && <h1 style={{ fontFamily: 'var(--font-display)', fontSize: compact ? 18 : 16, fontWeight: 600, color: 'var(--ink-0)', letterSpacing: '-0.02em' }}>{title}</h1>}
       {subtitle && <p style={{ fontSize: 12, color: 'var(--ink-4)' }}>{subtitle}</p>}
     </div>
-    {actions && <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>{actions}</div>}
+    {actions && (
+      <div style={{
+        display: 'flex',
+        gap: 8,
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        // On compact viewports actions wrap to the next line under
+        // the title. Width 100% so right-aligned actions stretch
+        // across the row.
+        width: compact ? '100%' : 'auto',
+        justifyContent: compact ? 'flex-start' : 'flex-end',
+      }}>{actions}</div>
+    )}
   </header>
-);
+  );
+};
 
 // ─────────────────────────────────────────────────────────────
-// AppShell — composes sidebar + content area
+// AppShell — composes sidebar + content area + mobile drawer.
+//
+// Below the tablet breakpoint the Sidebar is a slide-in drawer
+// (see .scr-sidebar in tokens.css) controlled by `drawerOpen`.
+// AppShell exposes the toggle via DrawerContext so any descendant
+// (the per-page mobile header lives inside `children`) can fire
+// it without prop-drilling. Route changes automatically close
+// the drawer so taps don't leave it hanging open.
 // ─────────────────────────────────────────────────────────────
-const AppShell = ({ current, children, sidebarProps }) => (
-  <div className="scr" style={{ display: 'flex', width: '100%', height: '100%' }}>
-    <Sidebar current={current} {...sidebarProps} />
-    <main style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--ink-10)', position: 'relative' }}>
-      {children}
-    </main>
-  </div>
-);
+const AppShell = ({ current, children, sidebarProps }) => {
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
+  // Close on route change. `current` changes whenever the page
+  // mounts a new <AppShell current="…" />, which is exactly when
+  // the user navigated.
+  React.useEffect(() => { setDrawerOpen(false); }, [current]);
+  return (
+    <DrawerContext.Provider value={{ open: drawerOpen, setOpen: setDrawerOpen }}>
+      <div
+        className={`scr${drawerOpen ? ' scr-drawer-open' : ''}`}
+        style={{ display: 'flex', width: '100%', height: '100%' }}>
+        <Sidebar current={current} {...sidebarProps} />
+        {/* Scrim — covers the page while the drawer is open. Tap
+            anywhere outside the sidebar to dismiss. CSS handles the
+            opacity + pointer-events transition. */}
+        <div
+          className="scr-drawer-scrim"
+          onClick={() => setDrawerOpen(false)}
+          aria-hidden
+        />
+        <main style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--ink-10)', position: 'relative' }}>
+          {/* Mobile header bar — hamburger + page title. Hidden on
+              laptop+ by tokens.css. */}
+          <div className="scr-mobile-header">
+            <button
+              className="scr-hamburger"
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Open menu"
+            >
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+                <path d="M3 5h14M3 10h14M3 15h14" />
+              </svg>
+            </button>
+            <span style={{ fontFamily: 'var(--font-display)', fontSize: 15, fontWeight: 600, color: 'var(--ink-0)' }}>
+              Screens
+            </span>
+          </div>
+          {children}
+        </main>
+      </div>
+    </DrawerContext.Provider>
+  );
+};
 
 // ─────────────────────────────────────────────────────────────
 // Card — base container
@@ -1127,6 +1244,7 @@ Object.assign(window, {
   Icon, StatusDot, Chip, Button, Input, BrandMark, Thumbnail,
   Sidebar, SidebarItem, PageHeader, AppShell, Card, StatCard,
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
+  useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setVideoDefaultUnmute,
   setScreenPlaylist, PushPicker,

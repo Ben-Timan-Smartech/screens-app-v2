@@ -114,6 +114,18 @@
   --sidebar-w: 232px;
   --header-h:  56px;
 
+  /* Responsive breakpoints. These match the CSS `@media` query rules
+     below — keep in sync. JS code that needs the same thresholds reads
+     `useViewport()` (see app/components/ui.jsx). The naming is intuitive:
+     phones, tablets, laptops, desktops. */
+  --bp-mobile:  640px;   /* <= phone landscape / small tablet portrait */
+  --bp-tablet: 1024px;   /* <= tablet landscape / small laptop          */
+  --bp-laptop: 1440px;   /* <= laptop                                   */
+
+  /* Touch-target minimum. iOS HIG says 44 px; Material says 48 px;
+     we sit in the middle. Used on phones via the `.scr-touch` class. */
+  --touch-min: 40px;
+
   /* Type scale — keeps existing component refs; slightly tighter. */
   --t-xs:      11px;
   --t-sm:      12px;
@@ -229,4 +241,117 @@ html, body { background: var(--bone); }
     linear-gradient(135deg, transparent 49.5%, rgba(20,20,20,0.04) 49.5%, rgba(20,20,20,0.04) 50.5%, transparent 50.5%);
   background-size: 8px 8px;
   opacity: 0.5;
+}
+
+/* ============================================================
+   Responsive utilities — visibility + layout helpers shared
+   across every screen. Components keep inline styles for
+   one-off geometry, but reach for these for the common cases.
+   ============================================================ */
+
+/* Visibility. Mobile = <= --bp-mobile. */
+@media (max-width: 640px) {
+  .scr-mobile-hide { display: none !important; }
+  .scr-mobile-only { /* default visible */ }
+  .scr-stack-mobile { flex-direction: column !important; }
+  .scr-full-mobile { width: 100% !important; max-width: 100% !important; }
+  .scr-scroll-x-mobile { overflow-x: auto !important; }
+  /* Touch hit-target floor. Buttons and toggles that need to be
+     thumb-friendly opt in with `.scr-touch`. */
+  .scr-touch { min-height: var(--touch-min); min-width: var(--touch-min); }
+}
+@media (min-width: 641px) {
+  .scr-mobile-only { display: none !important; }
+}
+
+/* Tablet (641 – 1024). Used for "show on tablet+", typically the
+   inverse of mobile-only. */
+@media (max-width: 1024px) {
+  .scr-tablet-hide { display: none !important; }
+  .scr-pad-tight-tablet { padding: 14px !important; }
+}
+
+/* Laptop+ (>= 1025). Useful for the few "desktop-only chrome"
+   bits. */
+@media (max-width: 1025px) {
+  .scr-desktop-only { display: none !important; }
+}
+
+/* Common layout primitives */
+.scr-stack { display: flex; flex-direction: column; }
+.scr-row   { display: flex; flex-direction: row; align-items: center; }
+.scr-gap-1 { gap: 6px; }
+.scr-gap-2 { gap: 10px; }
+.scr-gap-3 { gap: 16px; }
+.scr-gap-4 { gap: 24px; }
+
+/* Sidebar drawer scrim. The mobile sidebar slides in over the
+   page; this dims the rest. Activated by App-Shell adding
+   .scr-drawer-open to the root. */
+.scr-drawer-scrim {
+  position: fixed; inset: 0;
+  background: rgba(20, 20, 20, 0.5);
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-base) var(--ease-standard);
+  z-index: 50;
+}
+.scr-drawer-open .scr-drawer-scrim {
+  opacity: 1; pointer-events: auto;
+}
+
+/* The sidebar itself is `position: fixed; transform` on mobile so
+   it can slide. Desktop layout untouched — these only fire below
+   the tablet breakpoint. */
+@media (max-width: 1024px) {
+  .scr-sidebar {
+    position: fixed !important;
+    top: 0; left: 0; bottom: 0;
+    z-index: 60;
+    width: 280px !important;
+    transform: translateX(-100%);
+    transition: transform var(--dur-base) var(--ease-standard);
+    box-shadow: var(--shadow-3);
+  }
+  .scr-drawer-open .scr-sidebar { transform: translateX(0); }
+}
+
+/* Mobile-only header bar that hosts the hamburger + page title.
+   Hidden on laptop+ where the sidebar is always visible. */
+.scr-mobile-header {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  height: var(--header-h);
+  padding: 0 14px;
+  border-bottom: var(--border);
+  background: var(--paper);
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+@media (max-width: 1024px) {
+  .scr-mobile-header { display: flex; }
+}
+
+.scr-hamburger {
+  width: 40px; height: 40px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--ink-1);
+  cursor: pointer;
+}
+.scr-hamburger:active { background: var(--ink-9); }
+
+/* Modal full-bleed on mobile. Wrap any large modal in
+   `.scr-modal` and the panel inside in `.scr-modal-panel` to get
+   automatic full-screen geometry on phones. */
+@media (max-width: 640px) {
+  .scr-modal-panel {
+    width: 100% !important;
+    height: 100% !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
+    border-radius: 0 !important;
+  }
 }
