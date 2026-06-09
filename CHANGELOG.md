@@ -18,6 +18,56 @@ Rules:
 
 ---
 
+## v0.1.11
+
+Sync groups, properly. Both the mechanism and the UI.
+
+### Why screens weren't actually syncing
+
+Two real bugs underneath the v0.1.6 implementation:
+
+- **Mix-splash broke the loop math.** When mix-splash was on, ExoPlayer
+  played `[splash, item1, item2, …]` but the server's sync calculation
+  only knew about `[item1, item2, …]`. Each loop the tablet ran ~5 s
+  longer than the server thought, so the "you should be on item X at
+  position Y" hint steadily diverged from where the tablet actually
+  was — every poll triggered a mid-item seek (visible buffer flash).
+  Fix: when a screen is in a sync group, the server now forces
+  `mixSplash: false` in the `/api/state` response, regardless of the
+  stored preference. The stored value is preserved so leaving the
+  group restores splash behavior.
+- **Drift threshold too aggressive.** ExoPlayer's `seekTo` shows a
+  visible buffer flash on cheap Android TV boxes. The 1.5 s threshold
+  fired on basically every poll for any healthy sync group, producing
+  constant micro-glitches that looked worse than the drift itself.
+  Bumped to 3 s — small drift gets ignored, group members still align
+  at every item transition (which they naturally do without seeks).
+
+### Why the UI made it easy to break
+
+Sync group was a freeform text input. Typos = different groups. No
+visualization of "these 4 screens are grouped together." You had to
+manually set the same string on every screen.
+
+- **Auto-grouping by store.** When a screen registers and has a
+  `location.storeId` set, the server now defaults its sync group to
+  `store:<storeId>`. So every screen at the same store falls into one
+  group out of the box. Admins can still detach individual screens or
+  use a custom label (e.g. "wall-A") to split a store across multiple
+  walls.
+- **New picker UI on the screen detail page.** The old text input is
+  gone. The Sync group card now lists every other registered screen
+  with a checkbox; ticking joins them to this screen's group,
+  unticking removes them. If neither screen is in a group yet, the
+  first tick creates a new one keyed off the store id. Screens in a
+  different group show greyed out with a note ("currently in 'wall-B'
+  — ticking will move it here"). A "Stop syncing this screen" button
+  lives at the bottom of the card.
+
+Pushing a playlist to one member of a sync group still fans out to
+every member (unchanged from v0.1.6, but now the picker UI makes it
+obvious which screens that includes).
+
 ## v0.1.10
 
 Cleanup pass. Removes the staging copy that survived earlier

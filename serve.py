@@ -1250,7 +1250,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "revision":    s["revision"],
                         "items":       enriched_items,
                         "pushedAt":    s["pushedAt"],
-                        "mixSplash":   s["mixSplash"],
+                        # mixSplash forced off in sync groups: the
+                        # server's loop math sees [items] but the
+                        # tablet's queue would be [splash, items...] —
+                        # the extra splash duration per loop drifts the
+                        # tablet steadily out of sync and triggers a
+                        # visible mid-item seek on every poll. Stored
+                        # value is preserved; we just override what we
+                        # tell the tablet so it doesn't mix splash
+                        # while it's a group member.
+                        "mixSplash":   False if sync_group_id else s["mixSplash"],
                         "audioOn":     s.get("audioOn", False),
                         "pollMode":    poll_mode,
                         # lowDataMode kept in the payload for old tablets
@@ -1578,7 +1587,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "orientation":     body.get("orientation"),
                 }
                 is_new = "registeredAt" not in (_screens.get(device_id, {}))
-                _ensure_screen_state(device_id)
+                state = _ensure_screen_state(device_id)
+                # Auto-group by store. When a screen registers with a
+                # location.storeId and doesn't already have an explicit
+                # sync group, default to "store:<storeId>" — so every
+                # screen at the same store falls into the same group
+                # without anyone touching the CMS. Admins can still
+                # opt out (set syncGroup to null) or override (to a
+                # custom group key like "wall-A").
+                loc = body.get("location") or {}
+                store_id = loc.get("storeId")
+                if state.get("syncGroup") is None and store_id:
+                    state["syncGroup"] = f"store:{store_id}"
+                    _save_per_screen()
                 _save_screens()
             print(f"[register] {device_id} ({name})", file=sys.stderr)
             _log_activity(
