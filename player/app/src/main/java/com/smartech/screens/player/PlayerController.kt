@@ -438,7 +438,13 @@ class PlayerController(context: Context) {
                 setPlaybackSpeedNudge(+1)
                 return
             }
-            // Real divergence: snap. Restore speed.
+            // Real divergence: snap. Restore speed. Same backward-
+            // guard as snapToGroupExpectedItem — never seek to a
+            // previous item from this code path.
+            if (expectedIdx < itemIdx) {
+                setPlaybackSpeedNudge(0)
+                return
+            }
             setPlaybackSpeedNudge(0)
             LogBuffer.i(
                 "PlayerController",
@@ -453,9 +459,28 @@ class PlayerController(context: Context) {
         }
 
         // Right item — close the gap with rate control.
+        // **v0.1.18:** never nudge in the last 1.5 s of an item or the
+        // first 500 ms after a transition. Both are danger zones for
+        // misaligning the natural transition with the math-expected
+        // boundary:
+        //   • Late: a 1.01× nudge causes the item to end ~10-15 ms
+        //     early per second of playback. If we keep nudging right
+        //     up to the natural end, the cumulative early-finish
+        //     would re-trigger snap-back.
+        //   • Early: the player's currentPosition isn't stable until
+        //     a few hundred ms after `seekTo`, so drift reads are
+        //     noisy. Letting the player settle avoids spurious nudges.
+        val itemDuration = state.itemDurationsMs[itemIdx]
+        val nearEnd = player.currentPosition > itemDuration - 1500L
+        val nearStart = player.currentPosition < 500L
+        if (nearEnd || nearStart) {
+            setPlaybackSpeedNudge(0)
+            return
+        }
+
         val drift = player.currentPosition - expectedPos
         when {
-            abs(drift) < 50L -> setPlaybackSpeedNudge(0)
+            abs(drift) < 100L -> setPlaybackSpeedNudge(0)
             abs(drift) < 2000L -> setPlaybackSpeedNudge(if (drift > 0) -1 else +1)
             else -> {
                 // > 2 s: rate-control would take too long. Seek.
@@ -471,16 +496,22 @@ class PlayerController(context: Context) {
 
     /**
      * `direction` is -1 (slow down), 0 (run at real-time), or +1 (speed up).
-     * Maps to 0.97× / 1.00× / 1.03×. The 3% nudge closes a 50–2000 ms
-     * gap in 1.6 s – 67 s respectively, which fits comfortably inside
-     * a single 15 s item — so the next transition arrives with the
-     * tablet back in sync. Wider rates (e.g. 1.10×) get noticeably
-     * pitchy in audio and look jerky in video; 1.03× is invisible.
+     *
+     * **v0.1.18:** dialled the nudge from ±3% to ±1%. The 3% rate
+     * caused items to finish ~440 ms before their natural duration,
+     * which the math then saw as "you should still be on the last
+     * frame of the previous item." `snapToGroupExpectedItem` then
+     * seeked backward to replay the tail — user-visible as "the
+     * video isn't playing fully." ±1% takes longer to close a gap
+     * (a 300 ms drift takes 30 s to recover) but is invisible at
+     * boundaries: a 15 s item finishes ~150 ms off natural, which
+     * the boundary guard in [snapToGroupExpectedItem] absorbs
+     * without snap-back.
      */
     private fun setPlaybackSpeedNudge(direction: Int) {
         val target = when {
-            direction > 0 -> 1.03f
-            direction < 0 -> 0.97f
+            direction > 0 -> 1.01f
+            direction < 0 -> 0.99f
             else -> 1.0f
         }
         if (currentPlaybackSpeed == target) return
@@ -544,6 +575,36 @@ class PlayerController(context: Context) {
         val targetQueueIndex = (0 until player.mediaItemCount)
             .firstOrNull { i -> player.getMediaItemAt(i).mediaId == expectedId }
             ?: return
+
+        // **v0.1.18:** never seek BACKWARD to a previous item. This
+        // path used to trigger when the player transitioned naturally
+        // a fraction of a second before the math-expected boundary —
+        // e.g. decoder pacing or rate-control overshoot meant a 15 s
+        // item finished at wall-clock 14.85 s, so when ExoPlayer fired
+        // `onMediaItemTransition` into item 1 at pos 0, the math still
+        // said "you should be at item 0 pos 14.85". The old code
+        // seeked backward, visibly replaying the last 150 ms of the
+        // previous video. User-perceived as "the video isn't playing
+        // fully". Forcing forward-only progression means we tolerate
+        // a small early-arrival at the start of each item rather than
+        // replay tails — the rate-control loop closes the gap
+        // mid-item.
+        //
+        // Force=true (epoch re-anchor) overrides this — that path is
+        // explicitly meant to jump to wherever the math says,
+        // including backward.
+        val currentQueueIdx = player.currentMediaItemIndex
+        if (!force) {
+            val isOneStepBack = targetQueueIndex == currentQueueIdx - 1 ||
+                (currentQueueIdx == 0 && targetQueueIndex == player.mediaItemCount - 1)
+            val earlyInCurrent = player.currentPosition < 1500L
+            if (isOneStepBack && earlyInCurrent) {
+                // Just transitioned early; wall-clock will catch up
+                // within the next item. Don't replay the tail.
+                return
+            }
+        }
+
         LogBuffer.i(
             "PlayerController",
             "Group sync snap → item '$expectedId' at ${positionInItem}ms",
