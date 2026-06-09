@@ -599,7 +599,7 @@ const Settings = () => {
               <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 16, fontWeight: 500, color: 'var(--ink-1)' }}>Brands</div>
-                  <div style={{ fontSize: 12, color: 'var(--ink-4)', marginTop: 2 }}>{MOCK_BRANDS.length} brands · 1,284 videos total</div>
+                  <div style={{ fontSize: 12, color: 'var(--ink-4)', marginTop: 2 }}>{MOCK_BRANDS.length} brands · {(window.MOCK_VIDEOS || []).length.toLocaleString()} videos total</div>
                 </div>
                 <Button variant="primary" size="sm" icon={<Icon.plus size={12} />}>Add brand</Button>
               </div>

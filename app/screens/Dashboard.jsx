@@ -111,6 +111,34 @@ const useFleetRollup = () => {
   }, [live, fleet]);
 };
 
+// Greeting picks a time-of-day adjective from the local clock rather
+// than hardcoded "Good morning". Returns just the adjective so the
+// caller composes "Good <x>, <name>".
+const timeOfDayGreeting = () => {
+  const h = new Date().getHours();
+  if (h < 5)  return 'evening';
+  if (h < 12) return 'morning';
+  if (h < 18) return 'afternoon';
+  return 'evening';
+};
+
+// Pull a sensible first name out of the auth user record. Falls back
+// to "there" so the page never reads "Good morning, Alex" again
+// regardless of what the auth state looks like.
+const firstNameFrom = (user) => {
+  if (!user) return 'there';
+  const candidate = user.displayName || user.name || user.email || '';
+  const trimmed = String(candidate).trim();
+  if (!trimmed) return 'there';
+  // Email fallback: take the part before "@" and Title-Case it.
+  if (trimmed.includes('@')) {
+    const local = trimmed.split('@')[0].replace(/[._]/g, ' ');
+    const word = local.split(/\s+/)[0] || 'there';
+    return word.charAt(0).toUpperCase() + word.slice(1);
+  }
+  return trimmed.split(/\s+/)[0];
+};
+
 const Dashboard = () => {
   const { stores, total, online, warn, offline, live } = useFleetRollup();
   const liveScreen = live.screens.find((s) => s.online);
@@ -120,6 +148,14 @@ const Dashboard = () => {
   const vp = useViewport();
   const compact = vp.isCompact;
   const isMobile = vp.tier === 'mobile';
+  // Real user from /api/auth/me. Falls back gracefully on first paint
+  // before AuthProvider resolves.
+  const auth = useAuth();
+  const firstName = firstNameFrom(auth?.user);
+  const greeting = `Good ${timeOfDayGreeting()}, ${firstName}`;
+  // Loading flag from useLiveScreens — distinguishes "no screens have
+  // registered yet" from "we haven't asked the server yet."
+  const fleetLoading = !!live.loading;
 
   return (
     <AppShell current="dashboard">
@@ -139,11 +175,15 @@ const Dashboard = () => {
       }}>
         {/* Greeting */}
         <div style={{ marginBottom: compact ? 20 : 26 }}>
-          <div style={{ fontSize: compact ? 20 : 24, fontWeight: 500, color: 'var(--ink-1)', letterSpacing: -0.5, marginBottom: 4 }}>Good morning, Alex</div>
+          <div style={{ fontSize: compact ? 20 : 24, fontWeight: 500, color: 'var(--ink-1)', letterSpacing: -0.5, marginBottom: 4 }}>{greeting}</div>
           <div style={{ fontSize: 13, color: 'var(--ink-4)' }}>
-            {online === 0
-              ? 'No screens online yet — install the player to bring the demo screen up.'
-              : `${online} of ${total} screens online. Pushing content from the library lands within seconds.`}
+            {fleetLoading
+              ? 'Checking screens…'
+              : total === 0
+                ? 'No screens registered yet — install the player on a tablet and complete the onboarding wizard.'
+                : online === 0
+                  ? `${total} screen${total === 1 ? '' : 's'} registered, all offline right now.`
+                  : `${online} of ${total} screens online. Pushing content from the library lands within seconds.`}
           </div>
         </div>
 
@@ -156,7 +196,7 @@ const Dashboard = () => {
           marginBottom: 24, background: 'var(--ink-10)',
           overflow: 'hidden',
         }}>
-          <DashStat label="Total screens" value={total} sub={`across ${stores.length} stores · 2 regions`} lastInRow={compact} />
+          <DashStat label="Total screens" value={total} sub={total === 0 ? 'No registered screens yet' : `across ${stores.length} store${stores.length === 1 ? '' : 's'}`} lastInRow={compact} />
           <DashStat label="Online now" value={online} sub={total > 0 ? `${Math.round(online/total*100)}% of fleet` : '—'} />
           <DashStat label="Needs attention" value={warn + offline} tone="warn" sub={`${warn} warning · ${offline} offline`} lastInRow={compact} />
           <DashStat label="Library" value={(window.MOCK_VIDEOS || []).length} sub={`videos across ${(window.MOCK_BRANDS || []).length} brands`} lastInRow />

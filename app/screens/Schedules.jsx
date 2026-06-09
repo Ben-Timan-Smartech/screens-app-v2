@@ -106,7 +106,7 @@ const Schedules = ({ initialMode = 'list' }) => {
               <Button variant="ghost" size="sm" iconRight={<Icon.chevR size={12} />}>Review</Button>
             </div>
             <div style={{ fontSize: 12, color: 'var(--ink-3)', paddingLeft: 24 }}>
-              <span style={{ fontWeight: 500, color: 'var(--ink-1)' }}>Launch day — Razr 50</span> overlaps with <span style={{ fontWeight: 500, color: 'var(--ink-1)' }}>Morning coffee window</span> on 4 screens at Saks Fifth Avenue.
+              Overlapping schedules will show up here once two windows compete for the same screens.
             </div>
           </div>
         </div>
@@ -129,7 +129,7 @@ const Schedules = ({ initialMode = 'list' }) => {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
                 <div>
                   <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 5 }}>Name</label>
-                  <Input value="Holiday window 2025" />
+                  <Input placeholder="e.g. Holiday window 2026" value="" onChange={() => {}} />
                 </div>
                 <div>
                   <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 5 }}>Priority</label>
@@ -142,11 +142,11 @@ const Schedules = ({ initialMode = 'list' }) => {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                 <div>
                   <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 5 }}>Starts</label>
-                  <Input value="Dec 1, 2025 · 09:00 GMT" />
+                  <Input placeholder="Start date + time" value="" onChange={() => {}} />
                 </div>
                 <div>
                   <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 5 }}>Ends</label>
-                  <Input value="Jan 6, 2026 · 23:00 GMT" />
+                  <Input placeholder="End date + time" value="" onChange={() => {}} />
                 </div>
               </div>
             </div>
@@ -179,10 +179,9 @@ const Schedules = ({ initialMode = 'list' }) => {
                   <Button variant="ghost" size="sm">Pick</Button>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                  <Chip>All UK/EU · 84 screens</Chip>
-                  <Chip tone="outline">+ Saks Fifth Avenue</Chip>
+                  <span style={{ fontSize: 12, color: 'var(--ink-4)', fontStyle: 'italic' }}>Pick stores, brands, or specific screens</span>
                 </div>
-                <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 10 }}>84 screens across 6 stores in UK/EU</div>
+                <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 10 }}>Targeting controls land with the live schedules feature.</div>
               </div>
             </div>
           </div>

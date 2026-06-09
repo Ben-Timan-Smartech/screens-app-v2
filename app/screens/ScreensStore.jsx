@@ -78,6 +78,8 @@ const rollupStore = (screens) => {
 const ScreensStoreView = ({ storeId }) => {
   const baseStore = MOCK_STORES.find(s => s.id === storeId) || MOCK_STORES[0];
   const screens = useScreensInStore(baseStore.id);
+  const live = useLiveScreens();
+  const fleetLoading = !!live.loading;
   const counts = rollupStore(screens);
   const store = { ...baseStore, ...counts };
   const [selected, setSelected] = React.useState(new Set());
@@ -122,8 +124,14 @@ const ScreensStoreView = ({ storeId }) => {
 
         {screens.length === 0 ? (
           <div style={{ padding: '60px 16px', border: 'var(--border)', borderRadius: 12, textAlign: 'center', color: 'var(--ink-4)' }}>
-            <div style={{ fontSize: 14, color: 'var(--ink-2)', marginBottom: 6 }}>No screens registered at this store yet</div>
-            <div style={{ fontSize: 12 }}>Install the player on a tablet, point it at this server, and pick {store.name} as the store during onboarding.</div>
+            {fleetLoading ? (
+              <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>Loading screens…</div>
+            ) : (
+              <>
+                <div style={{ fontSize: 14, color: 'var(--ink-2)', marginBottom: 6 }}>No screens registered at this store yet</div>
+                <div style={{ fontSize: 12 }}>Install the player on a tablet, point it at this server, and pick {store.name} as the store during onboarding.</div>
+              </>
+            )}
           </div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
@@ -156,6 +164,7 @@ const ScreensStoreView = ({ storeId }) => {
 // ─────────────────────────────────────────────────────────────
 const StoresIndex = () => {
   const fleet = useFleet();
+  const live = useLiveScreens();
   const stores = MOCK_STORES.map((s) => {
     const inStore = fleet.filter(x => x.storeId === s.id);
     const online = inStore.filter(x => x.status === 'online').length;
@@ -163,11 +172,23 @@ const StoresIndex = () => {
     return { ...s, total: inStore.length, online, warn: 0, offline };
   });
   const totalScreens = fleet.length;
+  // Region count comes from the actual taxonomy values present in
+  // the registered fleet, not a hardcoded "2".
+  const regionCount = new Set(
+    (live.screens || []).map((s) => s.location?.region).filter(Boolean)
+  ).size;
+  const subtitleParts = [
+    `${stores.length} store${stores.length === 1 ? '' : 's'}`,
+    `${totalScreens} screen${totalScreens === 1 ? '' : 's'}`,
+  ];
+  if (regionCount > 0) {
+    subtitleParts.push(`${regionCount} region${regionCount === 1 ? '' : 's'}`);
+  }
   return (
     <AppShell current="screens">
       <PageHeader
         title="Screens"
-        subtitle={`${stores.length} stores · ${totalScreens} screen${totalScreens === 1 ? '' : 's'} · 2 regions`}
+        subtitle={subtitleParts.join(' · ')}
         actions={<Button variant="primary" size="sm" icon={<Icon.plus size={13} />}>Add store</Button>}
       />
       <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 40px' }}>
