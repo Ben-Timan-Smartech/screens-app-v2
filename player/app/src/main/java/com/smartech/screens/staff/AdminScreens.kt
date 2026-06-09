@@ -163,7 +163,6 @@ fun DeviceAdminScreen(
     val orientation by store.orientationOverride.collectAsState(initial = null)
     val syncGroup by repository.syncGroupFlow.collectAsState()
     val cacheCap by store.cacheCapBytes.collectAsState(initial = 8L * 1024 * 1024 * 1024)
-    val pollSec by store.pollIntervalSec.collectAsState(initial = 60L)
     val info = remember { DeviceInfo.snapshot(ctx) }
 
     // Structured location fields
@@ -360,20 +359,11 @@ fun DeviceAdminScreen(
                             }
                         }
                     )
-                    Divider()
-                    EditableRow(
-                        label = "Poll interval (s)",
-                        value = pollSec.toString(),
-                        placeholder = "60",
-                        onSave = { v ->
-                            v.toLongOrNull()?.takeIf { it in 10..3600 }?.let { sec ->
-                                scope.launch {
-                                    store.setPollIntervalSec(sec)
-                                    LogBuffer.i("Admin", "Poll interval → ${sec}s by ${user.name}")
-                                }
-                            }
-                        }
-                    )
+                    // "Poll interval" setting removed in v0.1.6.1 — it
+                    // was a leftover from the legacy /device/settings
+                    // flow and the live-server path uses hardcoded 3 s
+                    // (or 60 s when Low data mode is on) instead. The
+                    // input was misleading: editing it did nothing.
                 }
             }
 
