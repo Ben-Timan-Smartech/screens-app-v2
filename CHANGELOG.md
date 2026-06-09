@@ -18,6 +18,53 @@ Rules:
 
 ---
 
+## v0.1.17
+
+The piece the previous sync releases left on the table: closing the
+drift that happens **inside** a video, not just between items.
+
+### Why the clocks matched but the videos didn't
+
+v0.1.13's NTP-style clock sync nailed the wall-clock — the
+calibration overlay shows two tablets tick on the same fractional
+second. v0.1.16 made the loop epoch stable across polls. But the
+videos themselves still drifted. The reason: cheap H.264 decoders
+on TX3-class boxes don't pace at exactly 1.000× real-time. They
+sit somewhere in a 0.5–1% band, and the band differs between
+two physically identical boxes. After 15 seconds of a video, two
+tablets that started together end up 75–150 ms apart — and the
+v0.1.12 "snap only at item transitions" model can't see that drift
+because it only checks at boundaries.
+
+### Rate-control drift correction
+
+The tablet now samples its own playback position twice a second and
+compares it to the math-expected position. The action depends on
+the gap:
+
+- **< 50 ms** — leave it alone. Inside the perceptual floor.
+- **50 ms – 2 s** — nudge `setPlaybackParameters(speed=1.03)` or
+  `0.97` until the gap closes. The 3% nudge invisibly closes a
+  100 ms gap in about 3 seconds, a 1 s gap in about 33 seconds.
+  No seek, no buffer flash, no audio pitch artefact for the
+  muted-by-default case.
+- **> 2 s** — last-resort seek. Rare; only fires when transition
+  timing has diverged by more than the rate-control range can
+  recover. Resets the speed back to 1.0× afterwards.
+
+The rate also resets to 1.0× at every item transition, so a
+nudge from the previous video doesn't carry over into the next
+one mid-correction.
+
+### Effect
+
+Sustained drift between two screens in a group stays bounded
+within ±50 ms, regardless of how long the loop has been running.
+The visible result is that videos that pass through identical
+frames at identical moments stay tracking — the side-by-side
+comparison that v0.1.13's clocks already passed now passes for
+playback too.
+
 ## v0.1.16
 
 Hotfix for v0.1.15.

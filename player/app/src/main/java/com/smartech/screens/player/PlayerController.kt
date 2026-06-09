@@ -3,12 +3,14 @@ package com.smartech.screens.player
 import android.content.Context
 import android.net.Uri
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import com.smartech.screens.R
 import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.util.LogBuffer
+import kotlin.math.abs
 
 /**
  * Thin wrapper around [ExoPlayer] that plays a list of locally-cached files on
@@ -83,6 +85,64 @@ class PlayerController(context: Context) {
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var pendingCoordinatedStart: Runnable? = null
 
+    /**
+     * v0.1.17: in-flight playback-rate adjustment for sync drift.
+     *
+     * Even with the v0.1.13 NTP clock-sync working perfectly (clocks
+     * agree to within ~10 ms — confirmed by the calibration overlay),
+     * two TX3-class boxes playing the same H.264 file drift past each
+     * other at ~0.5-1% over real-time because their hardware decoders
+     * pace differently. Over a 15-second video that's 75-150 ms of
+     * drift — easily visible side-by-side, and accumulating across
+     * loop iterations.
+     *
+     * The v0.1.12 snap-at-transition model can't catch this: snaps
+     * only fire at item boundaries, and between boundaries drift
+     * runs free. By the time the next transition arrives, the two
+     * tablets may have crossed an item boundary at different moments
+     * and end up on different items entirely.
+     *
+     * Fix: sample the actual-vs-expected position every 500 ms while
+     * in group sync. Tiny drifts (< 50 ms) we leave alone. Mid-range
+     * drifts (50 ms – 2 s) we nudge with `setPlaybackParameters(speed)`
+     * — invisible to the eye, no buffer flash, no audio pitch
+     * artefact for the muted-by-default case. Anything > 2 s falls
+     * back to a real seek (rare — happens when transition timing
+     * diverges by more than an item's worth of jitter).
+     *
+     * The seek-then-flash path that v0.1.11 used at a 3 s threshold
+     * is preserved only as a last resort because rate-control alone
+     * can't close a multi-second gap fast enough to be useful.
+     */
+    private var driftCorrectionTickScheduled: Boolean = false
+    private var currentPlaybackSpeed: Float = 1.0f
+    private val driftTick: Runnable = object : Runnable {
+        override fun run() {
+            driftCorrectionTickScheduled = false
+            try {
+                correctDriftInCurrentItem()
+            } finally {
+                // Re-arm only while we're in group sync. The
+                // applyGroupSync path schedules the first tick on
+                // anchor acquisition; releasing clears the flag and
+                // the loop dies. Polling at 500 ms gives us 2 Hz
+                // correction — fast enough to keep cumulative drift
+                // under ~200 ms even on a sloppy decoder.
+                if (groupSync != null) {
+                    driftCorrectionTickScheduled = true
+                    mainHandler.postDelayed(this, 500L)
+                }
+            }
+        }
+    }
+
+    private fun scheduleDriftTickIfNeeded() {
+        if (driftCorrectionTickScheduled) return
+        if (groupSync == null) return
+        driftCorrectionTickScheduled = true
+        mainHandler.postDelayed(driftTick, 500L)
+    }
+
     init {
         // Re-apply volume whenever the player moves to the next item in the
         // queue. Without this listener, the first MediaItem's volume sticks
@@ -94,6 +154,14 @@ class PlayerController(context: Context) {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 applyVolumeForCurrentItem()
                 snapToGroupExpectedItem()
+                // Reset the playback rate at every transition. Drift
+                // accumulated on the previous item could have left the
+                // speed at 1.03/0.97 from a recent nudge; without this
+                // reset the new item would start mid-correction.
+                if (currentPlaybackSpeed != 1.0f) {
+                    currentPlaybackSpeed = 1.0f
+                    player.playbackParameters = PlaybackParameters(1.0f)
+                }
             }
         })
     }
@@ -216,6 +284,12 @@ class PlayerController(context: Context) {
         if (loopStartedAtMs == null || itemIds.isEmpty()) {
             if (groupSync != null) LogBuffer.i("PlayerController", "Group sync cleared")
             groupSync = null
+            // Restore normal playback speed; the drift loop dies on
+            // its next tick (it checks groupSync != null to re-arm).
+            if (currentPlaybackSpeed != 1.0f) {
+                currentPlaybackSpeed = 1.0f
+                player.playbackParameters = PlaybackParameters(1.0f)
+            }
             return
         }
         val total = itemDurationsMs.sum().coerceAtLeast(1L)
@@ -274,6 +348,7 @@ class PlayerController(context: Context) {
                     LogBuffer.i("PlayerController", "Coordinated start firing")
                     player.playWhenReady = true
                     pendingCoordinatedStart = null
+                    scheduleDriftTickIfNeeded()
                 }
                 pendingCoordinatedStart = resume
                 mainHandler.postDelayed(resume, msUntilStart)
@@ -281,6 +356,136 @@ class PlayerController(context: Context) {
                 snapToGroupExpectedItem(force = true)
             }
         }
+        // Every time we receive an anchor — coordinated-start or
+        // already-running — make sure the drift correction loop is
+        // ticking. Idempotent; the scheduler is a no-op when a tick
+        // is already in flight.
+        scheduleDriftTickIfNeeded()
+    }
+
+    /**
+     * Pulled from [driftTick]. Compares the player's actual position
+     * within the current item against the math-expected position
+     * (same formula as [snapToGroupExpectedItem]) and decides how to
+     * close the gap:
+     *   • drift < 50 ms        → leave the speed alone (or restore 1.0×)
+     *   • drift 50 ms – 2 s    → nudge speed to 1.03× / 0.97×
+     *   • drift > 2 s          → real seek (last-resort path)
+     */
+    private fun correctDriftInCurrentItem() {
+        val state = groupSync ?: return
+        // Don't mid-item correct while a coordinated-start pause is
+        // armed — that branch is doing its own scheduled work.
+        if (pendingCoordinatedStart != null) return
+        val currentId = player.currentMediaItem?.mediaId ?: return
+        if (currentId == Source.SPLASH) return
+        // Player must be in a position we can actually compare. STATE_READY
+        // is the only state where `currentPosition` is trustworthy.
+        if (player.playbackState != Player.STATE_READY) return
+        if (!player.playWhenReady) return
+
+        val currentIndex = player.currentMediaItemIndex
+        if (currentIndex < 0 || currentIndex >= state.itemIds.size) return
+        // Defensive: queue may include splash at index 0 if mix-splash
+        // is somehow on; the math operates on the splash-less itemIds
+        // list. Find this item's position in itemIds by id.
+        val itemIdx = state.itemIds.indexOf(currentId)
+        if (itemIdx < 0) return
+
+        val serverNowMs = System.currentTimeMillis() + state.serverOffsetMs
+        val elapsed = (serverNowMs - state.loopStartedAtMs).coerceAtLeast(0L)
+        val offset = elapsed % state.totalDurationMs
+
+        // Expected position within the loop, then narrow to this item.
+        var cumulative = 0L
+        var expectedIdx = -1
+        var expectedPos = 0L
+        for (i in state.itemDurationsMs.indices) {
+            val d = state.itemDurationsMs[i]
+            if (offset < cumulative + d) {
+                expectedIdx = i
+                expectedPos = offset - cumulative
+                break
+            }
+            cumulative += d
+        }
+        if (expectedIdx < 0) return
+
+        // If we're on the wrong item, let the snap-at-transition path
+        // handle it on the next natural boundary (or last-resort seek).
+        if (expectedIdx != itemIdx) {
+            // Big drift — only seek if we're more than ~1 s past the
+            // wrong-item boundary. Otherwise we're a few hundred ms
+            // either side of a transition and the next onMediaItemTransition
+            // will pull us into line.
+            val itemDur = state.itemDurationsMs[itemIdx]
+            val howFarOff = if (expectedIdx > itemIdx) {
+                // Expected later in loop — we're behind. Distance is
+                // remainder of this item + cumulative of items between.
+                var d = itemDur - player.currentPosition
+                for (j in (itemIdx + 1) until expectedIdx) d += state.itemDurationsMs[j]
+                d += expectedPos
+                d
+            } else {
+                // Expected earlier — we're ahead (or loop wrapped).
+                // Don't try to "seek backward" mid-item; the next
+                // natural wrap will fix it.
+                Long.MAX_VALUE
+            }
+            if (howFarOff in 0L..2000L) {
+                // Within rate-control range — speed up so the boundary
+                // catches up. Skip the seek.
+                setPlaybackSpeedNudge(+1)
+                return
+            }
+            // Real divergence: snap. Restore speed.
+            setPlaybackSpeedNudge(0)
+            LogBuffer.i(
+                "PlayerController",
+                "Drift seek → item ${state.itemIds[expectedIdx]} at ${expectedPos}ms (wrong item)",
+            )
+            // Map expectedIdx (itemIds space) back to queue index.
+            val queueIdx = (0 until player.mediaItemCount)
+                .firstOrNull { i -> player.getMediaItemAt(i).mediaId == state.itemIds[expectedIdx] }
+                ?: return
+            player.seekTo(queueIdx, expectedPos)
+            return
+        }
+
+        // Right item — close the gap with rate control.
+        val drift = player.currentPosition - expectedPos
+        when {
+            abs(drift) < 50L -> setPlaybackSpeedNudge(0)
+            abs(drift) < 2000L -> setPlaybackSpeedNudge(if (drift > 0) -1 else +1)
+            else -> {
+                // > 2 s: rate-control would take too long. Seek.
+                setPlaybackSpeedNudge(0)
+                LogBuffer.i(
+                    "PlayerController",
+                    "Drift seek → ${expectedPos}ms (was ${player.currentPosition}ms, drift=${drift}ms)",
+                )
+                player.seekTo(player.currentMediaItemIndex, expectedPos)
+            }
+        }
+    }
+
+    /**
+     * `direction` is -1 (slow down), 0 (run at real-time), or +1 (speed up).
+     * Maps to 0.97× / 1.00× / 1.03×. The 3% nudge closes a 50–2000 ms
+     * gap in 1.6 s – 67 s respectively, which fits comfortably inside
+     * a single 15 s item — so the next transition arrives with the
+     * tablet back in sync. Wider rates (e.g. 1.10×) get noticeably
+     * pitchy in audio and look jerky in video; 1.03× is invisible.
+     */
+    private fun setPlaybackSpeedNudge(direction: Int) {
+        val target = when {
+            direction > 0 -> 1.03f
+            direction < 0 -> 0.97f
+            else -> 1.0f
+        }
+        if (currentPlaybackSpeed == target) return
+        currentPlaybackSpeed = target
+        player.playbackParameters = PlaybackParameters(target)
     }
 
     /**
@@ -361,6 +566,8 @@ class PlayerController(context: Context) {
     fun release() {
         pendingCoordinatedStart?.let { mainHandler.removeCallbacks(it) }
         pendingCoordinatedStart = null
+        mainHandler.removeCallbacks(driftTick)
+        driftCorrectionTickScheduled = false
         player.release()
     }
 }
