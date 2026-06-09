@@ -442,6 +442,23 @@ const setScreenSyncGroup = async (deviceId, syncGroup) => {
   return res.json();
 };
 
+// setScreenDisplayMode — POST /api/screens/<id>/display-mode. modeId
+// is an int from the screen's supportedModes list, or null to clear
+// the override (auto). Cheap boxes like the TX3 Mini boot at 720p
+// even when the panel + box both support 1080p; this is how the CMS
+// flips them without anyone needing to plug a keyboard into the box.
+// Server persists the value; the tablet validates it against its own
+// supportedModes before touching Window.preferredDisplayModeId.
+const setScreenDisplayMode = async (deviceId, modeId) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/display-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ displayMode: modeId }),
+  });
+  if (!res.ok) throw new Error(`display-mode failed: ${res.status}`);
+  return res.json();
+};
+
 // setVideoDefaultUnmute — PATCH /api/library/videos/<id> to flip the
 // per-video "default to unmute" flag. Persists in library.json so it
 // survives Drive rescans (scan-videos.py preserves sticky flags).
@@ -1270,6 +1287,6 @@ Object.assign(window, {
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setVideoDefaultUnmute,
+  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setVideoDefaultUnmute,
   setScreenPlaylist, PushPicker,
 });

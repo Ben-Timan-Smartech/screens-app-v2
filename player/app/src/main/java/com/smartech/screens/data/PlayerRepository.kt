@@ -266,6 +266,11 @@ class PlayerRepository(
         /** Server's wall-clock at response build time. We use it to
          *  correct for transit latency when seeking. */
         val serverNowMs: Long? = null,
+        /** v0.1.14: per-screen HDMI mode override. Null = auto.
+         *  Non-null is a modeId from this tablet's own supportedModes
+         *  list (reported in heartbeat). MainActivity applies it to
+         *  the Window's preferredDisplayModeId on change. */
+        val displayMode: Int? = null,
         val commands: List<LiveCommand> = emptyList(),
         val splashUrl: String? = null,
         val splashName: String? = null,
@@ -351,6 +356,17 @@ class PlayerRepository(
      *  in a group, so no sync corrections are applied. */
     private val _syncGroup = MutableStateFlow<String?>(null)
     val syncGroupFlow: StateFlow<String?> = _syncGroup
+
+    /** v0.1.14: per-screen HDMI mode override pushed from the CMS.
+     *  Null = auto (don't touch the box's mode). Non-null is a modeId
+     *  that the host tablet previously reported in `supportedModes`
+     *  on its heartbeat. MainActivity collects this flow and applies
+     *  the modeId to its Window.LayoutParams.preferredDisplayModeId
+     *  — Android then asks the HDMI sink to switch at the next
+     *  surface attach. The TX3 Mini (boots at 720p but the panel
+     *  supports 1080p) is the canonical case for needing this. */
+    private val _displayMode = MutableStateFlow<Int?>(null)
+    val displayModeFlow: StateFlow<Int?> = _displayMode
 
     /** Group sync anchor — just the loop's wall-clock epoch + the
      *  groupId. The tablet computes "which item should I be on?"
@@ -576,6 +592,15 @@ class PlayerRepository(
         if (state.syncGroup != _syncGroup.value) {
             _syncGroup.value = state.syncGroup
             LogBuffer.i(TAG, "Sync group → ${state.syncGroup ?: "(none)"}")
+        }
+
+        // Display mode override. MainActivity collects this flow and
+        // applies preferredDisplayModeId on change. We only mutate
+        // the flow on a real change so MainActivity's collector
+        // doesn't churn the window attributes every poll.
+        if (state.displayMode != _displayMode.value) {
+            _displayMode.value = state.displayMode
+            LogBuffer.i(TAG, "Display mode → ${state.displayMode ?: "(auto)"}")
         }
 
         // Group sync anchor. The tablet does all "which item should I
@@ -918,6 +943,42 @@ class PlayerRepository(
         }
     }
 
+    /** Push a new HDMI mode override to the server. `null` clears
+     *  the override (== auto). Non-null must match one of the modeIds
+     *  this tablet reported in supportedModes — the server stores
+     *  whatever it's given but the tablet itself validates against
+     *  the current supportedModes list when applying. Optimistic
+     *  local update means MainActivity's collector fires immediately,
+     *  before the next poll round-trips. */
+    suspend fun setDisplayModeOnServer(modeId: Int?) {
+        LogBuffer.i(TAG, "setDisplayModeOnServer → ${modeId ?: "(auto)"}")
+        _displayMode.value = modeId
+
+        val base = store.liveServerUrl.first()?.trimEnd('/')
+        if (base.isNullOrBlank()) {
+            LogBuffer.w(TAG, "setDisplayModeOnServer skipped — no liveServerUrl set")
+            return
+        }
+        val deviceId = store.ensureDeviceId()
+        val bodyValue = modeId?.toString() ?: "null"
+        val body = """{"displayMode":$bodyValue}"""
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/screens/${urlEncode(deviceId)}/display-mode")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) LogBuffer.w(TAG, "setDisplayModeOnServer HTTP ${r.code}")
+                    else LogBuffer.i(TAG, "setDisplayModeOnServer OK")
+                }
+                lastLiveRevision = -1
+            }.onFailure {
+                LogBuffer.w(TAG, "setDisplayModeOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
+            }
+        }
+    }
+
     /** Set this screen's sync-group membership on the server. Null or
      *  blank string detaches the screen from any group. */
     suspend fun setSyncGroupOnServer(value: String?) {
@@ -1129,6 +1190,15 @@ class PlayerRepository(
         ).joinToString(" · ")
         val cachedIds = cache.cachedIds().joinToString(",") { "\"$it\"" }
         val tier = if (info.ramMb >= 3000) "1080p" else "720p"
+        // Enumerate supported HDMI modes so the CMS resolution picker
+        // has something to render. Returns [] on devices where the
+        // Display API doesn't cooperate, which the CMS handles by
+        // hiding the picker entirely (auto = no override).
+        val modes = com.smartech.screens.util.DisplayModes.supported(appContext)
+        val supportedModesJson = modes.joinToString(",") { m ->
+            """{"id":${m.id},"w":${m.width},"h":${m.height},"hz":${m.refreshHz}}"""
+        }
+        val activeModeId = com.smartech.screens.util.DisplayModes.active(appContext)
         val body = """
             {
               "deviceId": "$deviceId",
@@ -1145,7 +1215,9 @@ class PlayerRepository(
               "appVersion": ${q(com.smartech.screens.BuildConfig.VERSION_NAME)},
               "cacheBytes": ${cache.totalBytes()},
               "freeStorageBytes": ${appContext.filesDir.usableSpace},
-              "cachedVideoIds": [${cachedIds}]
+              "cachedVideoIds": [${cachedIds}],
+              "supportedModes": [${supportedModesJson}],
+              "activeDisplayMode": ${activeModeId}
             }
         """.trimIndent()
         runCatching {

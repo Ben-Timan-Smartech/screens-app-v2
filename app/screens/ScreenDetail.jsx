@@ -314,6 +314,113 @@ const SyncGroupCard = ({ screen, allScreens, onSetGroup, onSetGroupForDevice, on
 // Low Data Mode toggle. Visual is a segmented control so it reads as
 // a single choice rather than a stack of options. Slow also skips the
 // per-location splash download.
+// DisplayResolutionCard — v0.1.14. HDMI mode picker for boxes like
+// the TX3 Mini that boot at 720p but support 1080p. Lists every mode
+// the tablet's heartbeat reported in supportedModes + an "Auto" row
+// at the top. Selected mode is the override the CMS most recently
+// pushed (screen.displayMode); the radio next to "Auto" highlights
+// when no override is set. We also show the tablet's currently
+// active mode as a chip so the user can see whether the override
+// has actually taken effect yet.
+//
+// Hidden entirely when the tablet hasn't reported any supportedModes
+// (older app version, or a device whose Display API doesn't expose
+// them). That way the picker doesn't appear with one greyed "Auto"
+// row that does nothing.
+const DisplayResolutionCard = ({ screen, onSetMode, canEdit, isLive }) => {
+  const modes = Array.isArray(screen?.supportedModes) ? screen.supportedModes : [];
+  if (modes.length === 0) return null;
+  const override = screen?.displayMode ?? null;        // null = auto
+  const active = screen?.activeDisplayMode || 0;       // 0 = unknown
+  // Cluster duplicate resolutions (same w×h different refresh) but
+  // keep distinct refresh rates so the user can pick e.g. 1080p@60
+  // vs 1080p@50 if the panel cares.
+  const sortedModes = [...modes].sort((a, b) =>
+    (b.w * b.h) - (a.w * a.h) || (b.hz || 0) - (a.hz || 0)
+  );
+  const labelFor = (m) => {
+    const hz = m.hz ? `${Math.round(m.hz)}Hz` : '';
+    return `${m.w}×${m.h}${hz ? ` · ${hz}` : ''}`;
+  };
+  return (
+    <Card padding={16}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
+        <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Display resolution</div>
+        {active > 0 && (() => {
+          const activeMode = modes.find(m => m.id === active);
+          if (!activeMode) return null;
+          return (
+            <span style={{
+              fontSize: 10, fontWeight: 500,
+              color: 'var(--ink-3)',
+              background: 'var(--ink-8)',
+              padding: '2px 8px', borderRadius: 999,
+              letterSpacing: 0.4,
+            }}>Currently {labelFor(activeMode)}</span>
+          );
+        })()}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--ink-4)', marginBottom: 10 }}>
+        {isLive
+          ? 'Switches the box\'s HDMI output to the selected mode. Some boxes (TX3 Mini, generic Android TV sticks) boot at 720p even when the panel supports more — pick a higher mode here.'
+          : 'Saves the override now; the tablet applies it when it reconnects.'}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <ResolutionRow
+          label="Auto"
+          sub="Let the box keep its current HDMI mode."
+          selected={override === null}
+          disabled={!canEdit}
+          onClick={() => override !== null && onSetMode(null)}
+        />
+        {sortedModes.map(m => (
+          <ResolutionRow
+            key={m.id}
+            label={labelFor(m)}
+            sub={m.id === active ? 'Currently active on the tablet.' : null}
+            selected={override === m.id}
+            disabled={!canEdit}
+            onClick={() => override !== m.id && onSetMode(m.id)}
+          />
+        ))}
+      </div>
+    </Card>
+  );
+};
+
+const ResolutionRow = ({ label, sub, selected, disabled, onClick }) => (
+  <button
+    onClick={onClick}
+    disabled={disabled}
+    style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '8px 10px', textAlign: 'left',
+      background: selected ? 'var(--ink-9)' : 'transparent',
+      border: selected ? 'var(--border-strong)' : '1px solid transparent',
+      borderRadius: 6,
+      cursor: disabled ? 'not-allowed' : (selected ? 'default' : 'pointer'),
+      opacity: disabled ? 0.5 : 1,
+    }}>
+    <span style={{
+      width: 14, height: 14, borderRadius: '50%',
+      border: 'var(--border-strong)',
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      flexShrink: 0,
+    }}>
+      {selected && (
+        <span style={{
+          width: 6, height: 6, borderRadius: '50%',
+          background: 'var(--ink-1)',
+        }} />
+      )}
+    </span>
+    <div style={{ flex: 1 }}>
+      <div style={{ fontSize: 12, fontWeight: selected ? 600 : 500, color: 'var(--ink-1)' }}>{label}</div>
+      {sub && <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>{sub}</div>}
+    </div>
+  </button>
+);
+
 const PollModeRow = ({ value, onChange, disabled, isLive }) => {
   const modes = [
     { key: 'fast',   label: 'Fast',   detail: '10 s'   },
@@ -551,6 +658,32 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
         isLive
           ? `Refresh queued — tablet picks it up in ${eta}`
           : `Refresh queued — runs when the tablet reconnects`,
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
+  // Push a new HDMI mode override. `modeId` is an int from the
+  // screen's supportedModes list, or null to clear (== auto). The
+  // tablet re-validates against its supportedModes before touching
+  // the window, so a stale modeId here can't lock the box into
+  // something it can't render.
+  const handleSetDisplayMode = async (modeId) => {
+    if (!targetDeviceId) return;
+    try {
+      await setScreenDisplayMode(targetDeviceId, modeId);
+      // Build a readable label for the toast — works even when the
+      // tablet's most recent supportedModes hasn't been re-fetched
+      // (it sticks around in lastKnown until the next heartbeat).
+      const modes = lastKnown?.supportedModes || [];
+      const m = modeId == null ? null : modes.find(x => x.id === modeId);
+      const label = !m
+        ? 'Auto (let the box decide)'
+        : `${m.w}×${m.h}${m.hz ? ` @ ${Math.round(m.hz)}Hz` : ''}`;
+      showToast(
+        isLive ? `Resolution → ${label}` : `Resolution will switch to ${label} on reconnect`,
         'ok',
       );
     } catch (e) {
@@ -923,6 +1056,18 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 onSetGroup={handleSetSyncGroup}
                 onSetGroupForDevice={handleSetSyncGroupForDevice}
                 onRequestJoinWithDifferentContent={(other) => setSyncJoinTarget(other)}
+                canEdit={canEdit}
+                isLive={isLive}
+              />
+            )}
+
+            {/* HDMI mode override. Auto-hides on screens whose tablet
+                hasn't reported supportedModes yet (older app version,
+                or a device whose Display API doesn't expose them). */}
+            {hasHistory && (
+              <DisplayResolutionCard
+                screen={lastKnown}
+                onSetMode={handleSetDisplayMode}
                 canEdit={canEdit}
                 isLive={isLive}
               />
