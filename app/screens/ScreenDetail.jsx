@@ -92,59 +92,142 @@ const StatusLine = ({ label, value, mono, tone }) => (
   </div>
 );
 
-// SyncGroupRow — text input alongside the other Display toggles. Two
-// or more screens that share a syncGroup value get an identical
-// playback hint from the server on every poll, so they stay aligned
-// to the same item + position. Empty value detaches the screen from
-// any group. Commits on blur or Enter; we don't fire a request on
-// every keystroke. The "suggested" hint surfaces the screen's storeId
-// so the operator can one-click set a sensible default group.
-const SyncGroupRow = ({ value, suggested, onCommit, disabled, isLive }) => {
-  const [draft, setDraft] = React.useState(value || '');
-  // Keep the input in sync when the prop changes (e.g. another browser
-  // tab toggled it, or the server returned a different value).
-  React.useEffect(() => { setDraft(value || ''); }, [value]);
-  const commit = () => {
-    const next = (draft || '').trim();
-    if (next === (value || '').trim()) return; // no-op
-    onCommit(next);
+// SyncGroupCard — visual sync-group picker. Replaces the v0.1.6 text
+// input which was too easy to typo into a typo-only-singleton group.
+//
+// Behavior:
+// - Lists every OTHER registered screen with a checkbox.
+// - Boxes for screens already in the same group are pre-checked.
+// - Checking a previously-independent screen joins it to this
+//   screen's group. If this screen wasn't in a group either, both
+//   get added to a new group keyed off the storeId (or this
+//   screen's id).
+// - Unchecking a member removes it from the group.
+// - A "Stop syncing" button removes THIS screen from the group.
+//
+// The server tracks the group label as a string — clients never
+// need to type it. The UI invents sensible labels when a group
+// needs to be created.
+const SyncGroupCard = ({ screen, allScreens, onSetGroup, onSetGroupForDevice, canEdit, isLive }) => {
+  const groupId = screen.syncGroup || null;
+  // Members = every screen in this group (including the current one).
+  // Other screens = all other registered screens, sorted by name.
+  const members = React.useMemo(
+    () => (allScreens || []).filter((s) => s.syncGroup && s.syncGroup === groupId),
+    [allScreens, groupId],
+  );
+  const others = React.useMemo(
+    () => (allScreens || [])
+      .filter((s) => s.deviceId !== screen.deviceId)
+      .sort((a, b) => (a.name || a.deviceId).localeCompare(b.name || b.deviceId)),
+    [allScreens, screen.deviceId],
+  );
+
+  // Suggested group key if this screen isn't in one yet. Prefer the
+  // store id so multiple screens at the same store fall together;
+  // fall back to the device id when no store is configured.
+  const suggestedKey = `store:${screen.location?.storeId || screen.deviceId}`;
+  const effectiveGroup = groupId || suggestedKey;
+
+  const onToggleOther = (other) => {
+    if (!canEdit) return;
+    const otherInGroup = !!(other.syncGroup && other.syncGroup === groupId);
+    if (otherInGroup) {
+      // Removing other from group → set their syncGroup to null.
+      onSetGroupForDevice(other.deviceId, null);
+    } else {
+      // Joining other to this group. If we're not in a group yet,
+      // first put this screen into the suggested group.
+      if (!groupId) {
+        onSetGroup(suggestedKey);
+      }
+      onSetGroupForDevice(other.deviceId, effectiveGroup);
+    }
   };
+
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0' }}>
-      <div style={{ flex: 1 }}>
+    <Card padding={16}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
         <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Sync group</div>
-        <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>
-          {isLive
-            ? 'Screens sharing this label play the same video at the same time. Leave blank for independent playback.'
-            : 'Screens sharing this label play the same video at the same time. Saves now, applies when the tablet reconnects.'}
-        </div>
-        {suggested && !draft && (
-          <div
-            onClick={() => !disabled && (setDraft(suggested), onCommit(suggested))}
-            style={{
-              marginTop: 4, fontSize: 11, color: 'var(--ink-2)',
-              cursor: disabled ? 'default' : 'pointer', textDecoration: disabled ? 'none' : 'underline',
-            }}>
-            Suggested: {suggested}
-          </div>
+        {groupId ? (
+          <span style={{ fontSize: 11, color: 'var(--ok)' }}>
+            ● Syncing with {members.length - 1 > 0 ? `${members.length - 1} other screen${members.length - 1 === 1 ? '' : 's'}` : 'no one yet'}
+          </span>
+        ) : (
+          <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>● Independent playback</span>
         )}
       </div>
-      <input
-        value={draft}
-        disabled={disabled}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => { if (e.key === 'Enter') { e.target.blur(); } }}
-        placeholder="e.g. NYC-1"
-        style={{
-          width: 140, height: 28, padding: '0 8px',
-          border: 'var(--border-strong)', borderRadius: 5,
-          fontSize: 12, color: 'var(--ink-1)',
-          fontFamily: 'inherit',
-          background: disabled ? 'var(--ink-9)' : 'var(--ink-10)',
-        }}
-      />
-    </div>
+      <div style={{ fontSize: 11, color: 'var(--ink-4)', lineHeight: 1.5, marginBottom: 12 }}>
+        {isLive
+          ? 'Tick screens to play the same video at the same time. Same content needs to be on each screen — pushing playlists from this page fans out automatically.'
+          : 'Tick screens to play the same video at the same time. Saves now, applies when the tablet reconnects.'}
+      </div>
+
+      {others.length === 0 ? (
+        <div style={{
+          padding: '12px 14px', border: 'var(--border)', borderRadius: 6,
+          fontSize: 12, color: 'var(--ink-4)', textAlign: 'center',
+        }}>
+          No other screens registered yet — sync needs at least two.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {others.map((other) => {
+            const inSameGroup = !!(other.syncGroup && other.syncGroup === groupId);
+            const inDifferentGroup = !!(other.syncGroup && other.syncGroup !== groupId);
+            return (
+              <button
+                key={other.deviceId}
+                disabled={!canEdit}
+                onClick={() => onToggleOther(other)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  width: '100%', padding: '8px 10px',
+                  border: inSameGroup ? '1px solid var(--ink-0)' : 'var(--border)',
+                  borderRadius: 6,
+                  background: inSameGroup ? 'var(--ink-8)' : 'var(--ink-10)',
+                  textAlign: 'left',
+                  opacity: inDifferentGroup ? 0.55 : 1,
+                  cursor: canEdit ? 'pointer' : 'default',
+                }}
+                title={inDifferentGroup ? `Currently in group '${other.syncGroup}'. Ticking will move it to this one.` : undefined}>
+                <span style={{
+                  width: 16, height: 16, borderRadius: 3,
+                  background: inSameGroup ? 'var(--ink-0)' : 'var(--ink-10)',
+                  border: inSameGroup ? 'none' : '1.5px solid var(--ink-6)',
+                  color: 'var(--on-accent)',
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0,
+                }}>
+                  {inSameGroup && <Icon.check size={11} />}
+                </span>
+                <StatusDot status={other.online ? 'online' : 'offline'} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {other.name || other.deviceId}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {[other.location?.storeId, other.location?.screenCode].filter(Boolean).join(' · ') || other.deviceId}
+                    {inDifferentGroup && ` · in '${other.syncGroup}'`}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {groupId && (
+        <div style={{ marginTop: 12 }}>
+          <Button
+            variant="ghost" size="sm"
+            disabled={!canEdit}
+            onClick={() => onSetGroup(null)}>
+            Stop syncing this screen
+          </Button>
+        </div>
+      )}
+    </Card>
   );
 };
 
@@ -396,17 +479,33 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
-  const handleSyncGroupChange = async (raw) => {
+  // Set this screen's sync group. `next` can be a group label string
+  // or null to detach. Used by SyncGroupCard's "Stop syncing" button
+  // and as the bootstrap call when joining the first other screen.
+  const handleSetSyncGroup = async (next) => {
     if (!targetDeviceId) return;
-    const next = (raw || '').trim();
     try {
       await setScreenSyncGroup(targetDeviceId, next || null);
       showToast(
         next
-          ? `Joined sync group "${next}" — screens in this group play in lockstep`
-          : 'Left sync group — playback runs independently',
+          ? 'Joined sync group — push a playlist to keep group members aligned.'
+          : 'Stopped syncing this screen.',
         'ok',
       );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
+  // Move some OTHER screen into / out of a group. Same endpoint, the
+  // CMS just calls it on a different deviceId. SyncGroupCard fires
+  // this when a checkbox is ticked or unticked.
+  const handleSetSyncGroupForDevice = async (deviceId, next) => {
+    if (!deviceId) return;
+    try {
+      await setScreenSyncGroup(deviceId, next || null);
+      // Don't toast here; the parent click already showed visual
+      // feedback by re-rendering the checkbox state.
     } catch (e) {
       showToast(`Failed: ${e.message}`, 'err');
     }
@@ -690,14 +789,21 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 disabled={!canEdit}
                 isLive={isLive}
               />
-              <SyncGroupRow
-                value={hasHistory ? (lastKnown.syncGroup || '') : ''}
-                suggested={hasHistory ? (lastKnown.location?.storeId || '') : ''}
-                onCommit={handleSyncGroupChange}
-                disabled={!canEdit}
+            </Card>
+
+            {/* Sync group picker — own card because it can list every
+                other registered screen. Keeps the Display card from
+                getting absurdly tall when there are many screens. */}
+            {hasHistory && (
+              <SyncGroupCard
+                screen={lastKnown}
+                allScreens={live.screens || []}
+                onSetGroup={handleSetSyncGroup}
+                onSetGroupForDevice={handleSetSyncGroupForDevice}
+                canEdit={canEdit}
                 isLive={isLive}
               />
-            </Card>
+            )}
 
             {/* Schedule lands in v0.1.7 (time-windowed playlists +
                 blackout periods). Showing the slot so admins know

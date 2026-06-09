@@ -225,9 +225,16 @@ class PlayerController(context: Context) {
     private companion object {
         /** Tablets correct drift on every poll, but only if they're off
          *  by more than this much. Below the threshold we let ExoPlayer
-         *  ride — small seeks introduce visible stutter on cheap
-         *  Android TV boxes. 1500 ms is roughly one "perceptible drift"
-         *  unit at the kind of viewing distance these screens get. */
-        const val DRIFT_CORRECTION_MS = 1500L
+         *  ride — seeks introduce a visible buffer flash on cheap
+         *  Android TV boxes, so seeking on every poll for sub-second
+         *  drift looks worse than the drift itself.
+         *
+         *  3 s is the perceptible-but-not-jarring zone: at typical
+         *  viewing distance two screens that are 3 s out of sync read
+         *  as obviously different; below 3 s the eye fills in the
+         *  difference. Bumped from 1.5 s in v0.1.11 after sync groups
+         *  shipped — the 1.5 s threshold was firing on basically every
+         *  poll, producing constant micro-glitches. */
+        const val DRIFT_CORRECTION_MS = 3000L
     }
 }
