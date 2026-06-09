@@ -363,6 +363,10 @@ def _log_activity(
     _ACTIVITY_LOG.append(entry)
 
 
+POLL_MODES = ("fast", "normal", "slow")
+DEFAULT_POLL_MODE = "normal"
+
+
 def _ensure_screen_state(device_id: str) -> dict:
     """Lazily create a per-screen state record. Caller must hold _STATE_LOCK."""
     s = _per_screen.get(device_id)
@@ -373,7 +377,7 @@ def _ensure_screen_state(device_id: str) -> dict:
             "pushedAt": None,
             "mixSplash": True,                    # bundled splash mixed in by default
             "audioOn": False,                     # screen-wide audio is muted by default — see /api/screens/<id>/audio
-            "lowDataMode": False,                 # see /api/screens/<id>/low-data-mode
+            "pollMode": DEFAULT_POLL_MODE,        # "fast" | "normal" | "slow" — see /api/screens/<id>/poll-mode
             "syncGroup": None,                    # see _compute_playback / /api/screens/<id>/sync-group
             "pendingCommands": [],                 # list of pending commands for this screen
         }
@@ -381,8 +385,16 @@ def _ensure_screen_state(device_id: str) -> dict:
         _save_per_screen()
     # Back-fill any fields persisted before they shipped so older records
     # get sane defaults without a migration script.
+    #
+    # Migration v0.1.8: the old `lowDataMode: bool` collapses into one
+    # of two pollMode values — slow when it was on, normal otherwise.
+    # Newer code reads pollMode; the old field stays in the dict so
+    # rollbacks don't lose information.
+    if "pollMode" not in s:
+        legacy_low_data = bool(s.get("lowDataMode"))
+        s["pollMode"] = "slow" if legacy_low_data else DEFAULT_POLL_MODE
     if "lowDataMode" not in s:
-        s["lowDataMode"] = False
+        s["lowDataMode"] = (s.get("pollMode") == "slow")
     if "syncGroup" not in s:
         s["syncGroup"] = None
     return s
@@ -1232,6 +1244,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             current_revision=s["revision"],
                             now=time.time(),
                         )
+                    poll_mode = s.get("pollMode", DEFAULT_POLL_MODE)
                     payload = {
                         "screenId":    screen_id,
                         "revision":    s["revision"],
@@ -1239,7 +1252,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "pushedAt":    s["pushedAt"],
                         "mixSplash":   s["mixSplash"],
                         "audioOn":     s.get("audioOn", False),
-                        "lowDataMode": s.get("lowDataMode", False),
+                        "pollMode":    poll_mode,
+                        # lowDataMode kept in the payload for old tablets
+                        # that still read this field; new tablets read
+                        # pollMode instead.
+                        "lowDataMode": (poll_mode == "slow"),
                         "syncGroup":   sync_group_id,
                         "playback":    playback,
                         "serverNowMs": int(time.time() * 1000),
@@ -1276,7 +1293,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "currentItems":          state.get("items", []),
                         "mixSplash":             state.get("mixSplash", True),
                         "audioOn":               state.get("audioOn", False),
-                        "lowDataMode":           state.get("lowDataMode", False),
+                        "pollMode":              state.get("pollMode", DEFAULT_POLL_MODE),
+                        "lowDataMode":           state.get("pollMode", DEFAULT_POLL_MODE) == "slow",
                         "syncGroup":             state.get("syncGroup"),
                     }
                     screens.append(record)
@@ -1644,13 +1662,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         # ── Per-screen controls ──────────────────────────────────
-        # POST /api/screens/<deviceId>/command         { command: "reboot"|"clearCache"|"unregister"|"update" }
+        # POST /api/screens/<deviceId>/command         { command: "reboot"|"clearCache"|"unregister"|"update"|"refresh" }
         # POST /api/screens/<deviceId>/playlist        { items: [...], mode: "replace"|"append" }
         # POST /api/screens/<deviceId>/mix-splash      { mixSplash: bool }
         # POST /api/screens/<deviceId>/audio           { audioOn: bool }
-        # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }
+        # POST /api/screens/<deviceId>/poll-mode       { pollMode: "fast"|"normal"|"slow" }
+        # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }   (legacy — writes pollMode)
         # POST /api/screens/<deviceId>/sync-group      { syncGroup: string | null }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|low-data-mode|sync-group)$", path)
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|poll-mode|low-data-mode|sync-group)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -1664,7 +1683,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # `command` is privileged either way (reboot, unregister)
             # and stays user-only.
             is_self_edit = (
-                action in ("playlist", "mix-splash", "audio", "low-data-mode", "sync-group")
+                action in ("playlist", "mix-splash", "audio", "poll-mode", "low-data-mode", "sync-group")
                 and device_id in _screens
             )
             if not is_self_edit:
@@ -1674,7 +1693,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with _STATE_LOCK:
                 if action == "command":
                     cmd = body.get("command")
-                    if cmd not in ("reboot", "clearCache", "unregister", "update"):
+                    if cmd not in ("reboot", "clearCache", "unregister", "update", "refresh"):
                         self.send_error(400, "Unknown command"); return
                     state = _ensure_screen_state(device_id)
                     state["pendingCommands"].append({"command": cmd, "at": time.time()})
@@ -1686,6 +1705,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "clearCache": "Cleared cache on",
                         "unregister": "Unregistered",
                         "update":     "Triggered update on",
+                        "refresh":    "Forced refresh on",
                     }[cmd]
                     _log_activity(
                         kind="command",
@@ -1695,6 +1715,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             "clearCache": "trash",
                             "unregister": "close",
                             "update":     "download",
+                            "refresh":    "refresh",
                         }[cmd],
                         tone="err" if cmd == "unregister" else None,
                         target=device_id,
@@ -1788,24 +1809,45 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     )
                     self._send_json({"ok": True, "audioOn": state["audioOn"]})
                     return
-                if action == "low-data-mode":
+                if action == "poll-mode":
+                    raw = body.get("pollMode")
+                    if raw not in POLL_MODES:
+                        self.send_error(400, f"pollMode must be one of {POLL_MODES}"); return
                     state = _ensure_screen_state(device_id)
-                    state["lowDataMode"] = bool(body.get("lowDataMode", False))
+                    state["pollMode"] = raw
+                    # Keep the legacy flag in sync so older tablets reading
+                    # lowDataMode still behave correctly until they update.
+                    state["lowDataMode"] = (raw == "slow")
                     _save_per_screen()
-                    # No revision bump — like audio, this is a sideband
-                    # flag the player reads on every state poll and
-                    # applies without restarting playback.
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    pretty = {"fast": "Fast (10 s)", "normal": "Normal (60 s)", "slow": "Slow (10 min)"}[raw]
+                    _log_activity(
+                        kind="settings",
+                        text=f"Poll mode → {pretty} on {screen_name}",
+                        icon="settings",
+                        target=device_id,
+                    )
+                    self._send_json({"ok": True, "pollMode": raw})
+                    return
+                if action == "low-data-mode":
+                    # Legacy alias kept for older clients that still call
+                    # this endpoint. Maps to pollMode "slow" / "normal".
+                    state = _ensure_screen_state(device_id)
+                    legacy = bool(body.get("lowDataMode", False))
+                    state["lowDataMode"] = legacy
+                    state["pollMode"] = "slow" if legacy else DEFAULT_POLL_MODE
+                    _save_per_screen()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     _log_activity(
                         kind="settings",
                         text=(
-                            "Enabled low data mode on " if state["lowDataMode"]
+                            "Enabled low data mode on " if legacy
                             else "Disabled low data mode on "
                         ) + screen_name,
                         icon="settings",
                         target=device_id,
                     )
-                    self._send_json({"ok": True, "lowDataMode": state["lowDataMode"]})
+                    self._send_json({"ok": True, "lowDataMode": legacy, "pollMode": state["pollMode"]})
                     return
                 if action == "sync-group":
                     # Empty string or null clears the group; otherwise the

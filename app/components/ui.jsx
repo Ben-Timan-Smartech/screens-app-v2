@@ -388,17 +388,19 @@ const setScreenAudio = async (deviceId, audioOn) => {
   return res.json();
 };
 
-// setScreenLowDataMode — POST /api/screens/<id>/low-data-mode. When on,
-// the tablet polls every 60s instead of every 3s and skips the
-// per-location splash download. Cached videos already on disk are
-// unaffected.
-const setScreenLowDataMode = async (deviceId, lowDataMode) => {
-  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/low-data-mode`, {
+// setScreenPollMode — POST /api/screens/<id>/poll-mode. Three cadences:
+//   fast   → 10 s   (install / debugging)
+//   normal → 60 s   (default — the new sane baseline)
+//   slow   → 10 min (cellular / metered; also skips per-location splash)
+// Replaces the old setScreenLowDataMode binary toggle. Cached videos
+// already on disk are unaffected by mode changes.
+const setScreenPollMode = async (deviceId, pollMode) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/poll-mode`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ lowDataMode }),
+    body: JSON.stringify({ pollMode }),
   });
-  if (!res.ok) throw new Error(`low-data-mode failed: ${res.status}`);
+  if (!res.ok) throw new Error(`poll-mode failed: ${res.status}`);
   return res.json();
 };
 
@@ -1126,6 +1128,6 @@ Object.assign(window, {
   Sidebar, SidebarItem, PageHeader, AppShell, Card, StatCard,
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenAudio, setScreenLowDataMode, setScreenSyncGroup, setVideoDefaultUnmute,
+  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setVideoDefaultUnmute,
   setScreenPlaylist, PushPicker,
 });

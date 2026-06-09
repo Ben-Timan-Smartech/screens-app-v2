@@ -247,10 +247,16 @@ class PlayerRepository(
         /** Screen-wide audio override. Default false = muted. When true,
          *  every video plays unmuted regardless of its own defaultUnmute. */
         val audioOn: Boolean = false,
-        /** When true, the tablet slows its poll cadence and skips the
-         *  remote splash download. See [LOW_DATA_POLL_MS] /
-         *  [DEFAULT_POLL_MS]. */
-        val lowDataMode: Boolean = false,
+        /** "fast" | "normal" | "slow" — drives the polling interval.
+         *  Defaults to "normal" so tablets running against an older
+         *  server that doesn't return this field still poll at a sane
+         *  60-second cadence. */
+        val pollMode: String = "normal",
+        /** Legacy boolean kept so an older server that still emits
+         *  `lowDataMode` rather than `pollMode` doesn't accidentally
+         *  put the tablet into fast mode. Only read when [pollMode]
+         *  is absent — see [PollMode.parse]. */
+        val lowDataMode: Boolean? = null,
         /** Optional sync-group ID. When set, the server returns a
          *  [playback] block telling this tablet exactly where in the
          *  loop it should be — so every screen in the group stays
@@ -311,14 +317,29 @@ class PlayerRepository(
     val audioOn: Boolean get() = _audioOn.value
     val mixSplash: Boolean get() = _mixSplash.value
 
-    /** Low-data mode. When true the tablet polls /api/state every
-     *  [LOW_DATA_POLL_MS] (60s) instead of [DEFAULT_POLL_MS] (3s) and
-     *  skips the remote per-location splash download (falling back to
-     *  the APK-bundled splash). Cached videos already on disk are
-     *  unaffected — once a clip is downloaded it never re-fetches. */
-    private val _lowDataMode = MutableStateFlow(false)
-    val lowDataModeFlow: StateFlow<Boolean> = _lowDataMode
-    val lowDataMode: Boolean get() = _lowDataMode.value
+    /** Poll cadence the server has assigned to this screen. The polling
+     *  loop reads this on every tick. SLOW also skips the per-location
+     *  splash download to save data. Cached videos are unaffected. */
+    enum class PollMode(val intervalMs: Long, val wire: String) {
+        FAST(10_000L, "fast"),
+        NORMAL(60_000L, "normal"),
+        SLOW(600_000L, "slow");
+
+        companion object {
+            fun parse(wire: String?, legacyLowDataMode: Boolean?): PollMode {
+                if (wire != null) {
+                    values().firstOrNull { it.wire.equals(wire, ignoreCase = true) }
+                        ?.let { return it }
+                }
+                // Pre-pollMode server response — derive from the boolean.
+                return if (legacyLowDataMode == true) SLOW else NORMAL
+            }
+        }
+    }
+
+    private val _pollMode = MutableStateFlow(PollMode.NORMAL)
+    val pollModeFlow: StateFlow<PollMode> = _pollMode
+    val pollMode: PollMode get() = _pollMode.value
 
     /** Latest sync-group ID for the staff UI to surface. Null = not
      *  in a group, so no sync corrections are applied. */
@@ -436,11 +457,14 @@ class PlayerRepository(
             LogBuffer.i(TAG, "Audio → ${if (state.audioOn) "on" else "off"}")
         }
 
-        // Low data mode flag. The polling loop reads this on every tick
-        // and stretches the sleep interval when it's on; no re-publish.
-        if (state.lowDataMode != _lowDataMode.value) {
-            _lowDataMode.value = state.lowDataMode
-            LogBuffer.i(TAG, "Low data mode → ${if (state.lowDataMode) "on" else "off"}")
+        // Poll mode. The polling loop reads this on every tick to pick
+        // the sleep interval; SLOW also skips the per-location splash
+        // download below. No re-publish — the change picks up on the
+        // next tick.
+        val nextPollMode = PollMode.parse(state.pollMode, state.lowDataMode)
+        if (nextPollMode != _pollMode.value) {
+            _pollMode.value = nextPollMode
+            LogBuffer.i(TAG, "Poll mode → ${nextPollMode.wire} (${nextPollMode.intervalMs / 1000}s)")
         }
 
         // Sync group ID. Surface to the staff UI so admins can confirm
@@ -478,10 +502,11 @@ class PlayerRepository(
         }
 
         // Per-location splash. Download (or clear) when the URL changes.
-        // Skipped entirely in low-data mode — the per-location splash is
-        // ~70MB for the Smartech 4K asset; the APK-bundled splash is
-        // shown instead.
-        if (!state.lowDataMode) {
+        // Skipped in SLOW poll mode — the per-location splash is ~70 MB
+        // for the Smartech 4K asset; the APK-bundled splash is shown
+        // instead so a cellular / metered install doesn't burn data on
+        // it. FAST and NORMAL fetch as usual.
+        if (_pollMode.value != PollMode.SLOW) {
             ensureRemoteSplash(base, state.splashUrl)
         }
 
@@ -489,9 +514,10 @@ class PlayerRepository(
         // drained them in the GET response so we won't see them twice.
         for (cmd in state.commands) executeCommand(cmd.command)
 
-        // No change to playlist? Still fire a heartbeat and return.
+        // No change to playlist? Bail — heartbeats are handled by the
+        // dedicated [startHeartbeatLoop] coroutine, no need to fire one
+        // from here.
         if (state.revision == lastLiveRevision && _state.value is State.Playing) {
-            sendHeartbeat(base, state.revision)
             return
         }
 
@@ -538,7 +564,6 @@ class PlayerRepository(
                     _intendedPlaylist.value = cached.items
                 }
             }
-            sendHeartbeat(base, state.revision)
             return
         }
 
@@ -602,7 +627,8 @@ class PlayerRepository(
         lastPlaylist = playlist
         publish(playlist)
         lastLiveRevision = state.revision
-        sendHeartbeat(base, state.revision)
+        // Heartbeats fire on their own 10 s loop (startHeartbeatLoop);
+        // no need to piggy-back one here.
     }
 
     // ── Tablet → server: staff overlay actions ──────────────────────────
@@ -723,35 +749,53 @@ class PlayerRepository(
         }
     }
 
-    /** Flip the low-data-mode flag on the server. Tablet picks the new
-     *  value back up on the next state poll; the optimistic local
-     *  update means the staff toggle reflects the new state instantly
-     *  (and the next polling tick uses the new cadence). */
-    suspend fun setLowDataModeOnServer(value: Boolean) {
-        LogBuffer.i(TAG, "setLowDataModeOnServer → $value")
-        _lowDataMode.value = value
+    /** Set this screen's poll cadence on the server. Optimistic local
+     *  update means the next tick already uses the new interval; the
+     *  POST also persists the choice so it survives a reboot. */
+    suspend fun setPollModeOnServer(mode: PollMode) {
+        LogBuffer.i(TAG, "setPollModeOnServer → ${mode.wire}")
+        _pollMode.value = mode
 
         val base = store.liveServerUrl.first()?.trimEnd('/')
         if (base.isNullOrBlank()) {
-            LogBuffer.w(TAG, "setLowDataModeOnServer skipped — no liveServerUrl set")
+            LogBuffer.w(TAG, "setPollModeOnServer skipped — no liveServerUrl set")
             return
         }
         val deviceId = store.ensureDeviceId()
-        val body = """{"lowDataMode":$value}"""
+        val body = """{"pollMode":${q(mode.wire)}}"""
         kotlinx.coroutines.withContext(Dispatchers.IO) {
             runCatching {
                 val req = Request.Builder()
-                    .url("$base/api/screens/${urlEncode(deviceId)}/low-data-mode")
+                    .url("$base/api/screens/${urlEncode(deviceId)}/poll-mode")
                     .post(body.toRequestBody("application/json".toMediaType()))
                     .build()
                 httpClient.newCall(req).execute().use { r ->
-                    if (!r.isSuccessful) LogBuffer.w(TAG, "setLowDataModeOnServer HTTP ${r.code}")
-                    else LogBuffer.i(TAG, "setLowDataModeOnServer OK")
+                    if (!r.isSuccessful) LogBuffer.w(TAG, "setPollModeOnServer HTTP ${r.code}")
+                    else LogBuffer.i(TAG, "setPollModeOnServer OK")
                 }
                 lastLiveRevision = -1
             }.onFailure {
-                LogBuffer.w(TAG, "setLowDataModeOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
+                LogBuffer.w(TAG, "setPollModeOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
+        }
+    }
+
+    /** Trigger an immediate playlist refresh from any UI surface
+     *  (staff overlay's "Refresh now" button or the CMS-side refresh
+     *  command). Fires off the live polling loop's queue so it doesn't
+     *  wait for the next sleep tick — useful when the tablet is in
+     *  Slow mode (10 min between regular polls) and someone wants to
+     *  see their push land right now. */
+    fun refreshNow() {
+        LogBuffer.i(TAG, "refreshNow() requested")
+        liveScope.launch {
+            // Reset revision so the response is treated as new even
+            // when the server returns the same one — useful for the
+            // CMS-side "Refresh now" command flow where the change may
+            // already have landed in a previous poll.
+            lastLiveRevision = -1
+            runCatching { refreshPlaylist() }
+                .onFailure { LogBuffer.w(TAG, "refreshNow() tick failed: ${it.message}") }
         }
     }
 
@@ -917,6 +961,16 @@ class PlayerRepository(
                 updater?.checkAndUpdate(surfaceFailures = true)
                     ?: LogBuffer.w(TAG, "Updater not wired — ignoring command")
             }
+            "refresh" -> {
+                // CMS pressed "Refresh now" — the latest /api/state we
+                // just received already contained any newly-pushed
+                // playlist, so the bulk of the work is already done.
+                // Still call refreshNow() to be defensive: it resets
+                // the last-known revision so any change we somehow
+                // missed gets re-applied on the very next tick.
+                LogBuffer.i(TAG, "Refresh command — kicking next poll")
+                refreshNow()
+            }
             else -> LogBuffer.w(TAG, "Unknown command: $command")
         }
     }
@@ -1011,10 +1065,14 @@ class PlayerRepository(
 
     /**
      * Continuous polling loop. Started once from [com.smartech.screens.ScreensApp].
-     * Sleep cadence flips dynamically based on [lowDataMode] — see
-     * [DEFAULT_POLL_MS] / [LOW_DATA_POLL_MS]. Library refresh cadence
-     * scales with the poll interval so a low-data tablet still re-checks
-     * the library roughly every 5 minutes.
+     * Sleep cadence reads from [pollMode] on every tick — values are
+     * 10 s (FAST) / 60 s (NORMAL, default) / 600 s (SLOW). Library
+     * refresh cadence scales with the poll interval so wall-clock
+     * cadence stays roughly constant.
+     *
+     * The heartbeat is NOT fired from this loop — see
+     * [startHeartbeatLoop] for that, decoupled so a long download
+     * doesn't make the CMS think the screen has gone offline.
      */
     fun startLiveSync() {
         liveScope.launch {
@@ -1033,15 +1091,38 @@ class PlayerRepository(
                     .onFailure { LogBuffer.w(TAG, "Live tick failed: ${it.message}") }
 
                 // Library refresh once every ~5 minutes of wall-clock,
-                // independent of the polling cadence. With a 3s tick
-                // that's every 100 ticks; with a 60s tick that's every 5.
+                // independent of the polling cadence. With a 10 s tick
+                // that's every 30 ticks; with a 60 s tick every 5;
+                // with a 600 s tick every 1.
                 libraryRefreshTickCounter++
-                val effectiveInterval = if (_lowDataMode.value) LOW_DATA_POLL_MS else DEFAULT_POLL_MS
+                val effectiveInterval = _pollMode.value.intervalMs
                 val libraryEvery = (5L * 60_000L / effectiveInterval).coerceAtLeast(1).toInt()
                 if (libraryRefreshTickCounter % libraryEvery == 1) {
                     runCatching { remoteLibrary.refresh(store.liveServerUrl.first()) }
                 }
                 delay(effectiveInterval)
+            }
+        }
+    }
+
+    /**
+     * Heartbeat loop — decoupled from [startLiveSync] so a long
+     * download in [refreshLivePlaylist] doesn't block the heartbeat
+     * and flip the screen to "offline" in the CMS. Fires every
+     * [HEARTBEAT_INTERVAL_MS] regardless of poll mode.
+     */
+    fun startHeartbeatLoop() {
+        liveScope.launch {
+            // Same warmup as the playlist loop — give first-launch
+            // registration a moment to land.
+            delay(2_000L)
+            while (true) {
+                val base = store.liveServerUrl.first()?.trimEnd('/')
+                if (!base.isNullOrBlank()) {
+                    runCatching { sendHeartbeat(base, lastLiveRevision) }
+                        .onFailure { LogBuffer.w(TAG, "Heartbeat tick failed: ${it.message}") }
+                }
+                delay(HEARTBEAT_INTERVAL_MS)
             }
         }
     }
@@ -1095,14 +1176,11 @@ class PlayerRepository(
     companion object {
         private const val TAG = "PlayerRepository"
 
-        /** Default live-state poll interval. The whole live workflow
-         *  (revision pickup, command delivery, audio + splash toggles)
-         *  hinges on this; ~3 s gives the CMS near-real-time control. */
-        private const val DEFAULT_POLL_MS = 3_000L
-
-        /** Slow poll cadence when low-data mode is on. One minute trades
-         *  near-real-time CMS responsiveness for ~95% less idle traffic. */
-        private const val LOW_DATA_POLL_MS = 60_000L
+        /** Heartbeat fires on its own coroutine independent of the
+         *  playlist-refresh loop, so the CMS can see the screen as
+         *  online even mid-download. 10 s is well under the server's
+         *  15 s "online" window. */
+        private const val HEARTBEAT_INTERVAL_MS = 10_000L
     }
 }
 

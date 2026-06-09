@@ -100,10 +100,17 @@ class ScreensApp : Application() {
                 .onFailure { Log.w("ScreensApp", "Playlist rehydrate failed", it) }
         }
 
-        // Live LAN demo: continuously poll /api/state and fire heartbeats.
+        // Live LAN demo: continuously poll /api/state.
         // No-op when no liveServerUrl is configured — the loop just calls
         // refreshPlaylist which falls through to demo mode.
         repository.startLiveSync()
+
+        // Heartbeat fires on its own 10 s coroutine, decoupled from the
+        // playlist refresh — so a long download (or 10-min Slow-mode
+        // polling) doesn't make the CMS think the screen has gone
+        // offline. Started after startLiveSync so registration lands
+        // before the first heartbeat.
+        repository.startHeartbeatLoop()
 
         // Kick off registration + first playlist fetch off the main thread.
         scope.launch {
