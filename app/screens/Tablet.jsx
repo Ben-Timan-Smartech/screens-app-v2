@@ -282,7 +282,7 @@ const TabletSuccess = ({ video, brand }) => (
       </div>
       <div style={{ textAlign: 'center' }}>
         <div style={{ fontSize: 30, fontWeight: 500, color: 'var(--ink-1)', letterSpacing: -0.5, marginBottom: 8 }}>Now playing</div>
-        <div style={{ fontSize: 18, color: 'var(--ink-3)' }}>{video?.title || 'Arc Ultra \u2014 hero reveal'}</div>
+        <div style={{ fontSize: 18, color: 'var(--ink-3)' }}>{video?.title || ''}</div>
       </div>
       <div style={{ width: 440, aspectRatio: '16/9', borderRadius: 14, overflow: 'hidden' }}>
         <Thumbnail title={video?.title || ''} brand={video?.brand || brand?.name || ''} />

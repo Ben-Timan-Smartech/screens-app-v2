@@ -18,6 +18,37 @@ Rules:
 
 ---
 
+## v0.1.10
+
+Cleanup pass. Removes the staging copy that survived earlier
+sweeps and fixes a layout flash when navigating between pages.
+
+- **"Good morning, Alex"** is gone. The greeting now uses the
+  signed-in user's actual first name from `/api/auth/me`, plus a
+  time-of-day adjective based on the local clock. Falls back to
+  "Good morning, there" when auth is still loading.
+- **Empty-state flash on Dashboard / Screens list** fixed. The
+  `useLiveScreens` hook now caches its last good response at the
+  module level so re-mounting a page (or navigating between them)
+  shows the previous state instantly while the next poll runs.
+  Pages also distinguish "loading" from "actually empty" via a
+  new `loading` flag, so a fresh load shows "Checking screens…"
+  rather than "No screens registered yet" until the first fetch
+  lands.
+- **Hardcoded "2 regions"** removed from Dashboard stat band and
+  Screens list subtitle. Region count is now computed from the
+  actual taxonomy values present in the registered fleet
+  (suppressed entirely when zero).
+- **Hardcoded "1,284 videos total"** in Settings → Brands replaced
+  with the live `MOCK_VIDEOS.length`.
+- **Schedules preview** copy de-branded: "Razr 50 / Saks Fifth
+  Avenue / 84 screens across 6 stores in UK/EU" replaced with
+  generic placeholder text since the page is gated behind a
+  "Coming soon" banner anyway.
+- **Tablet preview** success-screen fallback "Arc Ultra — hero
+  reveal" reduced to an empty string. (Only fired in the
+  no-video-picked path, which never normally fires.)
+
 ## v0.1.9
 
 Whole release focused on the CMS being usable from any screen size — phone,

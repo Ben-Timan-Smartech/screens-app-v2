@@ -142,9 +142,26 @@ const ToastHost = () => {
 // useLiveScreens — polls /api/screens every 3s and exposes the
 // list of registered tablets and the current revision. Drives the
 // "demo screen comes online" beat across the dashboard + screens views.
+//
+// Module-level cache (`__liveScreensCache`) holds the last successful
+// response so a re-mount on navigation gets it back instantly. Without
+// this, every page hop briefly shows "no screens registered" between
+// "component mounted" and "first fetch returned" — typically a few
+// hundred ms but enough to feel broken. The `loading` flag stays
+// `true` until the *first* successful fetch on this page lands; pages
+// distinguish "loading" from "actually empty" via this flag.
 // ─────────────────────────────────────────────────────────────
+let __liveScreensCache = null;   // {screens, revision, items, fetchedAt}
+
 const useLiveScreens = () => {
-  const [data, setData] = React.useState({ screens: [], revision: 0 });
+  const [data, setData] = React.useState(() =>
+    // Re-mount fast path: render with whatever the last successful
+    // poll produced, even if it's a few seconds stale. The next poll
+    // tick (below) refreshes it almost immediately.
+    __liveScreensCache
+      ? { ...__liveScreensCache, loading: false }
+      : { screens: [], revision: 0, items: [], loading: true }
+  );
   React.useEffect(() => {
     let cancelled = false;
     const tick = async () => {
@@ -153,9 +170,16 @@ const useLiveScreens = () => {
         const body = await res.json();
         const stateRes = await fetch('/api/state', { cache: 'no-store' });
         const stateBody = await stateRes.json();
-        if (!cancelled) setData({ screens: body.screens || [], revision: stateBody.revision || 0, items: stateBody.items || [] });
+        if (cancelled) return;
+        const fresh = {
+          screens: body.screens || [],
+          revision: stateBody.revision || 0,
+          items: stateBody.items || [],
+        };
+        __liveScreensCache = { ...fresh, fetchedAt: Date.now() };
+        setData({ ...fresh, loading: false });
       } catch (_) {
-        if (!cancelled) setData((d) => d);  // keep last
+        if (!cancelled) setData((d) => ({ ...d, loading: false }));  // keep last
       }
     };
     tick();
