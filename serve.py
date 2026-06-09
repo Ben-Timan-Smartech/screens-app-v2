@@ -472,19 +472,36 @@ def _group_loop_epoch(items: list, group_id: str, current_revision: int, now: fl
     nothing more. The tablet computes "which item am I on?" locally
     using this epoch + the item durations it already has.
 
-    Resets `loopStartedAt` to `now + COORDINATED_START_DELAY_SEC`
-    whenever the playlist revision moves forward — see the constant's
-    docstring for why we anchor in the near future rather than now.
+    Lazily initialises the group record on first sight (loop anchored
+    to `now` so the group starts immediately, no pause).
+
+    **Does NOT reset the epoch based on `current_revision` changes.**
+    Different members of the same group can carry different revision
+    counters (the fan-out endpoint INCREMENTS each member rather than
+    syncing them to a shared value, so two screens that joined the
+    group at different times stay out of step forever). The old
+    revision-based reset interpreted that as "the playlist just
+    changed" on every poll and re-anchored the epoch to the future,
+    so each tablet hit the coordinated-start pause on its own poll
+    cadence — visible as both screens pausing at slightly different
+    moments. Resets now happen explicitly via [_reset_group_loop_epoch]
+    from the playlist push endpoint, which is the actual "the content
+    for this group changed" signal.
+
     Caller must hold _STATE_LOCK."""
     if not items:
         return None
     group = _sync_groups.get(group_id)
-    if group is None or group.get("lastRevision") != current_revision:
-        # First time we've seen this group, or the playlist just changed
-        # underneath it — schedule a coordinated start so every screen
-        # in the group starts on item 0 at the same wall-clock instant.
+    if group is None:
+        # First time we've seen this group at all — start the loop
+        # running from `now`. No coordinated-start delay: this branch
+        # fires on lazy initialisation (e.g. first poll after a Cloud
+        # Run cold start re-read state from disk and the group record
+        # didn't make it through), not on a real content change.
+        # Anchoring in the future here would cause an unnecessary
+        # pause for tablets that have already been playing the loop.
         group = {
-            "loopStartedAt": now + COORDINATED_START_DELAY_SEC,
+            "loopStartedAt": now,
             "lastRevision": current_revision,
         }
         _sync_groups[group_id] = group
@@ -493,6 +510,23 @@ def _group_loop_epoch(items: list, group_id: str, current_revision: int, now: fl
         "groupId":          group_id,
         "loopStartedAtMs":  int(float(group["loopStartedAt"]) * 1000),
     }
+
+
+def _reset_group_loop_epoch(group_id: str, now: float) -> None:
+    """Anchor the group's loop epoch at `now + COORDINATED_START_DELAY_SEC`
+    so every member's tablet does the coordinated-start pause-and-resume
+    dance. Called from the playlist push endpoint when the content
+    for the group changes — the only legitimate trigger for a reset.
+
+    Caller must hold _STATE_LOCK."""
+    _sync_groups[group_id] = {
+        "loopStartedAt": now + COORDINATED_START_DELAY_SEC,
+        # lastRevision kept for back-compat with on-disk records but
+        # no longer used by the lookup path. Stored as 0 to make it
+        # obvious in the JSON that revision tracking is dead code.
+        "lastRevision": 0,
+    }
+    _save_sync_groups()
 
 
 def _compute_playback(items: list, group_id: str, current_revision: int, now: float) -> dict | None:
@@ -1919,6 +1953,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             st["items"] = list(items)
                         st["revision"] += 1
                         st["pushedAt"] = time.time()
+                    # v0.1.16: when this push hits a sync group, anchor
+                    # the loop epoch at now + COORDINATED_START_DELAY_SEC
+                    # so every member's tablet does the coordinated-
+                    # start pause-and-resume dance on the next poll.
+                    # This is the ONLY legitimate trigger for a reset —
+                    # _group_loop_epoch no longer ping-pongs the epoch
+                    # based on per-screen revision counters that
+                    # naturally diverge across group members.
+                    if group_id:
+                        _reset_group_loop_epoch(group_id, time.time())
                     _save_per_screen()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     verb = "Replaced playlist on" if mode == "replace" else "Added to"

@@ -18,6 +18,38 @@ Rules:
 
 ---
 
+## v0.1.16
+
+Hotfix for v0.1.15.
+
+### Coordinated-start fired on every poll instead of just pushes
+
+v0.1.15's `_group_loop_epoch` reset the loop anchor whenever the
+current screen's revision didn't match the last revision recorded
+on the group. The intent was "the playlist changed — start fresh."
+The bug: the playlist-push fan-out increments each group member's
+revision counter independently rather than syncing them to a
+shared value, so two screens that joined the group at different
+times stay out of step on their revision counters forever. Every
+poll from screen A bumped the group's recorded `lastRevision` to
+A's value; the next poll from screen B saw a mismatch and reset
+the epoch to `now + 5 s`; the next poll from A saw the mismatch
+flipped back, reset again. Each tablet hit the coordinated-start
+pause on its own poll cadence — visible as both screens pausing
+at staggered moments, exactly as reported.
+
+Fix moves the reset into the playlist-push endpoint where it
+actually belongs. `_group_loop_epoch` now only initialises a fresh
+record on first sight of a group (anchored to `now`, no pause),
+and the explicit `_reset_group_loop_epoch` call from the playlist
+endpoint anchors at `now + COORDINATED_START_DELAY_SEC` so every
+member's tablet pauses-and-resumes together on a real content
+change.
+
+Server-only change. Tablets running v0.1.13–v0.1.15 pick up the
+fix the moment Cloud Run finishes redeploying — no APK update
+required.
+
 ## v0.1.15
 
 Two new ways to make sync trustworthy, plus a long-standing
