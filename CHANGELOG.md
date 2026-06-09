@@ -18,6 +18,48 @@ Rules:
 
 ---
 
+## v0.1.18
+
+Hotfix for v0.1.17. Videos were getting cut short on the way to the
+next item — visible as "the video isn't playing fully."
+
+### Why
+
+v0.1.17's drift-correction nudged playback speed to 1.03× when a
+tablet was behind, which over a 15 s item finished it ~440 ms
+before the natural duration. When ExoPlayer transitioned early into
+the next item, the math said "you should still be at the end of
+the previous item" and `snapToGroupExpectedItem` seeked backward
+to replay the tail. User-visible result: the last fraction of
+each video looped weirdly before the next one started, or the
+video appeared to skip its ending.
+
+### Fix
+
+Three changes, each contributing:
+
+1. **Gentler rate-control range.** The nudge is now ±1% instead of
+   ±3%. A 15 s item at 1.01× finishes ~150 ms early — well under
+   the boundary-guard tolerance below, so transitions stay clean.
+   Catching up a 300 ms drift takes ~30 s instead of ~10 s, which
+   is fine: drift never grows fast enough for this to matter.
+
+2. **Skip rate adjustment near boundaries.** No nudging in the last
+   1.5 s of an item or the first 500 ms after a transition. The
+   late zone protects against early-finish overshoot; the early
+   zone protects against noisy `currentPosition` reads while
+   `seekTo` is still settling the decoder.
+
+3. **Never snap backward across an item boundary.** The on-transition
+   snap (`snapToGroupExpectedItem`) and the in-item drift seek now
+   both refuse to seek to a *previous* item. If wall-clock thinks
+   we should still be on the prior video but we've already
+   naturally transitioned, we wait for wall-clock to catch up
+   rather than replay the tail. Force-mode (epoch re-anchor) still
+   overrides this — that path is explicitly meant to jump anywhere.
+
+Tablet-only change. Server is unchanged.
+
 ## v0.1.17
 
 The piece the previous sync releases left on the table: closing the
