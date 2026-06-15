@@ -8,6 +8,7 @@ import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.data.VideoCache
 import com.smartech.screens.sync.HeartbeatWorker
 import com.smartech.screens.update.Updater
+import com.smartech.screens.util.CrashReporter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,6 +33,18 @@ class ScreensApp : Application() {
     override fun onCreate() {
         super.onCreate()
         store = DeviceStore(this)
+
+        // v0.1.21: install the uncaught-exception handler as early as
+        // possible — before anything else can crash. Captures the
+        // stack + last 40 log lines into <filesDir>/crashes/. The
+        // PlayerRepository.drainCrashesIfPending() call below ships
+        // them to /api/crashes on the next launch so we can read
+        // them in the CMS or via curl before pushing a fix.
+        CrashReporter.install(
+            context = this,
+            deviceIdProvider = { runCatching { store.deviceIdBlocking() }.getOrNull() },
+            screenCodeProvider = { runCatching { store.locScreenCodeBlocking() }.getOrNull() },
+        )
         val client = ApiClient(tokenProvider = { store.tokenBlocking() })
         val cache = VideoCache(this, client.http)
         repository = PlayerRepository(this, store, client.api, cache, client.http)
@@ -119,6 +132,15 @@ class ScreensApp : Application() {
                 repository.refreshSettings()
                 repository.refreshPlaylist()
             }.onFailure { Log.e("ScreensApp", "Initial sync failed", it) }
+        }
+
+        // v0.1.21: ship any pending crash reports left over from the
+        // previous launch. Runs on its own coroutine so a slow upload
+        // can't delay startup; idempotent — drainTo() is a no-op when
+        // no files are spooled.
+        scope.launch {
+            runCatching { repository.drainCrashesIfPending() }
+                .onFailure { Log.w("ScreensApp", "Crash drain failed", it) }
         }
     }
 }
