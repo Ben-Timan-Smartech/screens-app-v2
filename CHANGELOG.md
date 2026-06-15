@@ -18,6 +18,82 @@ Rules:
 
 ---
 
+## v0.1.27
+
+Slash-key command palette in the CMS. Press `/` (or Cmd/Ctrl-K)
+from any page, get a Linear/Vercel-style modal with filterable
+commands, argument autocomplete, and an inline help panel.
+
+### How it works
+
+- **Open** — `/` or Cmd/Ctrl-K. Suppressed while focus is in
+  another text input so typing `/foo` into a search box doesn't
+  pop the palette.
+- **Filter** — type into the search input. Word-AND matching across
+  label, hint, description, and keywords ("open scr" → "Open a
+  screen", no need for a contiguous substring).
+- **Navigate** — ↑ / ↓ arrow keys, hover with mouse, or just keep
+  typing to narrow.
+- **Execute** — ↵. For commands that need an argument the modal
+  switches into a second stage; for everything else it runs and
+  closes.
+- **Dismiss** — Esc, or click the dark scrim outside the panel.
+
+### Argument autocomplete (the second stage)
+
+Some commands need a target — which screen to refresh, which sync
+group to calibrate, which video to open. Pressing ↵ on those moves
+the palette into a second stage that lists live options pulled from
+`/api/screens` or the in-memory library:
+
+- **Open a screen…** → fleet list, filterable by name / store /
+  screen code.
+- **Refresh a screen now…** → same, runs the `refresh` command
+  on the picked deviceId.
+- **Update player APK on a screen…** → same, triggers the in-app
+  updater.
+- **Reboot a screen…** → same, fires the `reboot` command.
+- **Calibrate a sync group…** → lists current sync groups with
+  member counts; running it fires the 60-second calibration
+  overlay on every member.
+- **Open a video…** → library entries, filterable by brand /
+  product / title; opens the preview modal.
+
+Backspace at empty input backs from the arg stage to the command
+stage so you can recover from a wrong pick without re-opening.
+
+### Inline help panel
+
+The bottom of the modal shows the highlighted command's full
+description plus what it needs:
+
+> **Calibrate a sync group…**
+> Puts every screen in the chosen sync group into calibration
+> mode for 60 s…
+>
+> **Needs:** a sync group — you'll pick after pressing ↵.
+
+So you know what a command does and what target it'll act on
+**before** you commit. The "needs <type>" tag on each row in the
+list is a quick at-a-glance signal that the command is a
+two-stage one.
+
+### Permissions-gated
+
+Commands are filtered against the signed-in user's permissions
+matrix (same `can()` helper the sidebar uses). A Viewer doesn't
+see destructive actions like Reboot, Update APK, or Calibrate.
+
+### Out of scope
+
+CMS-only release. Tablets unaffected. Action listeners on the
+target screens (e.g. Settings → run Drive Sync) are still
+event-based — most commands navigate + dispatch; the receiving
+screen needs to listen for the dispatched event to do its part.
+Upload-panel + library-refresh listeners are wired in this
+release; Settings hooks for Drive Sync trigger remain a small
+follow-up.
+
 ## v0.1.26
 
 "On a cold start there is no video playing but there is something

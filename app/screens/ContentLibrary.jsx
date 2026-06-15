@@ -812,6 +812,16 @@ const ContentLibrary = () => {
   const [activeBrand, setActiveBrand] = React.useState('all');
   const [selected, setSelected] = React.useState(new Set());
   const [uploadOpen, setUploadOpen] = React.useState(false);
+  // v0.1.27: command palette can fire `open-upload-panel` to pop
+  // the panel from anywhere — registered here because the panel
+  // state lives in this component. Listener only attaches while
+  // the library page is mounted, so dispatching from another
+  // page after the palette navigates here works.
+  React.useEffect(() => {
+    const open = () => setUploadOpen(true);
+    window.addEventListener('open-upload-panel', open);
+    return () => window.removeEventListener('open-upload-panel', open);
+  }, []);
   const [previewVideo, setPreviewVideo] = React.useState(null);
   const [pushPickerOpen, setPushPickerOpen] = React.useState(false);
   // Brand sidebar search + grid/list view toggle + pagination.
