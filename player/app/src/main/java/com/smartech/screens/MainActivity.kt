@@ -334,6 +334,17 @@ class MainActivity : ComponentActivity() {
          * BUTTON_A; air mice + Bluetooth keyboards send ENTER /
          * NUMPAD_ENTER. KEYCODE_BUTTON_SELECT is included because a few
          * generic gamepad-style remotes use it for the centre key.
+         *
+         * Keyboard support: a USB keyboard's Enter / NumpadEnter is
+         * already in this list, so plugging a keyboard into a generic
+         * Android media box (Sumvision Cyclone, no-name TV stick,
+         * etc.) lets the operator hold Enter to unlock the staff
+         * overlay. Space is intentionally NOT included — Enter is the
+         * standard "OK" key on a keyboard and giving two keys for the
+         * same gesture invites accidental unlocks. Arrow keys +
+         * tabbing inside the overlay are handled by Compose's default
+         * focus traversal; the amber `TvFocusIndication` ring follows
+         * focus regardless of input device.
          */
         fun isOkLikeKey(k: Int): Boolean = when (k) {
             KeyEvent.KEYCODE_DPAD_CENTER,

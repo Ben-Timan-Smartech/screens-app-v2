@@ -18,6 +18,50 @@ Rules:
 
 ---
 
+## v0.1.19
+
+Three small fixes off the back of an event-day install on a
+Sumvision Cyclone.
+
+### Admin panel hydrates from cached playlist on cold boot
+
+The player has rehydrated `lastPlaylist` from disk on launch since
+v0.1.5 — so a cold boot offline still loops the last-known content
+instead of dropping to splash. But the staff overlay's playlist
+view read from a separate `intendedPlaylist` flow (the "what the
+server says SHOULD be on this screen" signal), and that flow was
+only populated by live polls. After a cold boot with no network,
+the screen looped the right content but the admin showed "No
+videos in the playlist" until the operator hit Refresh. v0.1.19
+makes `rehydrateFromCache` populate `intendedPlaylist` from the
+restored playlist too, so what you see on screen and what you see
+in the admin always agree.
+
+### Staff overlay contrast
+
+Secondary text (timestamps, sub-labels, log entries) used a
+mid-grey (#6E6B62) that read at ~5:1 against the Bone background
+— passes WCAG AA but felt washed out on cheap HDMI displays viewed
+from across a room. Dropped to #3A3832 (~11:1, comfortably AAA)
+and bumped border colour from #E2DED3 to #B8B1A0 so card edges
+read on TVs with poor colour reproduction. Primary text (Ink) is
+unchanged so the secondary-vs-primary hierarchy still holds.
+
+### Keyboard support — Enter, not Space
+
+A USB keyboard plugged into a generic Android media box can now
+unlock the staff overlay via **hold Enter (or NumpadEnter) for
+~1.5 seconds** — same gesture as the TV-remote hold-OK. Enter was
+already in the OK-like keycode list since v0.1.0; v0.1.19 adds
+the explicit comment that this is the supported path. Space is
+intentionally *not* a second unlock key — Enter is the standard
+"OK" on a keyboard, and giving two keys for the same gesture
+invites accidental unlocks. Once inside the overlay, arrow keys
+and Tab navigate via Compose's default focus traversal; the amber
+`TvFocusIndication` ring follows focus regardless of input device.
+
+Tablet-only release.
+
 ## v0.1.18
 
 Hotfix for v0.1.17. Videos were getting cut short on the way to the
