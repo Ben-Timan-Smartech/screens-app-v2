@@ -33,6 +33,8 @@ fun PlayerScreen(
     val groupSync by repository.groupSyncFlow.collectAsState()
     val calibrateUntilMs by repository.calibrateUntilMsFlow.collectAsState()
     val serverOffsetMs by repository.serverOffsetMsFlow.collectAsState()
+    val intendedPlaylist by repository.intendedPlaylist.collectAsState()
+    val downloads by repository.downloads.collectAsState()
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
@@ -101,6 +103,21 @@ fun PlayerScreen(
         CalibrationOverlay(
             calibrateUntilMs = calibrateUntilMs,
             serverOffsetMs = serverOffsetMs,
+        )
+
+        // v0.1.26: cold-start loading overlay. When the server has
+        // pushed content (intendedPlaylist is non-empty) but the
+        // local cache hasn't caught up yet (state isn't Playing),
+        // ExoPlayer is looping the bundled splash. Without a hint
+        // that's confusing — the admin shows items, the screen
+        // shows the on-brand splash. This overlay says
+        // "Loading content N of M, X MB" in a low-key corner badge
+        // so operators see what's happening. Renders nothing when
+        // playback is healthy.
+        ColdStartLoadingOverlay(
+            isPlaying = state is PlayerRepository.State.Playing,
+            intendedItemCount = intendedPlaylist.size,
+            downloads = downloads,
         )
     }
 }

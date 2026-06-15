@@ -213,6 +213,32 @@ class PlayerRepository(
         _intendedPlaylist.value = playlist.items
         val playingCount = (state.value as? State.Playing)?.items?.size ?: 0
         LogBuffer.i(TAG, "Rehydrated playlist from cache — $playingCount of ${playlist.items.size} items playable")
+
+        // v0.1.26: trigger downloads for any rehydrated items that
+        // aren't on disk yet. Before this, a cold boot with an empty
+        // local cache would loop the splash until the live-sync
+        // coroutine got around to its first refresh tick (~5 s of
+        // dead air on average). Kicking the downloads off here can
+        // shave several seconds off "first frame of real content" on
+        // a fresh tablet because we don't wait for registration +
+        // settings + the first state poll to land. Best-effort —
+        // failures don't surface here; the live-sync loop will
+        // retry on its next tick.
+        if (playingCount < playlist.items.size) {
+            liveScope.launch {
+                for (v in playlist.items) {
+                    if (cache.has(v.id)) continue
+                    runCatching { cache.ensure(v) }
+                    // Don't bail on a single failed download — try
+                    // the next item, the live loop's redownload
+                    // pass picks up retries.
+                }
+                // Force a re-publish so newly-downloaded items
+                // transition into State.Playing without waiting for
+                // a live poll.
+                lastPlaylist?.let { publish(it) }
+            }
+        }
     }
 
     /**
