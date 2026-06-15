@@ -189,6 +189,11 @@ function App() {
         <Router />
       </AuthGate>
       <ToastHost />
+      {/* v0.1.27: slash-key command palette. Sits outside the
+          AuthGate so it can still react to keyboard shortcuts on
+          the login screen, but it pulls the user from AuthProvider
+          to gate commands by role. */}
+      <CommandPalette />
     </AuthProvider>
   );
 }
