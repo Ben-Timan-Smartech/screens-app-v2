@@ -741,7 +741,53 @@ class PlayerRepository(
             return
         }
 
-        val items = state.items.map { it.toVideoItem(base) }
+        // v0.1.23: filter out videos that would overwhelm this device's
+        // decoder. An uncompressed 202 MB / 30 s clip is ~54 Mbps — way
+        // past what a 1 GB Amlogic box (TX3 Mini) can chew. Crashes the
+        // activity hard. Better to skip the offending item with a
+        // visible warning than die mid-playback.
+        //
+        // Filter ranges over LiveItem because that's where sizeMb +
+        // durationSec come from the server. Items without size info
+        // (legacy library entries, freshly-uploaded videos before the
+        // probe runs) pass through — we'd rather attempt-and-watchdog
+        // than refuse-and-blank.
+        val deviceInfo = com.smartech.screens.util.DeviceInfo.snapshot(appContext)
+        val safeMbps = deviceInfo.safeBitrateMbps.toDouble()
+        val rawItems = state.items
+        val safeRaw = mutableListOf<LiveItem>()
+        val skipped = mutableListOf<Pair<LiveItem, Double>>()
+        for (li in rawItems) {
+            val sizeMb = li.sizeMb
+            val durSec = li.durationSec?.toDouble()
+            if (sizeMb == null || durSec == null || durSec <= 0.0) {
+                safeRaw += li
+                continue
+            }
+            // Bits per second = bytes-per-second × 8, and a "megabit"
+            // is 1_000_000 bits (decimal); sizeMb here is decimal MB
+            // (per scan-videos.py + the upload endpoint). So
+            // bitrate_Mbps = sizeMb * 8 / durationSec exactly.
+            val mbps = (sizeMb * 8.0) / durSec
+            if (mbps <= safeMbps) {
+                safeRaw += li
+            } else {
+                skipped += li to mbps
+            }
+        }
+        if (skipped.isNotEmpty()) {
+            for ((li, mbps) in skipped) {
+                LogBuffer.w(
+                    TAG,
+                    "Skipped heavy video '${li.title}' — " +
+                        "${"%.1f".format(mbps)} Mbps exceeds ${deviceInfo.safeBitrateMbps} Mbps " +
+                        "safe ceiling for ${deviceInfo.decoderTier}-tier device " +
+                        "(RAM ${deviceInfo.ramMb} MB). Compress the source or push to a higher-spec screen.",
+                )
+            }
+        }
+
+        val items = safeRaw.map { it.toVideoItem(base) }
 
         if (items.isEmpty()) {
             // Distinguish "the server has actively cleared this screen"
@@ -1288,6 +1334,8 @@ class PlayerRepository(
               "screenHeight": ${info.heightPx},
               "orientation": ${q(info.orientation)},
               "tier": ${q(tier)},
+              "decoderTier": ${q(info.decoderTier)},
+              "safeBitrateMbps": ${info.safeBitrateMbps},
               "appVersion": ${q(com.smartech.screens.BuildConfig.VERSION_NAME)},
               "cacheBytes": ${cache.totalBytes()},
               "freeStorageBytes": ${appContext.filesDir.usableSpace},

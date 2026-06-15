@@ -18,6 +18,62 @@ Rules:
 
 ---
 
+## v0.1.23
+
+Per-device bitrate guard — videos that would overload a low-spec
+box now get skipped with a visible warning instead of crashing
+playback.
+
+### Why
+
+A 202 MB video on a TX3 Mini took the player down. The Mini is a
+1 GB Amlogic S905W; its hardware H.264 decoder isn't built to chew
+through that kind of bitrate. The previous "queue everything and
+hope" model meant one badly-encoded source could kill an entire
+screen.
+
+### Decoder tier per device
+
+`DeviceInfo.snapshot()` now buckets the host into a rough class
+based on installed RAM:
+
+- **low** — <1.5 GB (TX3 Mini, generic Android TV sticks)
+- **medium** — 1.5–3 GB (most retail tablets)
+- **high** — 3 GB+ (Pixel-class, capable Fire TVs)
+
+…and pairs each tier with a safe per-item bitrate ceiling:
+
+- low → 10 Mbps  (covers compressed 1080p H.264)
+- medium → 25 Mbps  (high-bitrate 1080p sources)
+- high → 80 Mbps  (4K + visually-lossless masters)
+
+### The guard itself
+
+`PlayerRepository.refreshLivePlaylist` now computes
+`bitrate_Mbps = sizeMb * 8 / durationSec` for every incoming
+library item. Anything that exceeds the device's safe ceiling is
+**dropped from the playlist** before the download attempt — no
+bandwidth wasted on a file we can't play. Each skip emits a
+`LogBuffer.w()` entry that surfaces in the v0.1.22 Recent activity
+viewer with the message:
+
+> Skipped heavy video 'XYZ' — 53.9 Mbps exceeds 10 Mbps safe
+> ceiling for low-tier device (RAM 1024 MB). Compress the source
+> or push to a higher-spec screen.
+
+Items without size or duration metadata pass through — we'd rather
+attempt-and-watchdog than refuse-and-blank on partial info.
+
+### Heartbeat now reports tier
+
+`decoderTier` and `safeBitrateMbps` are sent up with each
+heartbeat. The CMS now has enough to warn at push time — "this
+video is 35 Mbps and the target screen is a low-tier box" — once
+the corresponding UI lands in a follow-up release.
+
+Tablet-side change only (server just stashes the new heartbeat
+fields). No new endpoint.
+
 ## v0.1.22
 
 Device admin → Recent activity is now collapsible, with a filter
