@@ -18,6 +18,60 @@ Rules:
 
 ---
 
+## v0.1.24
+
+Squeeze a bit more out of ExoPlayer on low-spec hardware. Pairs
+with v0.1.23 — the bitrate filter blocks the obvious offenders;
+this release helps with the borderline cases that get through but
+stress the decoder.
+
+### Two tier-aware knobs
+
+`PlayerController.buildExoPlayer(context)` now reads
+`DeviceInfo.decoderTierFor(ramMb)` and configures ExoPlayer
+accordingly:
+
+- **LoadControl buffer sizes.** Default Media3 buffers 50 s / 50 s
+  of media in flight — for a 10 Mbps clip that's ~60 MB of RAM on
+  top of decoded-frame buffers. On a 1 GB Amlogic box the OS
+  starts swapping background tasks. Low-tier devices now use
+  10 s min / 20 s max (peak ~25 MB) and that's plenty for
+  local-file playback — we already have the file on disk, there's
+  no network-rebuffer risk to insure against. Medium / high keep
+  generous 30 s / 60 s buffers.
+
+- **Decoder fallback.** `DefaultRenderersFactory
+  .setEnableDecoderFallback(true)` tells the renderer to try the
+  next codec instance — often the software fallback — if the
+  primary one crashes or refuses init. Slower than hardware
+  decode but it keeps the video on-screen instead of going black.
+  Enabled on every tier; only fires when the hardware path
+  genuinely fails, so capable hardware pays nothing.
+
+### And one always-on
+
+`setHandleAudioBecomingNoisy(false)` on the ExoPlayer builder.
+Default behaviour is to pause when "audio is about to be noisy"
+(headphones unplugged, Bluetooth disconnect, etc.) — irrelevant
+for a kiosk that's the only thing playing, and rare devices
+spuriously fire the event when a phone-call ringtone arrives over
+Bluetooth, which would auto-pause the player. Disabling it on the
+kiosk path costs nothing and removes a class of "the screen just
+stopped" stories.
+
+### What this doesn't do
+
+- No magic 4K-on-1GB-RAM playback. The bitrate filter from v0.1.23
+  is still the line of defence against content that's truly
+  beyond the device.
+- No software-fallback for the splash. Splash is a low-bitrate
+  bundled clip; decoder fallback only matters when the primary
+  path fails.
+- No tier-aware track selection. Single-bitrate MP4s — there's
+  no rendition to pick.
+
+Tablet-only release.
+
 ## v0.1.23
 
 Per-device bitrate guard — videos that would overload a low-spec
