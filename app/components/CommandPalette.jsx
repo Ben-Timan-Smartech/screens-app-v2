@@ -348,7 +348,19 @@ const CommandPalette = () => {
   const [argLoading, setArgLoading] = React.useState(false);
   const inputRef = React.useRef(null);
 
-  // Hotkeys at window scope so they fire from any page.
+  // Hotkeys at document scope in the **capture** phase so we fire
+  // BEFORE any element-level handler that might consume the key —
+  // notably the focused `<video controls>` in the library preview
+  // and the on-tablet preview page's stage handlers. The browser
+  // wouldn't normally swallow `/`, but a focused video element +
+  // Firefox's "find as you type" or a parent <div> that calls
+  // stopPropagation could both eat it before the bubbling phase
+  // reaches our listener. Capture-phase + document-level wins
+  // every time.
+  //
+  // Cmd/Ctrl-K is a backup hotkey for when `/` is awkward — same
+  // suppression rules so typing it into a search input still works
+  // as Ctrl-K (some inputs use it for "clear line").
   React.useEffect(() => {
     const inTextField = (el) => {
       if (!el) return false;
@@ -360,7 +372,13 @@ const CommandPalette = () => {
     const onKey = (e) => {
       if (!open && !inTextField(e.target)) {
         if (e.key === '/') {
+          // `stopPropagation` keeps the keystroke from bubbling to
+          // page-level handlers (e.g. tablet-preview stage routers
+          // that listen for digit + slash inputs). `preventDefault`
+          // suppresses the browser's built-in find-as-you-type
+          // (Firefox) and any other default action.
           e.preventDefault();
+          e.stopPropagation();
           setOpen(true);
           setQuery('');
           setActiveIdx(0);
@@ -369,6 +387,7 @@ const CommandPalette = () => {
         }
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
           e.preventDefault();
+          e.stopPropagation();
           setOpen(true);
           setQuery('');
           setActiveIdx(0);
@@ -378,6 +397,7 @@ const CommandPalette = () => {
       }
       if (open && e.key === 'Escape') {
         e.preventDefault();
+        e.stopPropagation();
         if (pendingCmd) {
           // Esc from arg stage backs out to command stage instead
           // of closing the whole palette — saves a keystroke when
@@ -390,8 +410,8 @@ const CommandPalette = () => {
         }
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);   // <-- capture phase
+    return () => document.removeEventListener('keydown', onKey, true);
   }, [open, pendingCmd]);
 
   // Focus the input on every open + every stage transition.

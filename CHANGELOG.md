@@ -18,6 +18,37 @@ Rules:
 
 ---
 
+## v0.1.28
+
+Command palette hotkey now fires on the on-tablet preview page
+and inside the library's video preview modal.
+
+### Why it wasn't firing
+
+v0.1.27 listened for `/` at window level in the **bubble** phase.
+That works on most pages, but on pages with a focused `<video
+controls>` element (the Content Library preview modal) or with
+their own page-level keydown handler (the on-tablet preview's
+stage router), the keystroke could be consumed before bubbling
+to the window. Firefox's "find as you type" can also swallow `/`
+on a non-text-input focus.
+
+### Fix
+
+The listener moves to `document` in the **capture** phase
+(`addEventListener('keydown', onKey, true)`). Capture runs from
+the root down before any bubbling handler sees the event, so
+nothing on the page can swallow `/` first. Plus the handler now
+calls both `preventDefault()` and `stopPropagation()` when it
+fires the palette, so subsequent handlers don't see a stray `/`
+either (and Firefox doesn't open its find bar).
+
+Same suppression rules apply — typing `/` into a real text input
+(input / textarea / select / contenteditable) still types `/`
+into the field, exactly as you'd expect.
+
+CMS-only release.
+
 ## v0.1.27
 
 Slash-key command palette in the CMS. Press `/` (or Cmd/Ctrl-K)
