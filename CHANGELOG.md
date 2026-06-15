@@ -18,6 +18,53 @@ Rules:
 
 ---
 
+## v0.1.26
+
+"On a cold start there is no video playing but there is something
+in the playlist." — yes, because the splash was looping while the
+content downloaded. The admin showed items because `intendedPlaylist`
+is hydrated from the cached playlist record, but ExoPlayer was
+playing the bundled splash until enough items had landed on disk
+for `publish()` to flip to `State.Playing`.
+
+### Loading content overlay
+
+New `ColdStartLoadingOverlay` renders on top of the splash when:
+
+- playback isn't yet `State.Playing`, AND
+- `intendedPlaylist` is non-empty, AND
+- at least one download is in flight
+
+Shows in the lower-third of the screen as a dark pill:
+
+> **LOADING CONTENT**
+>
+> 1 of 4 items ready
+>
+> ████████░░░░░░░░  42%
+>
+> `42%   5.4 / 12.7 MB   1.8 MB/s`
+
+Progress is the sum of downloaded bytes / sum of total bytes across
+every in-flight download — a real measure, not a spinner. Speed
+shown when bytes-per-second is above the noise floor. Auto-hides
+the moment the first poll publishes `State.Playing`.
+
+Sits in the lower-third so the branded splash still dominates and
+we're not replacing brand content with a dialog.
+
+### Downloads start earlier on cold start
+
+`rehydrateFromCache` now triggers `cache.ensure` for any items that
+aren't on disk yet, in a background coroutine right after the
+playlist is restored. Before this, downloads had to wait for the
+live-sync coroutine to finish registration + settings + the first
+state poll (~5 s on average). Kicking them off from rehydrate saves
+those few seconds on a fresh install or after a "Clear cache"
+command.
+
+Tablet-only.
+
 ## v0.1.25
 
 Fills in the gap between "everything is fine" and "the app died" —
