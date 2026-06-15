@@ -31,6 +31,19 @@ object LogBuffer {
     private val _entries = MutableStateFlow<List<Entry>>(emptyList())
     val entries: StateFlow<List<Entry>> = _entries
 
+    /** v0.1.25: monotonic counter, incremented on every add. Used by
+     *  the log-shipper to know which entries it hasn't sent yet — it
+     *  remembers the cursor it last shipped through, then ships
+     *  everything with `seq > cursor`. Survives clear() being called
+     *  externally so the cursor remains a sane bound for "have we
+     *  shipped this entry already". */
+    private var seq: Long = 0L
+
+    /** Pair of (entry, sequence-number) — sequence is per-process and
+     *  monotonic. [drainSinceSeq] returns these so the shipper can
+     *  remember "I sent up to N", come back later, send N+1 onwards. */
+    data class StampedEntry(val seq: Long, val entry: Entry)
+
     fun d(tag: String, msg: String) = add(Level.D, tag, msg, null)
     fun i(tag: String, msg: String) = add(Level.I, tag, msg, null)
     fun w(tag: String, msg: String, t: Throwable? = null) = add(Level.W, tag, msg, t)
@@ -45,9 +58,41 @@ object LogBuffer {
             Level.W -> if (t != null) Log.w(tag, msg, t) else Log.w(tag, msg)
             Level.E -> if (t != null) Log.e(tag, msg, t) else Log.e(tag, msg)
         }
+        seq++
         deque.addLast(Entry(System.currentTimeMillis(), level, tag, msg, t?.message))
         while (deque.size > MAX) deque.removeFirst()
         _entries.value = deque.toList().reversed() // newest first
+    }
+
+    /** v0.1.25: return entries whose sequence is greater than [sinceSeq]
+     *  and whose level is at or above [minLevel]. Used by the log-
+     *  shipper to upload only the warnings/errors the server hasn't
+     *  seen yet. Returned list is in chronological order (oldest first)
+     *  to make server-side appending straightforward.
+     *
+     *  Note: this looks at the in-memory deque, which is bounded to
+     *  [MAX] entries. If shipping falls behind by more than MAX
+     *  entries, older warnings get evicted before they're uploaded —
+     *  acceptable trade-off for not having a separate on-disk spool.
+     *  Run the shipper from the heartbeat loop (every 10 s) and we'll
+     *  never come close. */
+    @Synchronized
+    fun drainSinceSeq(sinceSeq: Long, minLevel: Level): Pair<Long, List<Entry>> {
+        // The deque stores entries oldest → newest; their sequence
+        // numbers are seq - size + 1 .. seq.
+        val newest = seq
+        if (newest <= sinceSeq) return newest to emptyList()
+        val skip = (sinceSeq - (newest - deque.size)).coerceAtLeast(0L).toInt()
+        val out = mutableListOf<Entry>()
+        // Iterate in insertion (chronological) order.
+        val it = deque.iterator()
+        var i = 0
+        while (it.hasNext()) {
+            val e = it.next()
+            if (i++ < skip) continue
+            if (e.level.ordinal >= minLevel.ordinal) out += e
+        }
+        return newest to out
     }
 
     @Synchronized
