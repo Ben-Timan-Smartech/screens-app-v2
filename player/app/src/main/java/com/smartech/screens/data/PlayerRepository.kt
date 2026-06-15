@@ -216,6 +216,77 @@ class PlayerRepository(
     }
 
     /**
+     * v0.1.25: ship any new warnings + errors from LogBuffer to the
+     * server. Called from the heartbeat loop. Stateful — keeps a
+     * cursor of the last sequence number it shipped, ranges only
+     * over entries newer than that. No-op when nothing new.
+     *
+     * This is the path that lets crash-adjacent warnings (decoder
+     * fallback firing, drift-skip catches, "video skipped because
+     * too heavy") reach `/api/logs` rather than dying inside the
+     * tablet's local LogBuffer. The CrashReporter still catches
+     * uncaught exceptions and ships them via `/api/crashes`; this
+     * fills in everything below "process died" severity.
+     */
+    @Volatile
+    private var lastShippedLogSeq: Long = 0L
+
+    suspend fun shipRecentWarningsIfPending(deviceId: String) {
+        val base = store.liveServerUrl.first()?.trimEnd('/') ?: return
+        val (newCursor, entries) = LogBuffer.drainSinceSeq(
+            sinceSeq = lastShippedLogSeq,
+            minLevel = LogBuffer.Level.W,
+        )
+        if (entries.isEmpty()) {
+            // Still advance the cursor so we don't keep re-scanning
+            // the same tail. The drain returned `seq` even when
+            // empty so this is monotonic.
+            lastShippedLogSeq = newCursor
+            return
+        }
+        val entriesJson = entries.joinToString(",") { e ->
+            buildString {
+                append("{")
+                append("\"time\":${e.time},")
+                append("\"level\":${q(e.level.name)},")
+                append("\"tag\":${q(e.tag)},")
+                append("\"message\":${q(e.message)}")
+                if (e.cause != null) append(",\"cause\":${q(e.cause)}")
+                append("}")
+            }
+        }
+        val body = buildString {
+            append("{")
+            append("\"deviceId\":${q(deviceId)},")
+            append("\"appVersion\":${q(com.smartech.screens.BuildConfig.VERSION_NAME)},")
+            append("\"entries\":[")
+            append(entriesJson)
+            append("]")
+            append("}")
+        }
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/logs")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (r.isSuccessful) {
+                        lastShippedLogSeq = newCursor
+                    }
+                    // On failure: leave the cursor so the next tick
+                    // retries the same range. Avoids losing entries
+                    // to a temporary network blip.
+                }
+            }.onFailure {
+                // Silently swallow — we don't want a log-ship failure
+                // to itself generate a warning and create a feedback
+                // loop on the next tick.
+            }
+        }
+    }
+
+    /**
      * v0.1.21: ship any crash reports the CrashReporter spooled to
      * disk on the previous run. Runs once on launch, after the
      * server URL is known. Each report is POSTed to /api/crashes;
@@ -1436,6 +1507,15 @@ class PlayerRepository(
                 if (!base.isNullOrBlank()) {
                     runCatching { sendHeartbeat(base, lastLiveRevision) }
                         .onFailure { LogBuffer.w(TAG, "Heartbeat tick failed: ${it.message}") }
+                    // v0.1.25: piggyback the log-shipper on the
+                    // heartbeat cadence. Sends warnings + errors
+                    // accumulated since the last shipped sequence
+                    // number; no-op if there's nothing new. Failure
+                    // path is silent — see the body for why.
+                    val deviceId = runCatching { store.ensureDeviceId() }.getOrNull()
+                    if (deviceId != null) {
+                        runCatching { shipRecentWarningsIfPending(deviceId) }
+                    }
                 }
                 delay(HEARTBEAT_INTERVAL_MS)
             }

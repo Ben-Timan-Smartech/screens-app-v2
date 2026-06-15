@@ -18,6 +18,63 @@ Rules:
 
 ---
 
+## v0.1.25
+
+Fills in the gap between "everything is fine" and "the app died" —
+warnings and errors that happen during normal operation now reach
+the server so an engineer can read them remotely.
+
+### What was missing
+
+`/api/crashes` only captures **uncaught exceptions**. Anything the
+app catches and logs as a warning (decoder fallback firing, drift
+tick skipped, heavy-video filter trip, network blip swallowed by
+`runCatching`) stayed on the tablet's in-memory `LogBuffer` and
+only surfaced in the on-device Recent activity panel. If the
+tablet wasn't right next to you, you couldn't see them — which
+made diagnosing "it kinda crashed once" reports painful.
+
+### The new pipeline
+
+- `LogBuffer` now keeps a monotonic sequence number per entry. A
+  new `drainSinceSeq(cursor, minLevel)` method returns everything
+  newer than the cursor at-or-above the given level.
+- `PlayerRepository.shipRecentWarningsIfPending()` ranges over
+  `Level.W` and `Level.E` entries since the last shipped cursor
+  and POSTs them as a batch to a new `/api/logs` endpoint.
+- Hooked into the existing heartbeat loop (10 s cadence) — same
+  coroutine, no new timer. No-op when there's nothing new.
+- On HTTP success the cursor advances; on failure it stays put
+  so the next tick retries the same range. Buffer-trim guard
+  means at most the last 100 entries are recoverable, which is
+  fine given 10 s cadence.
+
+### Server side
+
+- `POST /api/logs` accepts `{deviceId, appVersion, entries: [{time,
+  level, tag, message, cause?}]}`. Auth-free (same reasoning as
+  `/api/crashes` — a tablet shipping diagnostics may not have a
+  CMS session). Appends to `<logs_dir>/<deviceId>.jsonl`.
+- `GET /api/logs` returns the newest entries across all devices,
+  or `?deviceId=X` for a single tablet. Supports `?limit=N`
+  (default 200, max 2000). Gated on `activity.view` like
+  `/api/crashes`.
+- Log files auto-trim above 2 MB so a flapping tablet can't fill
+  disk on Cloud Run.
+
+### What I can now read
+
+```
+GET /api/logs?deviceId=<x>
+```
+
+returns the timeline of warnings and errors as they're shipped
+from the tablet. Pre-crash signal (decoder fallback warnings,
+guarded array-bounds bail-outs, bitrate-filter skips) and
+non-fatal noise now both surface. Together with `/api/crashes`
+this completes the diagnostic loop — read the logs, ship a fix,
+no waiting for the next uncaught exception.
+
 ## v0.1.24
 
 Squeeze a bit more out of ExoPlayer on low-spec hardware. Pairs

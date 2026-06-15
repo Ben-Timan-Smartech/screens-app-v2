@@ -247,6 +247,15 @@ CRASHES_DIR = Path(os.environ.get(
     _state_path_default("crashes"),
 ))
 
+# v0.1.25: tablet warning/error log stream. One .jsonl file per
+# deviceId, appended to as the heartbeat ships new entries. Keeps
+# pre-crash + non-fatal evidence so the engineer can read it via
+# /api/logs without waiting for the next uncaught exception.
+LOGS_DIR = Path(os.environ.get(
+    "SCREENS_LOGS_DIR",
+    _state_path_default("logs"),
+))
+
 PER_SCREEN_JSON = Path(os.environ.get(
     "SCREENS_PER_SCREEN_PATH",
     _state_path_default("per_screen.json"),
@@ -1726,6 +1735,51 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"screens": screens})
             return
 
+        # v0.1.25: per-device warning/error log stream. Same auth
+        # gate as /api/crashes. Default returns the most recent
+        # entries across all devices; ?deviceId=X narrows. ?limit=N
+        # caps the result (default 200, max 2000).
+        if path == "/api/logs":
+            if self._require_perm("activity.view") is None:
+                return
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            want_dev = (params.get("deviceId") or [None])[0]
+            try:
+                limit = int((params.get("limit") or ["200"])[0])
+            except ValueError:
+                limit = 200
+            limit = max(1, min(2000, limit))
+            files = (
+                [LOGS_DIR / f"{want_dev}.jsonl"] if want_dev
+                else sorted(LOGS_DIR.glob("*.jsonl"))
+            )
+            collected: list[dict] = []
+            for f in files:
+                if not f.is_file():
+                    continue
+                # Read last ~limit*200 bytes; way more than enough
+                # for `limit` entries even with long messages.
+                try:
+                    size = f.stat().st_size
+                    read_bytes = min(size, limit * 400)
+                    with open(f, "rb") as fh:
+                        fh.seek(size - read_bytes)
+                        chunk = fh.read()
+                except Exception:
+                    continue
+                for line in chunk.splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        collected.append(json.loads(line))
+                    except Exception:
+                        continue
+            # Newest first.
+            collected.sort(key=lambda r: r.get("time") or 0, reverse=True)
+            collected = collected[:limit]
+            self._send_json({"entries": collected, "total": len(collected)})
+            return
+
         # v0.1.21: crash reports collected from the tablets.
         # GET /api/crashes              → { crashes: [{file, ...summary}], total }
         # GET /api/crashes?file=<name>  → full crash record (stack + log)
@@ -2170,6 +2224,63 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "revision":    state["revision"],
                 "mixSplash":   state["mixSplash"],
             })
+            return
+
+        # v0.1.25: tablets ship batches of warning/error log entries
+        # here on every heartbeat tick. Stored as JSON lines in
+        # <logs_dir>/<deviceId>.jsonl so the file grows monotonically
+        # without a per-entry-file fan-out. Auth-free for the same
+        # reason as /api/crashes — a tablet shipping diagnostics
+        # might not have a valid CMS session at the moment it's
+        # uploading. Size-cap below keeps a flapping tablet from
+        # filling disk.
+        if path == "/api/logs":
+            body = self._read_json()
+            if not isinstance(body, dict) or not body:
+                self.send_error(400, "Empty or non-JSON body"); return
+            device_id = (body.get("deviceId") or "unknown")[:80]
+            safe_dev = re.sub(r"[^a-zA-Z0-9_.-]+", "_", device_id) or "unknown"
+            entries = body.get("entries")
+            if not isinstance(entries, list) or not entries:
+                self._send_json({"ok": True, "wrote": 0}); return
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            target = LOGS_DIR / f"{safe_dev}.jsonl"
+            # Trim if the file is over 2 MB — keep the tail. .jsonl
+            # files don't have nested structure, so we can rebuild
+            # the last N kB cheaply.
+            try:
+                if target.is_file() and target.stat().st_size > 2 * 1024 * 1024:
+                    with open(target, "rb") as f:
+                        f.seek(-1024 * 1024, os.SEEK_END)
+                        tail = f.read()
+                    # Drop the partial first line.
+                    nl = tail.find(b"\n")
+                    if nl >= 0:
+                        tail = tail[nl + 1:]
+                    with open(target, "wb") as f:
+                        f.write(tail)
+            except Exception:
+                # Trimming is best-effort; if it fails the next write
+                # still appends and we'll just have a bigger file.
+                pass
+            app_version = body.get("appVersion") or "unknown"
+            with open(target, "ab") as f:
+                for e in entries:
+                    if not isinstance(e, dict):
+                        continue
+                    record = {
+                        "deviceId":   device_id,
+                        "appVersion": app_version,
+                        "time":       e.get("time"),
+                        "level":      e.get("level"),
+                        "tag":        e.get("tag"),
+                        "message":    e.get("message"),
+                    }
+                    if e.get("cause"):
+                        record["cause"] = e.get("cause")
+                    f.write(json.dumps(record).encode("utf-8"))
+                    f.write(b"\n")
+            self._send_json({"ok": True, "wrote": len(entries)})
             return
 
         # v0.1.21: tablets POST crash reports here on the launch
