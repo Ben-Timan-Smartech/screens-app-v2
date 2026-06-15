@@ -2151,6 +2151,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # in the picker without the tablet first acking the
                     # override).
                     "supportedModes", "activeDisplayMode",
+                    # v0.1.23: decoder-class tier (low|medium|high) and
+                    # the per-item safe bitrate ceiling (Mbps) derived
+                    # from RAM. CMS uses these to flag library entries
+                    # that would crash a particular screen before the
+                    # operator pushes them. The tablet itself enforces
+                    # the cap; reporting it is just so the CMS can warn.
+                    "decoderTier", "safeBitrateMbps",
                 ):
                     val = body.get(key)
                     if val is not None:

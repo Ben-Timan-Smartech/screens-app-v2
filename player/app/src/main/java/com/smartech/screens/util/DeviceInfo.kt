@@ -12,9 +12,49 @@ data class DeviceSnapshot(
     val widthPx: Int,
     val heightPx: Int,
     val orientation: String, // LANDSCAPE | PORTRAIT
+    /** v0.1.23: rough decoder-class tier derived from RAM. Used by
+     *  [PlayerController] to skip videos whose bitrate would blow up
+     *  the decoder (e.g. an uncompressed 200 MB clip on a TX3 Mini),
+     *  and reported in the heartbeat so the CMS can warn at push time.
+     *  Values: "low" | "medium" | "high" — see [decoderTierFor]. */
+    val decoderTier: String,
+    /** v0.1.23: safe per-item bitrate ceiling for this device, in
+     *  megabits per second. PlayerController filters items whose
+     *  `(sizeMb * 8 / durationSec)` exceeds this. Derived directly
+     *  from [decoderTier] so the CMS doesn't have to know the
+     *  numbers. */
+    val safeBitrateMbps: Int,
 )
 
 object DeviceInfo {
+    /**
+     * v0.1.23: bucket the device into a rough decoder-class tier.
+     *
+     * RAM is the cheapest reliable proxy. The TX3 Mini ships with 1 GB
+     * (and we crashed playing a 202 MB / ~50 Mbps clip on it); generic
+     * 2 GB Android tablets sit between cheap signage boxes and real
+     * hardware; anything 3 GB+ tends to have a competent decoder.
+     *
+     * Per-tier safe bitrate ceilings:
+     *   low    → 10 Mbps  (covers compressed 1080p H.264; rejects
+     *                      lightly-compressed or uncompressed clips)
+     *   medium → 25 Mbps  (covers most 1080p high-bitrate sources)
+     *   high   → 80 Mbps  (covers 4K + visually-lossless masters,
+     *                      rejects truly uncompressed clips that
+     *                      would saturate any consumer decoder)
+     */
+    fun decoderTierFor(ramMb: Int): String = when {
+        ramMb < 1500 -> "low"
+        ramMb < 3000 -> "medium"
+        else -> "high"
+    }
+
+    fun safeBitrateForTier(tier: String): Int = when (tier) {
+        "low" -> 10
+        "medium" -> 25
+        else -> 80   // "high" and anything we don't recognise
+    }
+
     fun snapshot(context: Context): DeviceSnapshot {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val mem = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
@@ -37,11 +77,15 @@ object DeviceInfo {
             Configuration.ORIENTATION_PORTRAIT -> "PORTRAIT"
             else -> "LANDSCAPE"
         }
+        val ramMb = (mem.totalMem / (1024 * 1024)).toInt()
+        val decoderTier = decoderTierFor(ramMb)
         return DeviceSnapshot(
-            ramMb = (mem.totalMem / (1024 * 1024)).toInt(),
+            ramMb = ramMb,
             widthPx = widthPx,
             heightPx = heightPx,
             orientation = orientation,
+            decoderTier = decoderTier,
+            safeBitrateMbps = safeBitrateForTier(decoderTier),
         )
     }
 
