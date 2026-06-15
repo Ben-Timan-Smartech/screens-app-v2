@@ -46,9 +46,16 @@ import kotlinx.coroutines.launch
 
 private val Ink      = Color(0xFF141414)
 private val Bone     = Color(0xFFF7F6F2)
-private val BoneSoft = Color(0xFFEFEDE6)
-private val BoneLine = Color(0xFFE2DED3)
-private val Muted    = Color(0xFF6E6B62)
+private val BoneSoft = Color(0xFFE6E2D6)
+// v0.1.19: bumped from #E2DED3 -> #B8B1A0 so borders read on
+// low-contrast TVs. Old value vanished against Bone on the Cyclone
+// box's HDMI output.
+private val BoneLine = Color(0xFFB8B1A0)
+// v0.1.19: secondary text was #6E6B62 (mid-gray, ~5:1). Dropped to
+// #3A3832 (~11:1) so timestamps, sub-labels, and "Add content"
+// helper copy are legible across a room. Keeps the secondary <
+// primary hierarchy because Ink is still pure-dark.
+private val Muted    = Color(0xFF3A3832)
 // tm:rw `--ok-dot` — same green the Status dot uses for "online".
 private val Ok       = Color(0xFF3D8C4B)
 

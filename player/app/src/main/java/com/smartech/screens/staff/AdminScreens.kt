@@ -57,9 +57,17 @@ import java.util.Locale
 
 private val Ink = Color(0xFF141414)
 private val Bone = Color(0xFFF7F6F2)
-private val BoneSoft = Color(0xFFEFEDE6)
-private val BoneLine = Color(0xFFE2DED3)
-private val Muted = Color(0xFF6E6B62)
+private val BoneSoft = Color(0xFFE6E2D6)
+// v0.1.19: bumped from #E2DED3 -> #B8B1A0 so borders read on
+// low-contrast TVs (Sumvision Cyclone, generic HDMI sticks). Old
+// value was almost invisible against the Bone background.
+private val BoneLine = Color(0xFFB8B1A0)
+// v0.1.19: secondary text was #6E6B62 (mid-gray) — passed WCAG AA
+// at 5:1 against Bone but felt washed out on a TV viewed from the
+// other side of a room. Dropping to #3A3832 takes contrast to
+// ~11:1, comfortably AAA, and matches the weight of the Ink primary
+// text without losing the secondary/primary visual hierarchy.
+private val Muted = Color(0xFF3A3832)
 
 // ─────────────────────────────────────────────────────────────
 // Super-admin home — branches into "Swap content" or "Device admin"

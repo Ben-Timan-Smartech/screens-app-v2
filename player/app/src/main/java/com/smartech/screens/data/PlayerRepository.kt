@@ -201,6 +201,16 @@ class PlayerRepository(
         if (parsedRev != null) lastLiveRevision = parsedRev
         lastPlaylist = playlist
         publish(playlist)
+        // v0.1.19: also hydrate the "intended" playlist flow. publish()
+        // only sets the state.Playing items (what the player can
+        // actually start), but the staff overlay reads its rows from
+        // `intendedPlaylist` — what the server says SHOULD be on this
+        // screen, even when some items are still downloading. Before
+        // this fix, a cold boot played the cached loop correctly but
+        // the admin panel showed "No videos in the playlist" until
+        // the next live poll landed, forcing the operator to tap
+        // Refresh just to see what's running.
+        _intendedPlaylist.value = playlist.items
         val playingCount = (state.value as? State.Playing)?.items?.size ?: 0
         LogBuffer.i(TAG, "Rehydrated playlist from cache — $playingCount of ${playlist.items.size} items playable")
     }
