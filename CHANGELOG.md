@@ -18,6 +18,70 @@ Rules:
 
 ---
 
+## v0.1.21
+
+The "delete a video and the tablet falls over" fix, plus the
+plumbing to catch the next surprise crash without driving to the
+device with adb.
+
+### Why it crashed
+
+Inside `PlayerController`, two functions index into `state.itemIds`
+and `state.itemDurationsMs` — the parallel lists describing the
+current sync-group loop. When staff removed an item from the
+tablet's playlist editor, the local state could briefly fall out
+of sync with ExoPlayer's queue while the new playlist propagated.
+A drift tick or transition listener that happened to fire in that
+window threw `IndexOutOfBoundsException` and killed the activity.
+
+### Defensive guards
+
+Both `snapToGroupExpectedItem` and `correctDriftInCurrentItem` are
+now wrapped in a try/catch that logs the exception and skips a
+tick rather than propagating up through the ExoPlayer listener
+callback. An invariant check at the top of each — `itemIds.size ==
+itemDurationsMs.size` and `!isEmpty()` — bails early when the
+state is obviously mid-update. The next anchor refresh or
+transition restores the loop.
+
+### Crash reporter — see the next one before you ship the fix
+
+New `CrashReporter` (tablet) installs a `Thread.setDefault
+UncaughtExceptionHandler` in `ScreensApp.onCreate()`. Anything that
+throws past every catch in the app is written to
+`<filesDir>/crashes/<timestamp>.json` with the stack trace, app
+version, device model, last 40 log-buffer entries, and the
+deviceId / screenCode. The process then dies the way Android
+expects — we don't try to keep going.
+
+On the next launch, `PlayerRepository.drainCrashesIfPending()`
+ships every spooled file to the new `POST /api/crashes` endpoint;
+files are deleted on a 2xx and retained on failure so a temporary
+network drop doesn't lose the report.
+
+Server-side:
+- `POST /api/crashes` writes the record to `/data/crashes/
+  <deviceId>-<timeMs>.json`, with a 500-file cap so a runaway
+  tablet can't fill the disk. Logs to the activity feed as a
+  red-toned event.
+- `GET /api/crashes` returns a 200-item summary list (newest
+  first). Gated on `activity.view`.
+- `GET /api/crashes?file=<name>` returns the full record
+  including the stack and recent log.
+
+This is the loop the operator asked for: a crash happens, the
+tablet ships it on the next boot, the engineer reads it via
+`curl /api/crashes` (or the CMS once the viewer page lands)
+**before** building the next release.
+
+### Why not Crashlytics / Sentry
+
+The CMS is already on Cloud Run on the same host, so one endpoint
+saves a third-party setup, a separate auth boundary, and the
+question of whether retail networks allow `sentry.io` (they often
+don't). The crash dataset is small and the read flow is just
+JSON-over-HTTPS.
+
 ## v0.1.20
 
 Real in-CMS video upload — finally replacing the v0.1.6 "Coming

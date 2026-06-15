@@ -238,6 +238,15 @@ UPLOADS_DIR = Path(os.environ.get(
     _state_path_default("uploads"),
 ))
 
+# v0.1.21: where tablet crash reports land. One JSON file per crash,
+# named `<deviceId>-<crashTimeMs>.json` so listings sort by tablet
+# then by time. Same FUSE-mount lineage so we don't lose evidence
+# on a Cloud Run redeploy.
+CRASHES_DIR = Path(os.environ.get(
+    "SCREENS_CRASHES_DIR",
+    _state_path_default("crashes"),
+))
+
 PER_SCREEN_JSON = Path(os.environ.get(
     "SCREENS_PER_SCREEN_PATH",
     _state_path_default("per_screen.json"),
@@ -1717,6 +1726,57 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"screens": screens})
             return
 
+        # v0.1.21: crash reports collected from the tablets.
+        # GET /api/crashes              → { crashes: [{file, ...summary}], total }
+        # GET /api/crashes?file=<name>  → full crash record (stack + log)
+        # Gated on the activity-view permission since crashes contain
+        # the device + screen-code, same sensitivity as a heartbeat.
+        if path == "/api/crashes":
+            if self._require_perm("activity.view") is None:
+                return
+            CRASHES_DIR.mkdir(parents=True, exist_ok=True)
+            want_file = (params.get("file") or [None])[0]
+            if want_file:
+                # Single-file read. Validate the filename can't escape
+                # the directory.
+                safe = re.sub(r"[^a-zA-Z0-9_.-]+", "", want_file)
+                if not safe or safe != want_file or not safe.endswith(".json"):
+                    self.send_error(400, "Bad crash file name"); return
+                target = CRASHES_DIR / safe
+                if not target.is_file():
+                    self.send_error(404, "No such crash file"); return
+                try:
+                    payload = json.loads(target.read_text(encoding="utf-8"))
+                except Exception:
+                    self.send_error(500, "Crash file unreadable"); return
+                self._send_json({"file": safe, "crash": payload})
+                return
+            # List view — newest first, summary only.
+            files = sorted(
+                (f for f in CRASHES_DIR.glob("*.json") if f.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[:200]
+            out: list[dict] = []
+            for f in files:
+                try:
+                    rec = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                out.append({
+                    "file":           f.name,
+                    "timeMs":         rec.get("timeMs"),
+                    "appVersion":     rec.get("appVersion"),
+                    "deviceModel":    rec.get("deviceModel"),
+                    "deviceId":       rec.get("deviceId"),
+                    "screenCode":     rec.get("screenCode"),
+                    "exceptionClass": rec.get("exceptionClass"),
+                    "exceptionMessage": rec.get("exceptionMessage"),
+                    "threadName":     rec.get("threadName"),
+                })
+            self._send_json({"crashes": out, "total": len(out)})
+            return
+
         if path == "/api/library":
             # Library responses are ~450 kB on a typical fleet
             # (1,300+ videos). The CMS polls this every 30 s; without
@@ -2103,6 +2163,47 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "revision":    state["revision"],
                 "mixSplash":   state["mixSplash"],
             })
+            return
+
+        # v0.1.21: tablets POST crash reports here on the launch
+        # after they crash. Authentication is intentionally
+        # tablet-friendly — the device might not have a valid user
+        # session at the moment it's shipping a crash (e.g. the
+        # crash itself wiped the session). We do not gate this on
+        # _require_perm; the only abuse vector is filling disk,
+        # which we cap below.
+        if path == "/api/crashes":
+            body = self._read_json()
+            if not isinstance(body, dict) or not body:
+                self.send_error(400, "Empty or non-JSON body"); return
+            CRASHES_DIR.mkdir(parents=True, exist_ok=True)
+            # Trim runaway spool: keep at most 500 files. Drop the
+            # oldest when we'd exceed it. Generous cap so a flapping
+            # tablet has room to log, low enough to fit comfortably
+            # on /data.
+            existing = sorted(CRASHES_DIR.glob("*.json"))
+            while len(existing) >= 500:
+                try:
+                    existing[0].unlink()
+                except Exception:
+                    pass
+                existing.pop(0)
+            device_id = (body.get("deviceId") or "unknown")[:80]
+            time_ms = int(body.get("timeMs") or time.time() * 1000)
+            # Sanitise the deviceId chunk so it can't escape the
+            # directory or contain shell-unfriendly characters.
+            safe_dev = re.sub(r"[^a-zA-Z0-9_.-]+", "_", device_id) or "unknown"
+            target = CRASHES_DIR / f"{safe_dev}-{time_ms}.json"
+            target.write_text(json.dumps(body, indent=2), encoding="utf-8")
+            screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+            _log_activity(
+                kind="crash",
+                text=f"Crash reported by {screen_name}: {body.get('exceptionClass') or 'unknown'}",
+                icon="warning",
+                tone="err",
+                target=device_id,
+            )
+            self._send_json({"ok": True})
             return
 
         # ── Manually trigger a library scan (Drive Sync → Sync now) ─

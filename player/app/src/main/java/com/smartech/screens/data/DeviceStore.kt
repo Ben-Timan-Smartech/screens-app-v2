@@ -295,4 +295,17 @@ class DeviceStore(private val context: Context) {
     fun tokenBlocking(): String? = runCatching {
         kotlinx.coroutines.runBlocking { deviceToken.first() }
     }.getOrNull()
+
+    /** v0.1.21: blocking getters for the crash reporter's
+     *  uncaught-exception handler — that callback runs on the
+     *  crashing thread and can't suspend. Same pattern as
+     *  tokenBlocking, swallowing exceptions because the crash
+     *  path must not throw. */
+    fun deviceIdBlocking(): String? = runCatching {
+        kotlinx.coroutines.runBlocking { deviceId.first() }
+    }.getOrNull()
+
+    fun locScreenCodeBlocking(): String? = runCatching {
+        kotlinx.coroutines.runBlocking { locScreenCode.first() }
+    }.getOrNull()
 }

@@ -215,6 +215,34 @@ class PlayerRepository(
         LogBuffer.i(TAG, "Rehydrated playlist from cache — $playingCount of ${playlist.items.size} items playable")
     }
 
+    /**
+     * v0.1.21: ship any crash reports the CrashReporter spooled to
+     * disk on the previous run. Runs once on launch, after the
+     * server URL is known. Each report is POSTed to /api/crashes;
+     * on a 2xx the local file is deleted, on anything else we stop
+     * and try again next launch (avoids stampedes when the server
+     * is unreachable). The body is just the JSON the reporter
+     * wrote — no transformation, the server validates on its end.
+     */
+    suspend fun drainCrashesIfPending() {
+        val base = store.liveServerUrl.first()?.trimEnd('/') ?: return
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            com.smartech.screens.util.CrashReporter.drainTo { record ->
+                runCatching {
+                    val body = kotlinx.serialization.json.Json.encodeToString(
+                        com.smartech.screens.util.CrashReporter.CrashRecord.serializer(),
+                        record,
+                    )
+                    val req = Request.Builder()
+                        .url("$base/api/crashes")
+                        .post(body.toRequestBody("application/json".toMediaType()))
+                        .build()
+                    httpClient.newCall(req).execute().use { r -> r.isSuccessful }
+                }.getOrElse { false }
+            }
+        }
+    }
+
     /** Best-effort heartbeat. Silently swallows network errors. */
     suspend fun ping(appVersion: String) {
         runCatching {

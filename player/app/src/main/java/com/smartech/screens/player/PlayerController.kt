@@ -373,6 +373,22 @@ class PlayerController(context: Context) {
      *   • drift > 2 s          → real seek (last-resort path)
      */
     private fun correctDriftInCurrentItem() {
+        // v0.1.21: wrap the whole body in a guard. The "delete a video
+        // crash" path was here: when staff remove an item via the
+        // tablet's playlist editor, `state.itemIds` and
+        // `state.itemDurationsMs` can briefly fall out of sync with
+        // ExoPlayer's queue while the new playlist propagates. Any
+        // unchecked array access threw IndexOutOfBoundsException and
+        // killed the activity. We'd rather skip a single drift tick
+        // than die — the next anchor refresh fixes the state.
+        try {
+            correctDriftInCurrentItemImpl()
+        } catch (t: Throwable) {
+            LogBuffer.w("PlayerController", "Drift tick skipped: ${t.javaClass.simpleName}: ${t.message ?: ""}", t)
+        }
+    }
+
+    private fun correctDriftInCurrentItemImpl() {
         val state = groupSync ?: return
         // Don't mid-item correct while a coordinated-start pause is
         // armed — that branch is doing its own scheduled work.
@@ -383,6 +399,12 @@ class PlayerController(context: Context) {
         // is the only state where `currentPosition` is trustworthy.
         if (player.playbackState != Player.STATE_READY) return
         if (!player.playWhenReady) return
+        // v0.1.21: itemIds and itemDurationsMs are parallel lists, both
+        // sourced from the same place. If they're not the same length
+        // the anchor is mid-update — bail rather than risk indexing
+        // into the shorter one with an index from the longer.
+        if (state.itemIds.size != state.itemDurationsMs.size) return
+        if (state.itemIds.isEmpty()) return
 
         val currentIndex = player.currentMediaItemIndex
         if (currentIndex < 0 || currentIndex >= state.itemIds.size) return
@@ -390,7 +412,7 @@ class PlayerController(context: Context) {
         // is somehow on; the math operates on the splash-less itemIds
         // list. Find this item's position in itemIds by id.
         val itemIdx = state.itemIds.indexOf(currentId)
-        if (itemIdx < 0) return
+        if (itemIdx < 0 || itemIdx >= state.itemDurationsMs.size) return
 
         val serverNowMs = System.currentTimeMillis() + state.serverOffsetMs
         val elapsed = (serverNowMs - state.loopStartedAtMs).coerceAtLeast(0L)
@@ -534,9 +556,27 @@ class PlayerController(context: Context) {
      * server anyway, but defensive check stays.)
      */
     private fun snapToGroupExpectedItem(force: Boolean = false) {
+        // v0.1.21: never let an array-bounds exception in here propagate
+        // up through the ExoPlayer listener callback — that path was
+        // crashing the activity when the playlist changed underneath us
+        // (e.g. staff deleting an item mid-playback). Skipping a snap
+        // is fine; the next anchor or transition will re-evaluate.
+        try {
+            snapToGroupExpectedItemImpl(force)
+        } catch (t: Throwable) {
+            LogBuffer.w("PlayerController", "Snap skipped: ${t.javaClass.simpleName}: ${t.message ?: ""}", t)
+        }
+    }
+
+    private fun snapToGroupExpectedItemImpl(force: Boolean) {
         val state = groupSync ?: return
         val currentId = player.currentMediaItem?.mediaId ?: return
         if (currentId == Source.SPLASH) return
+        // v0.1.21: parallel-list invariant check, same as in the drift
+        // path. Mid-playlist-update reads can otherwise index one list
+        // with a position from the other.
+        if (state.itemIds.size != state.itemDurationsMs.size) return
+        if (state.itemIds.isEmpty()) return
 
         // Server's "now" = local now + offset. Use it to compute where
         // in the loop we should be.
