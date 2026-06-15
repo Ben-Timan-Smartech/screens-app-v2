@@ -6,9 +6,12 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import com.smartech.screens.R
 import com.smartech.screens.data.PlayerRepository
+import com.smartech.screens.util.DeviceInfo
 import com.smartech.screens.util.LogBuffer
 import kotlin.math.abs
 
@@ -30,16 +33,14 @@ class PlayerController(context: Context) {
     private var remoteSplashUri: Uri? = null
     private val splashUri: Uri get() = remoteSplashUri ?: bundledSplashUri
 
-    val player: ExoPlayer = ExoPlayer.Builder(context)
-        .build()
-        .apply {
-            repeatMode = Player.REPEAT_MODE_ALL
-            playWhenReady = true
-            // Default to silent — the global audioOn flag flips it on,
-            // and per-video defaultUnmute (set in the Content Library)
-            // overrides the silent default on individual items.
-            volume = 0f
-        }
+    val player: ExoPlayer = buildExoPlayer(context).apply {
+        repeatMode = Player.REPEAT_MODE_ALL
+        playWhenReady = true
+        // Default to silent — the global audioOn flag flips it on,
+        // and per-video defaultUnmute (set in the Content Library)
+        // overrides the silent default on individual items.
+        volume = 0f
+    }
 
     /** Global "unmute everything" flag pushed from the server/staff overlay. */
     private var audioOn: Boolean = false
@@ -670,5 +671,70 @@ class PlayerController(context: Context) {
         mainHandler.removeCallbacks(driftTick)
         driftCorrectionTickScheduled = false
         player.release()
+    }
+
+    companion object {
+        /**
+         * v0.1.24: build an ExoPlayer with tuning matched to the host's
+         * decoder-class tier (see [DeviceInfo.decoderTierFor]).
+         *
+         * Two knobs that matter on cheap signage boxes:
+         *
+         * 1. **LoadControl buffer sizes.** ExoPlayer's defaults are
+         *    50 s min / 50 s max of buffered media. For a 10 Mbps
+         *    clip that's ~60 MB of RAM in flight, on top of decoded-
+         *    frame buffers + the rest of the app — a TX3 Mini with
+         *    1 GB total starts OOM-killing background tasks. Cutting
+         *    to 10 s min / 20 s max trims peak buffer to ~25 MB and
+         *    is plenty for local-file playback (no network rebuffer
+         *    risk; the file is already on disk).
+         *
+         * 2. **Decoder fallback.** `DefaultRenderersFactory
+         *    .setEnableDecoderFallback(true)` tells the renderer to
+         *    try the next codec instance (often the software
+         *    fallback) if the primary one crashes / refuses init.
+         *    Slower but a video stays on-screen instead of going
+         *    black. Safe on all tiers; only fires when the hardware
+         *    path fails, which is rare on capable hardware.
+         *
+         * The v0.1.23 bitrate filter already removes content that
+         * would obviously crash the device. These knobs help with the
+         * borderline cases that pass the filter but stress the
+         * decoder anyway.
+         */
+        private fun buildExoPlayer(context: Context): ExoPlayer {
+            val tier = DeviceInfo.decoderTierFor(
+                DeviceInfo.snapshot(context).ramMb
+            )
+            val isLow = tier == "low"
+
+            val loadControl = DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    /* minBufferMs                 */ if (isLow) 10_000 else 30_000,
+                    /* maxBufferMs                 */ if (isLow) 20_000 else 60_000,
+                    /* bufferForPlaybackMs         */ 1_500,
+                    /* bufferForPlaybackAfterRebufferMs */ 3_000,
+                )
+                // Local files only — time-based thresholds matter
+                // more than the on-disk size of the buffered media.
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .build()
+
+            val renderers = DefaultRenderersFactory(context)
+                .setEnableDecoderFallback(true)
+
+            LogBuffer.i(
+                "PlayerController",
+                "ExoPlayer built for $tier-tier device " +
+                    "(buffer ${if (isLow) "10/20s" else "30/60s"}, decoder-fallback on)",
+            )
+            return ExoPlayer.Builder(context, renderers)
+                .setLoadControl(loadControl)
+                // Kiosk: never let an audio-focus event auto-pause us.
+                // The screen is the only thing playing; we don't yield
+                // to a phone call ringtone arriving over Bluetooth.
+                .setHandleAudioBecomingNoisy(false)
+                .build()
+        }
     }
 }
