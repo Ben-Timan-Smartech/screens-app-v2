@@ -289,7 +289,36 @@ const useLibrary = () => {
     // runs (daily background scan + on-demand from Settings); polling
     // every 10 s burned ~150 MB/h on every open tab.
     const id = setInterval(tick, 60000);
-    return () => { cancelled = true; clearInterval(id); };
+    // v0.1.20: external triggers (e.g. UploadPanel after a successful
+    // upload) dispatch `library-refresh`. Two behaviours:
+    //   - If the event carries `detail.video`, push that entry into
+    //     MOCK_VIDEOS optimistically and bump the version counter so
+    //     the grid re-renders immediately — no network round-trip on
+    //     the critical "I just uploaded" path. The next interval tick
+    //     reconciles with the server canonical state, so a stale
+    //     optimistic insert can't outlive the next minute.
+    //   - Otherwise, bust the etag and re-fetch — used for "manual
+    //     refresh" callers that don't know the new entry yet (Drive
+    //     Sync, video-edit flows).
+    const refresh = (e) => {
+      const optimistic = e?.detail?.video;
+      if (optimistic && Array.isArray(window.MOCK_VIDEOS)) {
+        // Replace by id if an entry already exists (re-upload), else append.
+        const idx = window.MOCK_VIDEOS.findIndex(v => v.id === optimistic.id);
+        if (idx >= 0) window.MOCK_VIDEOS.splice(idx, 1, optimistic);
+        else window.MOCK_VIDEOS.unshift(optimistic);
+        setVersion((v) => v + 1);
+        return;
+      }
+      etagRef.current = null;
+      tick();
+    };
+    window.addEventListener('library-refresh', refresh);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      window.removeEventListener('library-refresh', refresh);
+    };
   }, []);
   return version;
 };
@@ -440,6 +469,45 @@ const setScreenSyncGroup = async (deviceId, syncGroup) => {
   });
   if (!res.ok) throw new Error(`sync-group failed: ${res.status}`);
   return res.json();
+};
+
+// uploadVideo — v0.1.20 in-CMS desktop upload. POST multipart to
+// /api/library/upload. Returns a promise that resolves with the new
+// library entry; the `onProgress` callback fires with a 0..1 fraction
+// throughout the upload so the panel can render a real progress bar.
+// Uses XMLHttpRequest because fetch() doesn't expose upload progress
+// events. Cancellable via the returned `abort` function for users
+// who change their mind mid-upload of a big file.
+const uploadVideo = ({ file, brand, title, product, durationSec, onProgress }) => {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('brand', brand);
+  if (title) form.append('title', title);
+  if (product) form.append('product', product);
+  if (durationSec != null) form.append('durationSec', String(durationSec));
+
+  const xhr = new XMLHttpRequest();
+  const promise = new Promise((resolve, reject) => {
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && typeof onProgress === 'function') {
+        onProgress(e.loaded / e.total);
+      }
+    });
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch { reject(new Error('Upload succeeded but response was not JSON')); }
+      } else {
+        reject(new Error(`Upload failed: HTTP ${xhr.status} ${xhr.responseText || ''}`.trim()));
+      }
+    });
+    xhr.addEventListener('error', () => reject(new Error('Upload network error')));
+    xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')));
+    xhr.open('POST', '/api/library/upload');
+    xhr.send(form);
+  });
+  promise.abort = () => xhr.abort();
+  return promise;
 };
 
 // calibrateSyncGroup — POST /api/sync-groups/<groupId>/calibrate.
@@ -1306,6 +1374,6 @@ Object.assign(window, {
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, calibrateSyncGroup, setVideoDefaultUnmute,
+  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,
 });

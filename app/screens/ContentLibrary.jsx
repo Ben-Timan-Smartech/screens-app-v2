@@ -541,21 +541,97 @@ const BrandNavRow = ({ brand, active, onClick }) => (
   </button>
 );
 
-// Upload panel — slide-over on the right when open.
-//
-// In-CMS upload isn't built yet (the previous mockup mutated a local
-// state array with hardcoded fake files; nothing went anywhere). For
-// now we tell the user how to actually add content via Drive Sync.
-// Brand content lives in the shared Drive folder; dropping a file
-// in there + running Settings → Drive Sync → Sync now is the real
-// workflow. This panel becomes a real uploader once the
-// /api/library/upload endpoint ships.
+// Upload panel — slide-over on the right when open. v0.1.20: real
+// upload, replacing the v0.1.6 "Coming soon" placeholder. Posts
+// multipart/form-data to /api/library/upload, streams progress via
+// XHR upload events, and triggers a library-refresh so the new
+// video appears in the grid immediately instead of waiting for the
+// 60-second useLibrary tick.
 const UploadPanel = ({ open, onClose }) => {
   const vp = useViewport();
   const compact = vp.isCompact;
   // Phone / small tablet: full-width sheet that takes the whole pane.
   // Laptop+: 420 px slide-over from the right.
   const panelWidth = compact ? '100%' : 420;
+
+  // Form state
+  const [file, setFile] = React.useState(null);
+  const [brand, setBrand] = React.useState('');
+  const [title, setTitle] = React.useState('');
+  const [product, setProduct] = React.useState('');
+  // Upload state
+  const [uploading, setUploading] = React.useState(false);
+  const [progress, setProgress] = React.useState(0);    // 0..1
+  const [error, setError] = React.useState(null);
+  const inflightRef = React.useRef(null);
+  const fileInputRef = React.useRef(null);
+
+  // Brand options sourced from the live library. Falls back to the
+  // bare MOCK_BRANDS array if useLibrary hasn't synced yet. New
+  // brands can still be created from the typed-text field below the
+  // dropdown — useful when uploading the first asset for an asset-
+  // free brand.
+  const brands = (window.MOCK_BRANDS || []).map(b => ({
+    id: b.id || b.name,
+    name: b.name || b.id,
+  }));
+
+  // Reset state when the panel closes so re-opening starts fresh.
+  React.useEffect(() => {
+    if (!open) {
+      if (inflightRef.current) try { inflightRef.current.abort(); } catch (_) {}
+      inflightRef.current = null;
+      setFile(null); setBrand(''); setTitle(''); setProduct('');
+      setUploading(false); setProgress(0); setError(null);
+    }
+  }, [open]);
+
+  const onPickFile = (f) => {
+    setFile(f);
+    setError(null);
+    // Default the title from the filename stem if the user hasn't
+    // typed something. They can still edit afterwards.
+    if (f && !title) {
+      const stem = f.name.replace(/\.[^.]+$/, '');
+      setTitle(stem);
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (!file || !brand) {
+      setError(!file ? 'Pick a video file first.' : 'Pick or type a brand.');
+      return;
+    }
+    setUploading(true);
+    setProgress(0);
+    setError(null);
+    try {
+      const promise = uploadVideo({
+        file, brand, title, product,
+        onProgress: (frac) => setProgress(frac),
+      });
+      inflightRef.current = promise;
+      const result = await promise;
+      // Optimistic insert: hand the new entry to useLibrary in the
+      // event detail. It pushes the row into MOCK_VIDEOS straight
+      // away and bumps the version counter, so the grid re-renders
+      // *immediately* with no /api/library round-trip on the
+      // critical path. The next interval tick reconciles with the
+      // server. Previously we dispatched a bare event and waited
+      // for the round-trip — perceptibly slow on a 450 kB library.
+      window.dispatchEvent(new CustomEvent('library-refresh', {
+        detail: { video: result?.video },
+      }));
+      showToast(`Uploaded "${result?.video?.title || file.name}"`, 'ok');
+      onClose();
+    } catch (e) {
+      setError(e.message || 'Upload failed.');
+    } finally {
+      setUploading(false);
+      inflightRef.current = null;
+    }
+  };
+
   return (
   <div style={{
     position: 'absolute', top: 0, right: 0, bottom: 0, left: compact && open ? 0 : 'auto',
@@ -569,46 +645,162 @@ const UploadPanel = ({ open, onClose }) => {
     <div style={{ width: panelWidth, maxWidth: '100%', display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '14px 20px', borderBottom: 'var(--border)' }}>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink-1)' }}>Upload content</div>
-          <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>Coming soon</div>
-        </div>
-        <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} />
-      </div>
-      <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
-        <div style={{
-          border: 'var(--border)', borderRadius: 10, padding: 18,
-          background: 'var(--ink-9)', marginBottom: 16,
-        }}>
-          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 6 }}>
-            In-CMS uploads aren't ready yet
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.55 }}>
-            Until they ship, add brand content the same way you always have:
-            drop the file into the shared Drive folder, then run a sync.
+          <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink-1)' }}>Upload video</div>
+          <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>
+            MP4 / MOV / WebM · up to 1 GB
           </div>
         </div>
-
-        <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
-          How to add a video today
-        </div>
-        <ol style={{ fontSize: 12, color: 'var(--ink-2)', lineHeight: 1.6, paddingLeft: 18, margin: 0 }}>
-          <li>Open the Brand Content folder in Google Drive.</li>
-          <li>Drop the new MP4 / MOV into the brand subfolder it belongs to.</li>
-          <li>Back here, go to <strong>Settings → Drive Sync</strong> and click <strong>Sync now</strong>.</li>
-          <li>The video shows up in the library within ~1 minute.</li>
-        </ol>
-
-        <div style={{ marginTop: 18 }}>
-          <Button variant="secondary" size="sm" icon={<Icon.sync size={12} />} onClick={() => { onClose(); navigate('/settings#drive-sync'); }}>
-            Open Drive Sync
-          </Button>
-        </div>
+        <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} disabled={uploading} />
       </div>
+
+      <div style={{ flex: 1, overflow: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {/* File picker — visual dropzone with hidden native input. */}
+        <div
+          onClick={() => !uploading && fileInputRef.current?.click()}
+          onDragOver={(e) => { e.preventDefault(); }}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (uploading) return;
+            const f = e.dataTransfer?.files?.[0];
+            if (f) onPickFile(f);
+          }}
+          style={{
+            border: '1.5px dashed var(--ink-6)', borderRadius: 10,
+            padding: 22, textAlign: 'center',
+            background: file ? 'var(--ink-9)' : 'transparent',
+            cursor: uploading ? 'not-allowed' : 'pointer',
+            opacity: uploading ? 0.6 : 1,
+          }}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="video/mp4,video/quicktime,video/webm,video/*"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) onPickFile(f);
+            }}
+          />
+          {file ? (
+            <>
+              <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', wordBreak: 'break-all' }}>
+                {file.name}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 4 }}>
+                {(file.size / 1_000_000).toFixed(1)} MB · click to change
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>
+                Drop a video here, or click to browse
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 4 }}>
+                MP4 / MOV / WebM / MKV
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Brand — dropdown of known brands, plus a free-type field
+            so the operator can create one on the fly for a casual
+            upload. Server auto-registers any new brand id. */}
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-2)', marginBottom: 6 }}>
+            Brand
+          </div>
+          {brands.length > 0 && (
+            <select
+              value={brand}
+              onChange={(e) => setBrand(e.target.value)}
+              disabled={uploading}
+              style={{
+                width: '100%', padding: '8px 10px', fontSize: 13,
+                border: 'var(--border)', borderRadius: 6,
+                background: 'var(--ink-10)', color: 'var(--ink-1)',
+                marginBottom: 6,
+              }}>
+              <option value="">— pick a brand —</option>
+              {brands.map(b => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              ))}
+              <option value="__new__">+ Or type a new brand below</option>
+            </select>
+          )}
+          <Input
+            placeholder={brands.length ? 'Or type a brand id (lowercase, no spaces)' : 'Brand id (e.g. sonos)'}
+            value={brand === '__new__' ? '' : brand}
+            onChange={(e) => setBrand(e.target.value.trim().toLowerCase().replace(/\s+/g, '-'))}
+            disabled={uploading}
+          />
+        </div>
+
+        {/* Title — pre-filled from filename, editable. */}
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-2)', marginBottom: 6 }}>
+            Title
+          </div>
+          <Input
+            placeholder="What this video is called in the library"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            disabled={uploading}
+          />
+        </div>
+
+        {/* Product — optional sub-category. */}
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-2)', marginBottom: 6 }}>
+            Product <span style={{ color: 'var(--ink-4)', fontWeight: 400 }}>· optional</span>
+          </div>
+          <Input
+            placeholder="e.g. Arc Ultra, Era 300"
+            value={product}
+            onChange={(e) => setProduct(e.target.value)}
+            disabled={uploading}
+          />
+        </div>
+
+        {/* Progress + error */}
+        {uploading && (
+          <div>
+            <div style={{ height: 6, borderRadius: 3, background: 'var(--ink-8)', overflow: 'hidden' }}>
+              <div style={{
+                width: `${Math.round(progress * 100)}%`,
+                height: '100%',
+                background: 'var(--ink-0)',
+                transition: 'width .1s linear',
+              }} />
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 6, textAlign: 'right', fontFamily: 'ui-monospace, monospace' }}>
+              {Math.round(progress * 100)}%
+            </div>
+          </div>
+        )}
+        {error && (
+          <div style={{
+            padding: 10, borderRadius: 6,
+            background: 'rgba(166, 56, 36, 0.08)',
+            color: '#A63824', fontSize: 12,
+          }}>
+            {error}
+          </div>
+        )}
+      </div>
+
+      {/* Footer: cancel + submit. */}
       <div style={{ padding: '14px 20px', borderTop: 'var(--border)', display: 'flex', gap: 8, alignItems: 'center' }}>
-        <div style={{ flex: 1, fontSize: 11, color: 'var(--ink-4)' }}>
-          We'll wire real uploads once the server endpoint lands.
-        </div>
-        <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
+        <div style={{ flex: 1 }} />
+        <Button variant="ghost" size="sm" onClick={onClose} disabled={uploading}>
+          Cancel
+        </Button>
+        <Button
+          variant="primary" size="sm"
+          icon={<Icon.upload size={13} />}
+          onClick={handleSubmit}
+          disabled={uploading || !file || !brand}>
+          {uploading ? 'Uploading…' : 'Upload'}
+        </Button>
       </div>
     </div>
   </div>

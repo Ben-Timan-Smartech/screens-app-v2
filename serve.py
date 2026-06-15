@@ -230,6 +230,14 @@ def _state_path_default(filename: str) -> str:
     """Sibling of LIBRARY_JSON with the given filename."""
     return str(LIBRARY_JSON.parent / filename)
 
+# v0.1.20: where uploaded videos go. Sibling of LIBRARY_JSON so a
+# single env var pins everything to /data on Cloud Run, including
+# the uploads dir — files live across container redeploys.
+UPLOADS_DIR = Path(os.environ.get(
+    "SCREENS_UPLOADS_DIR",
+    _state_path_default("uploads"),
+))
+
 PER_SCREEN_JSON = Path(os.environ.get(
     "SCREENS_PER_SCREEN_PATH",
     _state_path_default("per_screen.json"),
@@ -268,6 +276,86 @@ _screens: dict[str, dict] = {}      # deviceId -> registry (last heartbeat, devi
 # or per-screen audio/splash flags. For ~50 tablets the files are <100kB
 # each so writing on every heartbeat is fine. Atomic write = write to
 # .tmp then rename; readers always see a complete file.
+
+def _slug(s: str) -> str:
+    """ASCII slug for filenames + library ids. Strips punctuation, joins
+    runs of non-alnum to a single hyphen, lowercases, caps length. Used
+    by the v0.1.20 upload endpoint to turn a user-provided title into
+    something safe for disk + URL paths."""
+    import re as _re
+    out = _re.sub(r"[^a-zA-Z0-9]+", "-", (s or "").strip()).strip("-").lower()
+    return out[:60] or ""
+
+
+def _fmt_duration(sec: int) -> str:
+    """Render seconds as `M:SS` for the library `duration` display
+    field. Matches the shape scan-videos.py produces so the CMS doesn't
+    have to special-case uploaded vs synced rows."""
+    sec = max(0, int(sec))
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+def _parse_multipart(body: bytes, boundary: bytes) -> list[dict]:
+    """Minimal multipart/form-data parser. Returns one dict per part:
+        { name, filename?, content_type, data (bytes) }
+
+    Used only by the upload endpoint. Holds the whole body in memory —
+    upstream caller is responsible for size-capping via Content-Length
+    before calling. No streaming because the v0.1.20 upload flow caps
+    at 1 GiB and Cloud Run instances are 4 GiB.
+
+    Trades robustness for clarity: handles the standard boundary-
+    delimited shape produced by browsers + curl. Does NOT handle
+    nested multipart (`multipart/mixed` inside a part) — irrelevant
+    for a plain file upload."""
+    delim = b"--" + boundary
+    # Split on the delimiter. First chunk is the (empty) preamble; the
+    # last chunk after the trailing `--` is junk we discard.
+    chunks = body.split(delim)
+    out: list[dict] = []
+    for chunk in chunks[1:]:
+        # Trailing boundary is "--\r\n" — sentinel for end-of-parts.
+        if chunk.startswith(b"--"):
+            break
+        chunk = chunk.lstrip(b"\r\n")
+        # Strip the trailing CRLF that separates this part from the
+        # next delimiter; without this the file bytes pick up a stray
+        # \r\n which corrupts binary content.
+        if chunk.endswith(b"\r\n"):
+            chunk = chunk[:-2]
+        # Header / body split — first blank line.
+        hdr_end = chunk.find(b"\r\n\r\n")
+        if hdr_end < 0:
+            continue
+        headers_blob = chunk[:hdr_end].decode("utf-8", errors="replace")
+        data = chunk[hdr_end + 4:]
+        # Parse Content-Disposition + Content-Type from the headers.
+        name: str | None = None
+        filename: str | None = None
+        ctype = "application/octet-stream"
+        for raw_line in headers_blob.split("\r\n"):
+            line = raw_line.strip()
+            low = line.lower()
+            if low.startswith("content-disposition:"):
+                for piece in line.split(";"):
+                    piece = piece.strip()
+                    pl = piece.lower()
+                    if pl.startswith("name="):
+                        name = piece.split("=", 1)[1].strip().strip('"')
+                    elif pl.startswith("filename="):
+                        filename = piece.split("=", 1)[1].strip().strip('"')
+            elif low.startswith("content-type:"):
+                ctype = line.split(":", 1)[1].strip()
+        if not name:
+            continue
+        out.append({
+            "name":         name,
+            "filename":     filename,
+            "content_type": ctype,
+            "data":         data,
+        })
+    return out
+
 
 def _atomic_write_json(path: Path, data: object) -> None:
     """Atomic JSON write. Caller does NOT need to hold _STATE_LOCK —
@@ -1103,6 +1191,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return str(BRAND_DIR)
             return str(full)
 
+        # v0.1.20: serve CMS-uploaded videos. Same range-streaming
+        # path as /media; just a different root because UPLOADS_DIR
+        # lives on the writable FUSE mount whereas MEDIA_DIR points
+        # at the read-only Drive folder. Library entries created by
+        # the upload endpoint set `mediaUrl: "/uploaded/<file>"`, so
+        # the player follows that path to here.
+        if path.startswith("uploaded/"):
+            sub = path[len("uploaded/"):]
+            full = (UPLOADS_DIR / sub).resolve()
+            try:
+                full.relative_to(UPLOADS_DIR)
+            except ValueError:
+                return str(UPLOADS_DIR)
+            return str(full)
+
         if not path:
             return str(APP_DIR / "index.html")
         return str((APP_DIR / path).resolve())
@@ -1113,7 +1216,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith("/api/"):
             self._serve_api_get()
             return
-        if self.path.startswith("/media/") or self.path.startswith("/splash/"):
+        if (self.path.startswith("/media/")
+                or self.path.startswith("/splash/")
+                or self.path.startswith("/uploaded/")):
             self._serve_media(head_only=False)
             return
         # /apk      — modern build (the everyday one)
@@ -1133,12 +1238,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_HEAD(self) -> None:
-        if self.path.startswith("/media/") or self.path.startswith("/splash/"):
+        if (self.path.startswith("/media/")
+                or self.path.startswith("/splash/")
+                or self.path.startswith("/uploaded/")):
             self._serve_media(head_only=True)
             return
         super().do_HEAD()
 
     def do_POST(self) -> None:
+        # v0.1.20: multipart upload bypasses _serve_api_post because that
+        # path eagerly reads the whole body as JSON. Routed here as the
+        # only multipart endpoint so we don't have to teach the JSON
+        # reader to peek at Content-Type.
+        if self.path.split("?", 1)[0] == "/api/library/upload":
+            self._serve_api_library_upload()
+            return
         if self.path.startswith("/api/"):
             self._serve_api_post()
             return
@@ -1187,8 +1301,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         extra_headers: list[tuple[str, str]] | None = None,
     ) -> None:
         body = json.dumps(payload).encode("utf-8")
+        # v0.1.20: gzip JSON responses over ~4 KB when the client
+        # accepts it. The /api/library response is the biggest by far
+        # (~450 kB raw on a typical fleet) and was the slow path the
+        # CMS noticed after a Drive sync or upload — every poll
+        # downloaded the full payload over the wire. gzip cuts that
+        # to ~80 kB. Smaller responses skip compression because the
+        # CPU + header overhead isn't worth it.
+        accept_enc = (self.headers.get("Accept-Encoding") or "").lower()
+        gzipped = False
+        if len(body) > 4096 and "gzip" in accept_enc:
+            import gzip as _gzip
+            body = _gzip.compress(body, compresslevel=5)
+            gzipped = True
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        if gzipped:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         for name, value in (extra_headers or []):
@@ -1231,6 +1361,162 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return json.loads(raw.decode("utf-8"))
         except Exception:
             return {}
+
+    # ── v0.1.20: in-CMS video upload ─────────────────────────────────
+    # Cap on the multipart body size. 1 GiB is enough for any single
+    # video any tablet can usefully play (15 s loops aren't 1 GiB).
+    # Above this we 413 instead of trying to read the body into RAM —
+    # Cloud Run's per-instance memory ceiling is 4 GiB and we share
+    # it with library cache + state JSON + Python overhead.
+    _UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
+
+    def _serve_api_library_upload(self) -> None:
+        """POST /api/library/upload — multipart/form-data with fields:
+          file        the video bytes (required)
+          brand       brand id, e.g. "sonos" (required)
+          title       human-readable name (optional, defaults to filename)
+          product     sub-category within the brand (optional)
+          durationSec int — caller can pass it if known (optional;
+                      defaults to 15 s as a sensible signage loop)
+
+        Writes the file to UPLOADS_DIR/<safe>.<ext>, appends an entry
+        to library.json, returns the new entry. No transcoding — the
+        uploaded file is what plays back.
+        """
+        if self._require_perm("library.sync") is None:
+            return
+
+        ctype = self.headers.get("Content-Type", "")
+        if not ctype.lower().startswith("multipart/form-data"):
+            self.send_error(415, "Expected multipart/form-data"); return
+        # Extract boundary. RFC 2046 allows boundary= with or without quotes.
+        boundary = None
+        for piece in ctype.split(";"):
+            piece = piece.strip()
+            if piece.lower().startswith("boundary="):
+                boundary = piece[len("boundary="):].strip().strip('"')
+                break
+        if not boundary:
+            self.send_error(400, "Missing multipart boundary"); return
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.send_error(411, "Content-Length required"); return
+        if length <= 0:
+            self.send_error(411, "Content-Length required"); return
+        if length > self._UPLOAD_MAX_BYTES:
+            self.send_error(413, f"Body too large (cap {self._UPLOAD_MAX_BYTES} bytes)"); return
+
+        # Read the full body. Multipart parsing on a stream is doable
+        # but the boundary-detection state machine adds 80+ lines for
+        # marginal benefit — we already cap at 1 GiB and Cloud Run has
+        # 4 GiB. Keep it simple.
+        raw = self.rfile.read(length)
+        try:
+            parts = _parse_multipart(raw, boundary.encode("ascii"))
+        except Exception as exc:
+            self.send_error(400, f"Bad multipart body: {exc}"); return
+
+        # Pull out the fields we care about.
+        file_part = next((p for p in parts if p["name"] == "file" and p.get("filename")), None)
+        brand = next((p["data"].decode("utf-8", "replace").strip()
+                      for p in parts if p["name"] == "brand"), "")
+        title = next((p["data"].decode("utf-8", "replace").strip()
+                      for p in parts if p["name"] == "title"), "")
+        product = next((p["data"].decode("utf-8", "replace").strip()
+                        for p in parts if p["name"] == "product"), "")
+        duration_raw = next((p["data"].decode("utf-8", "replace").strip()
+                             for p in parts if p["name"] == "durationSec"), "")
+
+        if file_part is None:
+            self.send_error(400, "Missing 'file' field"); return
+        if not brand:
+            self.send_error(400, "Missing 'brand' field"); return
+        # Light video-mime sniff — Content-Type from the form is taken
+        # as best-effort. If absent or wrong, fall back to extension.
+        part_ctype = (file_part.get("content_type") or "").lower()
+        orig_name = file_part.get("filename") or "upload.mp4"
+        ext = os.path.splitext(orig_name)[1].lower().lstrip(".") or "mp4"
+        if ext not in {"mp4", "mov", "m4v", "webm", "mkv"}:
+            self.send_error(415, f"Unsupported file extension: .{ext}"); return
+        # Don't let a stray text/* or application/* through — they
+        # won't play on the tablet and only waste storage.
+        if part_ctype and not (
+            part_ctype.startswith("video/")
+            or part_ctype == "application/octet-stream"
+        ):
+            self.send_error(415, f"Unsupported content type: {part_ctype}"); return
+
+        duration_sec = 15
+        if duration_raw:
+            try:
+                duration_sec = max(1, min(600, int(float(duration_raw))))
+            except ValueError:
+                pass
+
+        # Default title from filename stem if blank.
+        if not title:
+            title = os.path.splitext(orig_name)[0]
+        # Slug for the on-disk filename — predictable, URL-safe, no
+        # spaces. The library `id` is just `upload-<timestamp>` so
+        # IDs never collide with Drive-synced or seeded entries.
+        ts_ms = int(time.time() * 1000)
+        slug = _slug(title) or "video"
+        video_id = f"upload-{ts_ms}"
+        safe_filename = f"{video_id}-{slug}.{ext}"
+
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        target = UPLOADS_DIR / safe_filename
+        with open(target, "wb") as fh:
+            fh.write(file_part["data"])
+        size_bytes = target.stat().st_size
+
+        # Append to library.json. We re-read fresh from disk rather
+        # than trust the in-memory cache so a concurrent Drive sync
+        # doesn't get clobbered.
+        if LIBRARY_JSON.is_file():
+            with open(LIBRARY_JSON, "r", encoding="utf-8") as f:
+                lib = json.load(f)
+        else:
+            lib = {"brands": [], "videos": []}
+        videos = lib.setdefault("videos", [])
+        brands = lib.setdefault("brands", [])
+
+        # Auto-register a brand record if this is the first video for
+        # an unknown brand. Keeps the brand picker self-healing — the
+        # CMS doesn't need a "create brand" flow for casual uploads.
+        if brand and not any((b.get("id") or "").lower() == brand.lower() for b in brands):
+            brands.append({"id": brand, "name": brand.replace("-", " ").title(), "videos": 0})
+
+        entry = {
+            "id":            video_id,
+            "title":         title,
+            "brand":         brand,
+            "product":       product or None,
+            "durationSec":   duration_sec,
+            "duration":      _fmt_duration(duration_sec),
+            "sizeMb":        round(size_bytes / 1_000_000.0, 1),
+            "filename":      safe_filename,
+            "mediaUrl":      f"/uploaded/{safe_filename}",
+            "uploadedAt":    int(time.time() * 1000),
+            "screens":       0,
+            "defaultUnmute": False,
+        }
+        videos.append(entry)
+
+        LIBRARY_JSON.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LIBRARY_JSON.with_suffix(LIBRARY_JSON.suffix + ".tmp")
+        tmp.write_text(json.dumps(lib, indent=2), encoding="utf-8")
+        tmp.replace(LIBRARY_JSON)
+        _LIBRARY_CACHE["mtime"] = 0.0   # force re-read on next GET
+
+        _log_activity(
+            kind="upload",
+            text=f"Uploaded \"{title}\" to {brand}",
+            icon="upload",
+        )
+        self._send_json({"ok": True, "video": entry})
 
     def _serve_api_get(self) -> None:
         url = urllib.parse.urlparse(self.path)
