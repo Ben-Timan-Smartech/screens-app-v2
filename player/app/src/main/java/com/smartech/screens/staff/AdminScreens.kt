@@ -184,6 +184,13 @@ fun DeviceAdminScreen(
     val locScreenCode by store.locScreenCode.collectAsState(initial = null)
     val liveServerUrl by store.liveServerUrl.collectAsState(initial = null)
 
+    // v0.1.22: Recent activity is a single focus target by default —
+    // tapping / Enter opens the full viewer overlay. This stops D-pad
+    // operators from having to scroll past dozens of log entries to
+    // reach the Reboot / Reinitialise actions below.
+    var logViewerOpen by remember { mutableStateOf(false) }
+
+    Box(Modifier.fillMaxSize()) {
     Row(Modifier.fillMaxSize()) {
         // Left rail
         Box(
@@ -262,15 +269,12 @@ fun DeviceAdminScreen(
 
             // Recent activity — hoisted to the top on v0.1.15 so it's
             // visible on first render on Android TV / TX3-class boxes.
-            // The whole right pane is a LazyColumn and the original
-            // position (just before the bottom spacer) was below the
-            // fold. On a TV remote you scroll a LazyColumn by D-padding
-            // to a focusable child below — and the InfoRow / log entry
-            // rows aren't focusable, so D-pad couldn't reach them and
-            // the panel was invisible. Putting it second-from-top
-            // sidesteps that entirely; tablet users still see the
-            // info card right below it.
-            item { LogPanel() }
+            // v0.1.22: collapsed into a single focusable preview card
+            // by default. Tapping (or pressing Enter on TV) opens a
+            // full-screen viewer with filter chips — operators no
+            // longer have to scroll through 50+ entries to reach the
+            // Reboot / Reinitialise actions below.
+            item { LogPanel(onExpand = { logViewerOpen = true }) }
 
             // Info card
             item {
@@ -458,7 +462,20 @@ fun DeviceAdminScreen(
             item { Spacer(Modifier.height(40.dp)) }
         }
     }
+    // v0.1.22: full-screen viewer overlay, rendered as a sibling of the
+    // Row so it sits above the entire Device admin pane (including the
+    // dark left rail). Opens when LogPanel's card is clicked; Back or
+    // the Close button dismisses.
+    if (logViewerOpen) {
+        LogViewerOverlay(onClose = { logViewerOpen = false })
+    }
+    } // end outer Box
 }
+
+/** v0.1.22: passes the open-the-viewer callback from DeviceAdminScreen
+ *  down to LogPanel. Kept as a typealias so the LazyColumn item slot
+ *  stays a one-liner. */
+private typealias LogPanelExpandCallback = () -> Unit
 
 @Composable
 private fun CardSection(title: String, content: @Composable () -> Unit) {
@@ -621,10 +638,20 @@ private fun Divider() {
 
 // ─────────────────────────────────────────────────────────────
 // Log panel — newest first, last 100 lines
+//
+// v0.1.22: collapsed by default to a single focusable preview card.
+// Tap / Enter opens [LogViewerOverlay], which has filter chips for
+// Errors / Warnings / Info. Operators no longer have to scroll
+// through every entry to reach the Reboot / Reinitialise rows.
 // ─────────────────────────────────────────────────────────────
 @Composable
-private fun LogPanel() {
+private fun LogPanel(onExpand: LogPanelExpandCallback) {
     val entries by LogBuffer.entries.collectAsState()
+
+    val errorCount = entries.count { it.level == LogBuffer.Level.E }
+    val warnCount  = entries.count { it.level == LogBuffer.Level.W }
+    val infoCount  = entries.count { it.level == LogBuffer.Level.I }
+    val mostRecent = entries.firstOrNull()
     val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.UK) }
 
     Column {
@@ -640,79 +667,293 @@ private fun LogPanel() {
             )
         }
         Spacer(Modifier.height(10.dp))
-        // v0.1.15: the entries used to live in a plain Column, which on
-        // Android TV gave D-pad nothing to land on — entries existed in
-        // the layout tree but were invisible because the parent
-        // LazyColumn (right pane) couldn't be scrolled past the "Clear"
-        // button. Switching to a bounded LazyColumn whose rows carry
-        // `Modifier.clickable {}` (no-op) gives each row a focus target
-        // so the remote scrolls through them naturally. Tablet users
-        // pay nothing — the clickable is inert, the focus ring (amber
-        // TvFocusIndication) only fires on actual focus traversal,
-        // which touch input doesn't produce.
-        if (entries.isEmpty()) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color.White)
-                    .border(1.dp, BoneLine, RoundedCornerShape(12.dp))
-                    .padding(18.dp),
-            ) {
-                Text(
-                    "No activity yet — uploads, pushes, and errors appear here.",
-                    color = Muted, fontSize = 13.sp,
-                )
-            }
-        } else {
-            androidx.compose.foundation.lazy.LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 0.dp, max = 360.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color.White)
-                    .border(1.dp, BoneLine, RoundedCornerShape(12.dp)),
-            ) {
-                val rows = entries.take(50)
-                items(rows.size) { i ->
-                    val e = rows[i]
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            // No-op clickable so D-pad can land on each
-                            // row and the LazyColumn auto-scrolls as
-                            // focus moves down. TvFocusIndication paints
-                            // the amber border; touch users never see it
-                            // because they never produce focus events.
-                            .clickable(onClick = {})
-                            .padding(horizontal = 18.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.Top,
-                    ) {
-                        Box(
-                            Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(levelColor(e.level))
-                        )
-                        Spacer(Modifier.size(10.dp))
-                        Text(
-                            fmt.format(Date(e.time)),
-                            color = Muted, fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.width(76.dp),
-                        )
-                        Column(Modifier.weight(1f)) {
-                            Text(e.tag, color = Muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+
+        // Single focusable preview card. The whole thing is one click
+        // / focus target, so D-pad DOWN past it lands directly on the
+        // Device info card below — no entry-by-entry tab traversal.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.White)
+                .border(1.dp, BoneLine, RoundedCornerShape(12.dp))
+                .clickable { onExpand() }
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+        ) {
+            Column {
+                if (entries.isEmpty()) {
+                    Text(
+                        "No activity yet — uploads, pushes, and errors appear here.",
+                        color = Muted, fontSize = 13.sp,
+                    )
+                } else {
+                    // Count summary as colour-coded chips, mirroring
+                    // [LogViewerOverlay]'s filter palette so the
+                    // visual mapping carries across the two views.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        LogCountChip(label = "$errorCount errors",  color = Color(0xFFA63824))
+                        Spacer(Modifier.width(8.dp))
+                        LogCountChip(label = "$warnCount warnings", color = Color(0xFFE8A33D))
+                        Spacer(Modifier.width(8.dp))
+                        LogCountChip(label = "$infoCount info",     color = Color(0xFF3D8C4B))
+                    }
+                    if (mostRecent != null) {
+                        Spacer(Modifier.height(10.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(levelColor(mostRecent.level))
+                            )
+                            Spacer(Modifier.size(8.dp))
                             Text(
-                                e.message + (e.cause?.let { " · $it" } ?: ""),
+                                fmt.format(Date(mostRecent.time)),
+                                color = Muted, fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.width(64.dp),
+                            )
+                            Text(
+                                mostRecent.message + (mostRecent.cause?.let { " · $it" } ?: ""),
                                 color = Ink, fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
                             )
                         }
                     }
-                    if (i < rows.size - 1) Divider()
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "Tap to browse all ${entries.size} event${if (entries.size == 1) "" else "s"}",
+                        color = Muted, fontSize = 12.sp,
+                    )
                 }
             }
         }
+    }
+}
+
+/** Small coloured pill — count + label — used both in the LogPanel
+ *  preview and as inactive-state filter chips inside the viewer. */
+@Composable
+private fun LogCountChip(label: String, color: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(color)
+        )
+        Spacer(Modifier.size(6.dp))
+        Text(label, color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+/**
+ * v0.1.22: full-screen viewer for the in-memory log. Opens when the
+ * preview card on the Device admin page is tapped. Has filter chips
+ * for All / Errors / Warnings / Info, a scrollable LazyColumn of
+ * entries, and a Close button. Back key (TV remote / hardware) also
+ * dismisses.
+ *
+ * Filter palette matches the [levelColor] dots elsewhere — red for
+ * errors, amber for warnings, green for info — so the visual mapping
+ * carries across the preview, the dots, and the chips themselves.
+ */
+@Composable
+private fun LogViewerOverlay(onClose: () -> Unit) {
+    val entries by LogBuffer.entries.collectAsState()
+    var filter by remember { mutableStateOf<LogBuffer.Level?>(null) }  // null = All
+    val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.UK) }
+
+    val filtered = remember(entries, filter) {
+        if (filter == null) entries
+        else entries.filter { it.level == filter }
+    }
+    val errorCount = entries.count { it.level == LogBuffer.Level.E }
+    val warnCount  = entries.count { it.level == LogBuffer.Level.W }
+    val infoCount  = entries.count { it.level == LogBuffer.Level.I }
+
+    // Back key dismisses. Declared at this composable level so it
+    // unregisters automatically when the overlay leaves composition.
+    androidx.activity.compose.BackHandler(enabled = true, onBack = onClose)
+
+    // Scrim — clicking outside the card closes. The card body itself
+    // swallows clicks via its own clickable {} no-op (no onClick),
+    // otherwise tapping anywhere on the card would also dismiss.
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color(0xCC000000))
+            .clickable(onClick = onClose),
+    ) {
+        Box(
+            Modifier
+                .align(Alignment.Center)
+                .fillMaxWidth(0.92f)
+                .fillMaxHeight(0.88f)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Bone)
+                .clickable(onClick = {})       // swallow scrim clicks
+                .padding(24.dp),
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                // Header — title + close
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Recent activity",
+                        color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .border(1.dp, BoneLine, RoundedCornerShape(6.dp))
+                            .clickable(onClick = onClose)
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                    ) {
+                        Text("Close", color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+
+                // Filter chips — All / Errors / Warnings / Info.
+                // Tappable + focusable; selected state highlights with
+                // the matching level colour so the visual mapping
+                // carries from the LogPanel preview.
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        label = "All (${entries.size})",
+                        selected = filter == null,
+                        accent = Ink,
+                        onClick = { filter = null },
+                    )
+                    FilterChip(
+                        label = "Errors ($errorCount)",
+                        selected = filter == LogBuffer.Level.E,
+                        accent = Color(0xFFA63824),
+                        onClick = { filter = LogBuffer.Level.E },
+                    )
+                    FilterChip(
+                        label = "Warnings ($warnCount)",
+                        selected = filter == LogBuffer.Level.W,
+                        accent = Color(0xFFE8A33D),
+                        onClick = { filter = LogBuffer.Level.W },
+                    )
+                    FilterChip(
+                        label = "Info ($infoCount)",
+                        selected = filter == LogBuffer.Level.I,
+                        accent = Color(0xFF3D8C4B),
+                        onClick = { filter = LogBuffer.Level.I },
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+
+                // Entries list. Empty-state copy adapts to the filter:
+                // "no errors" reads better than "no activity yet"
+                // when the user has explicitly chosen Errors and the
+                // log is mostly green.
+                if (filtered.isEmpty()) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 80.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(BoneSoft)
+                            .padding(20.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            when (filter) {
+                                LogBuffer.Level.E -> "No errors recorded."
+                                LogBuffer.Level.W -> "No warnings recorded."
+                                LogBuffer.Level.I -> "No info events recorded."
+                                else -> "No activity yet."
+                            },
+                            color = Muted, fontSize = 14.sp,
+                        )
+                    }
+                } else {
+                    androidx.compose.foundation.lazy.LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.White)
+                            .border(1.dp, BoneLine, RoundedCornerShape(12.dp)),
+                    ) {
+                        items(filtered.size) { i ->
+                            val e = filtered[i]
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    // No-op clickable so D-pad can land
+                                    // on each row + scroll the inner
+                                    // LazyColumn on TV. Same trick as
+                                    // v0.1.15's original visibility fix.
+                                    .clickable(onClick = {})
+                                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.Top,
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(levelColor(e.level))
+                                )
+                                Spacer(Modifier.size(10.dp))
+                                Text(
+                                    fmt.format(Date(e.time)),
+                                    color = Muted, fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.width(76.dp),
+                                )
+                                Column(Modifier.weight(1f)) {
+                                    Text(e.tag, color = Muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                    Text(
+                                        e.message + (e.cause?.let { " · $it" } ?: ""),
+                                        color = Ink, fontSize = 13.sp,
+                                    )
+                                }
+                            }
+                            if (i < filtered.size - 1) Divider()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Filter chip used inside [LogViewerOverlay]. Selected state pulls
+ *  the accent colour up as background + ink as text; unselected is a
+ *  bordered ghost button. TvFocusIndication adds the amber focus
+ *  ring on D-pad navigation. */
+@Composable
+private fun FilterChip(
+    label: String,
+    selected: Boolean,
+    accent: Color,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (selected) accent else Color.Transparent)
+            .border(
+                width = if (selected) 0.dp else 1.dp,
+                color = if (selected) accent else BoneLine,
+                shape = RoundedCornerShape(999.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    ) {
+        Text(
+            label,
+            color = if (selected) Color.White else Ink,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
 

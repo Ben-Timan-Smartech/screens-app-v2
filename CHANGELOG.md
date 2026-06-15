@@ -18,6 +18,61 @@ Rules:
 
 ---
 
+## v0.1.22
+
+Device admin → Recent activity is now collapsible, with a filter
+viewer.
+
+### What changed
+
+Recent activity used to be a tall card pinned to the top of the
+right pane. After v0.1.21 started shipping crash reports + the
+v0.1.18 drift-skip logs into the same buffer, the panel grew long
+enough that D-pad operators had to traverse 50+ rows to reach the
+Reboot / Reinitialise actions below — exactly what the operator
+flagged.
+
+v0.1.22 turns the panel into a **single focusable preview card**:
+
+- One press of DOWN on the remote scrolls past the whole panel to
+  the next card. No more entry-by-entry traversal.
+- The preview shows three coloured count pills (Errors, Warnings,
+  Info), the latest entry as a one-line teaser, and a "Tap to
+  browse all N events" hint.
+
+### Full viewer with filter chips
+
+Tapping the card (or pressing Enter on TV) opens a full-screen
+viewer with a dark scrim and a centred Bone-coloured card holding:
+
+- **Filter chips** — `All / Errors / Warnings / Info`. Selected
+  chip pulls the level's accent colour as background; unselected
+  is a bordered ghost button. The counts on each chip update live
+  with the log.
+- **Scrollable LazyColumn** of filtered entries. Row backgrounds
+  + the carry-over no-op clickable pattern from v0.1.15 keep
+  D-pad scroll working on TV.
+- **Close** button + Back key both dismiss; tapping outside the
+  card on the scrim also closes.
+
+When a filter is active and the matching log is empty, the empty
+state copy adapts ("No errors recorded.", "No warnings recorded.",
+etc.) instead of the generic "no activity yet" text.
+
+### Colour palette stays consistent
+
+The chip + dot palette is the same one `levelColor()` has used
+since v0.1.0:
+
+- Error → red `#A63824`
+- Warning → amber `#E8A33D`
+- Info → green `#3D8C4B`
+
+So a count-pill in the preview, a dot next to an entry, and a
+filter chip in the viewer all signal the same level the same way.
+
+Tablet-only release.
+
 ## v0.1.21
 
 The "delete a video and the tablet falls over" fix, plus the
