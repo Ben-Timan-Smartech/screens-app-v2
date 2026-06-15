@@ -18,6 +18,79 @@ Rules:
 
 ---
 
+## v0.1.20
+
+Real in-CMS video upload — finally replacing the v0.1.6 "Coming
+soon" placeholder.
+
+### What ships
+
+- **Server**: new `POST /api/library/upload` multipart endpoint.
+  Accepts a video file plus `brand`, optional `title`, optional
+  `product`, optional `durationSec`. Saves the file to a writable
+  `UPLOADS_DIR` (defaults to `/data/uploads` on Cloud Run, sibling
+  of `library.json`), appends an entry to `library.json`, returns
+  the new record. A new `/uploaded/<file>` URL prefix serves the
+  saved video back to the player with the same range-streaming
+  path `/media/` already uses, so the tablet sees no difference
+  from a Drive-synced asset.
+
+- **UI**: the Content Library's "Upload content" button now opens
+  a real form — file picker with drag-and-drop, brand dropdown
+  (sourced from the live library, with a "type a new brand" escape
+  hatch), title pre-filled from the filename, optional product
+  field. Submits via XHR so the progress bar tracks bytes-on-the-
+  wire, not just request lifecycle.
+
+- **Refresh — optimistic, no round-trip.** The upload response
+  already contains the new library entry, so the panel hands it
+  straight to `useLibrary` via a `library-refresh` `CustomEvent`
+  with `detail.video`. The hook pushes the row into `MOCK_VIDEOS`
+  and bumps the version counter — the grid re-renders **inside
+  the same tick** as the upload completing. No `/api/library`
+  round-trip on the critical "I just uploaded" path; the next
+  interval tick reconciles with the server in the background.
+  Previously the panel dispatched a bare event and forced a
+  full re-fetch — perceptibly slow on a 450 kB library payload.
+
+- **Library polling now gzipped.** `/api/library` responses are
+  ~450 kB raw on a typical fleet, and every open CMS tab polls
+  this once a minute. `_send_json` now gzips bodies over 4 kB
+  when the client advertises `Accept-Encoding: gzip`. Drops the
+  wire payload to ~80 kB, with no client change needed — the
+  browser decompresses transparently. Smaller responses skip
+  compression so per-response CPU is unchanged.
+
+### Limits + safety
+
+- **1 GB cap** on the multipart body. Above this the server
+  returns 413 rather than reading into RAM. Single-instance Cloud
+  Run has 4 GB.
+- **Extension allow-list**: `mp4`, `mov`, `m4v`, `webm`, `mkv`.
+  Anything else gets a 415 before any bytes are written to disk.
+- **Filename safety**: title is slugified, the on-disk filename
+  is `<upload-id>-<slug>.<ext>`. No traversal, no overwrite of
+  existing files.
+- **Atomic library write**: same write-tmp-then-rename pattern as
+  the rest of the per-screen state, so a crash mid-write can't
+  corrupt `library.json`.
+- **Permission-gated**: same `library.sync` permission as Drive
+  Sync — Viewer / Brand-partner roles can't upload.
+
+### What it does NOT do (yet)
+
+- No transcoding. The file you upload is the file that plays. If
+  it's a 4K HEVC, the tablet has to decode 4K HEVC.
+- No thumbnail. Library rows show a generic icon for uploaded
+  videos until the first poster image is wired.
+- No duration probe. Defaults to 15 s; CMS or tablet can edit if
+  needed.
+
+Tablets are unaffected by this release — the upload path is
+entirely server + web admin. Existing v0.1.19 (or earlier)
+tablets pick up uploaded content the same way they pick up
+Drive-synced content: through the next `/api/library` poll.
+
 ## v0.1.19
 
 Three small fixes off the back of an event-day install on a
