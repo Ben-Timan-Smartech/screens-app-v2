@@ -440,7 +440,7 @@ const PollModeRow = ({ value, onChange, disabled, isLive }) => {
   const modes = [
     { key: 'fast',   label: 'Fast',   detail: '10 s'   },
     { key: 'normal', label: 'Normal', detail: '60 s'   },
-    { key: 'slow',   label: 'Slow',   detail: '10 min' },
+    { key: 'slow',   label: 'Slow',   detail: '5 min'  },
   ];
   const sub = ({
     fast:   'Tablet checks the server every 10 s. Use for install / debugging.',
@@ -649,7 +649,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     if (!targetDeviceId) return;
     try {
       await setScreenPollMode(targetDeviceId, mode);
-      const label = { fast: 'Fast (10 s)', normal: 'Normal (60 s)', slow: 'Slow (10 min)' }[mode] || mode;
+      const label = { fast: 'Fast (10 s)', normal: 'Normal (60 s)', slow: 'Slow (5 min)' }[mode] || mode;
       showToast(
         isLive
           ? `Poll mode → ${label}`
@@ -944,7 +944,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                   variant="secondary" size="sm" icon={<Icon.refresh size={12} />}
                   disabled={!canEdit}
                   onClick={handleRefreshNow}
-                  title="Tells the tablet to re-poll. Useful in Slow mode when you want a push to land before the next 10-minute tick.">
+                  title="Tells the tablet to re-poll. Useful in Slow mode when you want a push to land before the next 5-minute tick.">
                   Refresh now
                 </Button>
                 <Button

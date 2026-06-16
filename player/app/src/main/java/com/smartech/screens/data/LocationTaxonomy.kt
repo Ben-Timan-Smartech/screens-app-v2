@@ -10,7 +10,7 @@ package com.smartech.screens.data
  */
 object LocationTaxonomy {
 
-    enum class Region { USA, UK, EU }
+    enum class Region { USA, UK, EU, GLOBAL }
 
     data class City(val code: String, val region: Region)
 
@@ -28,6 +28,11 @@ object LocationTaxonomy {
         City("LDN", Region.UK),
         City("BER", Region.EU),
         City("ROM", Region.EU),
+        // v0.1.37: GLB hosts the "Events" + "Test" stores and any
+        // custom-added store that isn't anchored to a real retail
+        // city. Region GLOBAL keeps them out of the cascade dropdowns
+        // a regional operator drives until they explicitly pick it.
+        City("GLB", Region.GLOBAL),
     )
 
     val stores: List<Store> = listOf(
@@ -54,6 +59,22 @@ object LocationTaxonomy {
             name = "tm:rw · La Rinascente",
             address = "Galleria Alberto Sordi, 00187 Roma",
             cityCode = "ROM",
+        ),
+        // v0.1.37: ad-hoc stores. Events for pop-ups + trade shows,
+        // Test for dev/QA fixtures. A CMS-side "add new store" flow
+        // is still pending — for now this hardcoded list is the
+        // source of truth and additions require an APK update.
+        Store(
+            id = "events",
+            name = "Events",
+            address = "Pop-up + event installations",
+            cityCode = "GLB",
+        ),
+        Store(
+            id = "test",
+            name = "Test",
+            address = "Development & QA fixtures",
+            cityCode = "GLB",
         ),
     )
 

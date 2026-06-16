@@ -131,19 +131,26 @@ const ROLE_LABEL = {
 // Concepts and floors are per-store in real life; for now they're
 // global lists. Constrain per-store in a follow-up if needed.
 // ─────────────────────────────────────────────────────────────
+// v0.1.37: GLOBAL region + GLB city carry stores that aren't tied to
+// a retail location — pop-up events, dev fixtures, anything ad-hoc.
+// Custom stores added via Settings → Locations also land here unless
+// the operator picks a real city.
 const LOCATION_TAXONOMY = {
-  regions: ['USA', 'UK', 'EU'],
+  regions: ['USA', 'UK', 'EU', 'GLOBAL'],
   cities: [
     { code: 'NYC', region: 'USA' },
     { code: 'LDN', region: 'UK'  },
     { code: 'BER', region: 'EU'  },
     { code: 'ROM', region: 'EU'  },
+    { code: 'GLB', region: 'GLOBAL' },
   ],
   stores: [
     { id: 'tmrw-times-square',   name: 'tm:rw Times Square',          address: '220W 42nd Street, 10036',                                  city: 'NYC' },
     { id: 'smartech-selfridges', name: 'Smartech · Selfridges LDN',   address: '400 Oxford St, Marylebone, Selfridges, London W1A 1AB',   city: 'LDN' },
     { id: 'smartech-kadewe',     name: 'Smartech · KaDeWe',           address: 'Tauentzienstraße 21–24, 10789 Berlin',                     city: 'BER' },
     { id: 'tmrw-rinascente',     name: 'tm:rw · La Rinascente',       address: 'Galleria Alberto Sordi, 00187 Roma',                       city: 'ROM' },
+    { id: 'events',              name: 'Events',                      address: 'Pop-up + event installations',                              city: 'GLB' },
+    { id: 'test',                name: 'Test',                        address: 'Development & QA fixtures',                                 city: 'GLB' },
   ],
   concepts: ['Smartech', 'Playhouse', 'Sanctuary', 'Bikeshop', 'The Track', '7EVN', 'Cornershop', 'tm:rw Cafe'],
   floors: ['GF', 'MEZ', 'TF'],

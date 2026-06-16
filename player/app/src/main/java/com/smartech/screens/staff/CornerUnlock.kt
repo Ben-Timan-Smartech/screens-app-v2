@@ -18,12 +18,18 @@ import androidx.compose.ui.unit.dp
  * Sequence: top-left → top-right → bottom-right → bottom-left. Any tap more
  * than [cornerDp] from the expected corner resets the sequence.
  * Time between corner taps is bounded by [timeoutMs].
+ *
+ * v0.1.37: bumped [cornerDp] from 96 → 180. The old corner area was
+ * ~24 mm wide on a 1080p TV at typical viewing distance — staff kept
+ * missing the corner with a finger and resetting the sequence. 180 dp
+ * gives a ~45 mm landing pad, still small enough that a stray tap on
+ * the lower-third doesn't trigger.
  */
 @Composable
 fun CornerUnlockOverlay(
     onUnlock: () -> Unit,
     modifier: Modifier = Modifier,
-    cornerDp: Int = 96,
+    cornerDp: Int = 180,
     timeoutMs: Long = 4_000,
 ) {
     val density = LocalDensity.current

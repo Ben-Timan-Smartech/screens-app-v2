@@ -18,6 +18,50 @@ Rules:
 
 ---
 
+## v0.1.37
+
+Easier admin access, faster legacy poll cadence, two new stores.
+
+### Bigger corner-tap area for admin unlock
+
+The four-corner tap sequence (TL → TR → BR → BL) that opens the staff
+overlay now accepts taps anywhere within **180 dp** of each corner,
+up from 96 dp. On a 1080p TV that's roughly **45 mm** of landing pad
+vs. 24 mm previously — staff stop missing the corner and resetting
+the sequence. Small enough that a stray tap on the lower-third
+doesn't trigger it.
+
+### Slow poll mode is now 5 minutes (was 10)
+
+10 minutes meant a pushed playlist could lag visibly behind for staff
+watching the wall. 5 minutes is still cellular-friendly but cuts the
+worst-case "I just pushed and it hasn't landed" wait in half. The
+wire value is unchanged (`slow`), so older servers + tablets keep
+working with the new label.
+
+### Legacy APK defaults to Slow
+
+The legacy flavor (Android 6/7 hardware, usually on stretched event
+wifi) now starts in Slow poll mode by default — both locally on the
+tablet AND server-side on first registration. Modern still defaults
+to Normal. Operators can change either from the CMS or the staff
+overlay; the default only applies to brand-new screens.
+
+Heartbeat + register now ship `appFlavor` so the server knows which
+APK each screen is running. Useful for crash triage too.
+
+### Two new stores: Events + Test
+
+Added to the location taxonomy under a new **GLOBAL** region (with a
+**GLB** city code):
+- **Events** — pop-up + event installations.
+- **Test** — development + QA fixtures.
+
+A CMS-side "add new store" form is still pending — for now, more
+stores need an APK + data.jsx update.
+
+---
+
 ## v0.1.36
 
 Join + leave sync groups from the tablet without going back to the CMS.
