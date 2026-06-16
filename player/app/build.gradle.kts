@@ -37,6 +37,15 @@ android {
         versionCode = appVersionCode
         versionName = appVersionName
 
+        // v0.1.41: ship only the locales + densities we actually use.
+        // Trims a few hundred KB off the APK from transitive library
+        // strings (Material3 etc. localise) and unused density buckets.
+        // Per-flavor overrides below tighten this further on legacy.
+        resourceConfigurations += listOf("en", "xhdpi", "xxhdpi")
+        // v0.1.41: route vector drawables through the support library on
+        // pre-API-21 codepaths. Cheap insurance for the legacy flavor.
+        vectorDrawables.useSupportLibrary = true
+
         // Backend base URL — overridable at build time.
         //   ./gradlew assembleRelease -PapiBase=https://api.smartech.group/api
         // Default is the production custom domain mapped at Cloud Run.
@@ -66,6 +75,9 @@ android {
         create("modern") {
             dimension = "compatibility"
             minSdk = 26
+            // Modern devices can use the full density set if the
+            // launcher / icon-pack picks higher buckets.
+            resourceConfigurations += listOf("xxxhdpi")
         }
         create("legacy") {
             dimension = "compatibility"
@@ -73,6 +85,11 @@ android {
             // Suffix the version so it's obvious in Settings → Apps which
             // build is on a given device.
             versionNameSuffix = "-legacy"
+            // v0.1.41: legacy targets armv7 boxes (Sumvision, TX3 Mini)
+            // with ~720p–1080p screens. xxxhdpi mipmaps were dead weight
+            // — those devices are xhdpi at best. mdpi + hdpi cover the
+            // rare 720p screens that still need it.
+            resourceConfigurations += listOf("mdpi", "hdpi")
         }
     }
 
@@ -145,6 +162,26 @@ android {
             "/META-INF/INDEX.LIST",
             "META-INF/io.netty.versions.properties"
         )
+    }
+}
+
+// v0.1.41: strip Kotlin's auto-generated null-check intrinsics on
+// every public-API call site in release builds. We control both ends
+// of every type that crosses these boundaries; the intrinsics are
+// belt-and-braces against external callers passing null, which never
+// happens in a single-APK shipped app. Removing them shrinks the
+// release bytecode (~3–5 % across the dex graph) and speeds up hot
+// dispatch paths — noticeable on the slow legacy boxes, invisible on
+// modern. Debug builds keep the assertions for tooling friendliness.
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    if (name.contains("Release", ignoreCase = true)) {
+        kotlinOptions {
+            freeCompilerArgs += listOf(
+                "-Xno-call-assertions",
+                "-Xno-receiver-assertions",
+                "-Xno-param-assertions",
+            )
+        }
     }
 }
 

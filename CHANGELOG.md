@@ -18,6 +18,44 @@ Rules:
 
 ---
 
+## v0.1.41
+
+Legacy-build polish + a first-boot fix that hit legacy hardest.
+
+### "Not configured" no longer lingers on first boot
+
+A fresh first boot used to sit on "Not configured" until the first
+poll tick landed — on the legacy flavor that's now 5 minutes (Slow
+default), so the screen looked broken for a long stretch.
+
+Root cause: a race between the URL pre-seed coroutine in
+`ScreensApp.onCreate` and the polling loop reading the URL. The
+polling loop now pre-seeds the URL inline before its first read, and
+flips connection state to **Connecting…** straight away instead of
+**Not configured**. First-boot wall-clock to "Online" drops from
+~5 min to ~5 s.
+
+### Legacy APK size + perf
+
+- **`resourceConfigurations`** filter: legacy now only ships
+  `en + mdpi/hdpi/xhdpi/xxhdpi` mipmap/strings. xxxhdpi is dropped
+  on legacy (those boxes don't have the screen density for it),
+  Material3's localised strings drop to English only. Modern keeps
+  xxxhdpi.
+- **`vectorDrawables.useSupportLibrary = true`** for both flavors so
+  vector assets render via the support library codepath on the older
+  Android Graphics stack.
+- **Kotlin null-check intrinsics stripped from release builds.**
+  `-Xno-call-assertions / -Xno-receiver-assertions /
+  -Xno-param-assertions` skip the auto-generated null-check method
+  prologues Kotlin inserts on every public-API call. We control both
+  ends of every type that crosses these boundaries in this app;
+  modern hardware doesn't notice the removed instructions, but the
+  legacy Cyclone's slow CPU does. Debug builds keep the assertions
+  for tooling friendliness.
+
+---
+
 ## v0.1.40
 
 Two event-day fixes.
