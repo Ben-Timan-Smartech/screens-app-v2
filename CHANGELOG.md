@@ -18,6 +18,64 @@ Rules:
 
 ---
 
+## v0.1.29
+
+Tablet-side command palette — press `/` on a USB keyboard plugged
+into the box and a Linear/Vercel-style command launcher appears
+over the player, same shortcut as the CMS.
+
+### Why this exists
+
+The Sumvision Cyclone (and most cheap signage boxes) doesn't ship
+with a remote. Operators show up with a USB keyboard. Up to now
+the only way to admin the box was the hold-OK gesture from
+v0.1.0, plus a few keyboard shortcuts. v0.1.29 makes `/` the
+universal "do something" key: same muscle memory as the CMS
+palette, works while content is playing, no need to hunt for the
+PIN-and-overlay path for safe actions.
+
+### The catalogue
+
+Three commands in the MVP:
+
+| Command | Needs PIN? | What it does |
+|---|---|---|
+| **Refresh playlist now** | No | Pings `refreshNow()` — re-poll the server immediately. Useful when a CMS push is in flight and the box is in Slow mode (10-min polls). |
+| **Show calibration clock (60 s)** | No | Triggers the v0.1.15 calibration overlay locally by POSTing to the screen's own `/api/sync-groups/<deviceId>/calibrate` endpoint. Giant ticking server-corrected clock for 60 s. |
+| **Open device admin** | Yes | Fires the staff-unlock bus, same as hold-OK. PIN screen comes up; full admin available after. |
+
+PIN-gated commands carry a small monospaced `needs PIN` chip
+next to the label so operators see the escalation before they
+commit. Safe commands run inline and close the palette.
+
+### Interaction
+
+- **Open:** press `/` on a USB keyboard (any time, including
+  while video is playing). Also accepts the numpad `/`.
+- **Filter:** type into the input. Word-AND matching across
+  label + hint, same as the CMS palette.
+- **Navigate:** ↑ / ↓ arrow keys.
+- **Run:** ↵ on the highlighted command.
+- **Dismiss:** Esc, or tap the dark scrim outside the card.
+
+The hotkey is captured in `MainActivity.dispatchKeyEvent` with
+`return true` so the keystroke doesn't bleed into whatever view
+has focus underneath. Suppressed while the staff overlay is up
+(so `/` typed into the PIN screen or admin fields behaves
+normally as a character).
+
+### Implementation note
+
+`PlayerRepository.triggerLocalCalibration` is a thin wrapper
+around the existing server endpoint — no new server code needed.
+The server already accepts a lone deviceId as a one-screen
+"group" (added in v0.1.15 for exactly this kind of single-screen
+diagnostic). The tablet POSTs, the response writes
+`calibrateUntilMs` to its per-screen record, the next poll
+surfaces it, and `CalibrationOverlay` (also v0.1.15) renders.
+
+Tablet-only release.
+
 ## v0.1.28
 
 Command palette hotkey now fires on the on-tablet preview page
