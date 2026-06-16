@@ -152,10 +152,13 @@ const _RemovedUsersTab = () => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Locations tab — taxonomy that drives the cascading dropdowns
-// on the tablet's Device admin screen and on every "Add screen"
-// flow. Read-only for now; edit by changing LOCATION_TAXONOMY in
-// app/components/data.jsx.
+// Locations tab — taxonomy that drives the cascading dropdowns on
+// the tablet's Device admin screen and on every "Add screen" flow.
+// v0.1.38: stores are editable from here. Region / city / concept /
+// floor / table are still hardcoded in LOCATION_TAXONOMY (a region
+// change is rare and touches a lot of downstream picker logic);
+// stores are the row that gets added most often for pop-ups, partner
+// activations, dev fixtures, etc.
 // ─────────────────────────────────────────────────────────────
 const TaxonomyList = ({ title, items, render }) => (
   <div style={{ border: 'var(--border)', borderRadius: 10, background: 'var(--ink-10)' }}>
@@ -169,8 +172,116 @@ const TaxonomyList = ({ title, items, render }) => (
   </div>
 );
 
+// Built-in store ids the server pre-loads on both clients. The form
+// rejects these as duplicates server-side, but we hide the delete
+// button on these rows too so the UI doesn't suggest the action is
+// possible.
+const BUILTIN_STORE_IDS = new Set([
+  'tmrw-times-square', 'smartech-selfridges',
+  'smartech-kadewe', 'tmrw-rinascente',
+  'events', 'test',
+]);
+
+const slugify = (s) => (s || '')
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, '-')
+  .replace(/^-+|-+$/g, '')
+  .slice(0, 60);
+
+const AddStoreForm = ({ cities, onAdded, onCancel }) => {
+  const [name, setName] = React.useState('');
+  const [id, setId] = React.useState('');
+  const [idTouched, setIdTouched] = React.useState(false);
+  const [address, setAddress] = React.useState('');
+  const [city, setCity] = React.useState(cities[0]?.code || '');
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  // Auto-suggest a slug from the name until the user edits the id
+  // field directly. Same pattern Content Library uses for video
+  // titles → ids.
+  const autoId = !idTouched ? slugify(name) : id;
+  const valid = name.trim() && /^[a-z0-9][a-z0-9-]{1,62}$/.test(autoId) && city;
+  const submit = async () => {
+    if (!valid || busy) return;
+    setBusy(true); setErr(null);
+    try {
+      const store = await addStore({ id: autoId, name: name.trim(), address: address.trim(), city });
+      showToast(`Added '${store.name}'`, 'ok');
+      onAdded(store);
+    } catch (e) {
+      setErr(e.message || 'add failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div style={{ border: 'var(--border)', borderRadius: 10, padding: 16, background: 'var(--ink-9)', marginBottom: 12 }}>
+      <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 10 }}>New store</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+        <div>
+          <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 4 }}>Name</label>
+          <Input placeholder="e.g. Smartech · Battersea" value={name} onChange={(e) => setName(e.target.value)} size="sm" />
+        </div>
+        <div>
+          <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 4 }}>ID <span style={{ color: 'var(--ink-4)', fontWeight: 400 }}>· kebab-case, unique</span></label>
+          <Input
+            placeholder={slugify(name) || 'store-slug'}
+            value={autoId}
+            onChange={(e) => { setIdTouched(true); setId(e.target.value); }}
+            size="sm"
+            style={{ fontFamily: 'var(--font-mono)' }}
+          />
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10, marginBottom: 10 }}>
+        <div>
+          <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 4 }}>Address</label>
+          <Input placeholder="Street, postcode" value={address} onChange={(e) => setAddress(e.target.value)} size="sm" />
+        </div>
+        <div>
+          <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 4 }}>City</label>
+          <div style={{ display: 'flex', alignItems: 'center', height: 28, padding: '0 10px', border: 'var(--border-strong)', borderRadius: 2, fontSize: 12, color: 'var(--ink-2)', background: 'var(--ink-10)' }}>
+            <select value={city} onChange={(e) => setCity(e.target.value)} style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', font: 'inherit', color: 'inherit', cursor: 'pointer' }}>
+              {cities.map(c => <option key={c.code} value={c.code}>{c.code} · {c.region}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+      {err && <div style={{ fontSize: 11, color: 'var(--err-1, #A63824)', marginBottom: 8 }}>{err}</div>}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Button size="sm" disabled={!valid || busy} onClick={submit}>{busy ? 'Saving…' : 'Add store'}</Button>
+        <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
+        <div style={{ flex: 1 }} />
+        <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>
+          Stores propagate to tablets on next launch (or via Refresh now).
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const LocationsTab = () => {
   const t = LOCATION_TAXONOMY;
+  // Bump a counter on `stores-refresh` so React re-renders the list
+  // when a mutation lands. LOCATION_TAXONOMY.stores is mutated in
+  // place by addStore/deleteStore; this is the cheapest way to
+  // notice without lifting the array into React state on every page.
+  const [, setTick] = React.useState(0);
+  React.useEffect(() => {
+    const bump = () => setTick(x => x + 1);
+    window.addEventListener('stores-refresh', bump);
+    return () => window.removeEventListener('stores-refresh', bump);
+  }, []);
+  const [adding, setAdding] = React.useState(false);
+  const removeStore = async (id, name) => {
+    if (!confirm(`Remove store '${name}'?\n\nAny screen still linked to it will fall back to its raw id until reassigned.`)) return;
+    try {
+      await deleteStore(id);
+      showToast(`Removed '${name}'`, 'ok');
+    } catch (e) {
+      showToast(`Couldn't remove: ${e.message}`, 'err');
+    }
+  };
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
@@ -193,19 +304,50 @@ const LocationsTab = () => {
       </div>
 
       <div style={{ border: 'var(--border)', borderRadius: 10, background: 'var(--ink-10)', marginBottom: 12 }}>
-        <div style={{ padding: '12px 16px', borderBottom: 'var(--border-faint)', display: 'flex', alignItems: 'center' }}>
+        <div style={{ padding: '12px 16px', borderBottom: 'var(--border-faint)', display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>Stores</div>
           <span className="tnum" style={{ fontSize: 11, color: 'var(--ink-4)' }}>{t.stores.length}</span>
+          {!adding && (
+            <Button size="sm" onClick={() => setAdding(true)}>+ Add store</Button>
+          )}
         </div>
-        {t.stores.map((s, i) => (
-          <div key={s.id} style={{ padding: '12px 16px', borderBottom: i < t.stores.length - 1 ? 'var(--border-faint)' : 'none', display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{s.name}</div>
-              <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>{s.address}</div>
-            </div>
-            <Chip tone="outline">{s.city}</Chip>
+        {adding && (
+          <div style={{ padding: 12, borderBottom: 'var(--border-faint)' }}>
+            <AddStoreForm
+              cities={t.cities}
+              onAdded={() => setAdding(false)}
+              onCancel={() => setAdding(false)}
+            />
           </div>
-        ))}
+        )}
+        {t.stores.map((s, i) => {
+          const builtIn = BUILTIN_STORE_IDS.has(s.id);
+          return (
+            <div key={s.id} style={{ padding: '12px 16px', borderBottom: i < t.stores.length - 1 ? 'var(--border-faint)' : 'none', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{s.name}</div>
+                <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>
+                  <span style={{ fontFamily: 'var(--font-mono)' }}>{s.id}</span>
+                  {s.address ? <> · {s.address}</> : null}
+                </div>
+              </div>
+              <Chip tone="outline">{s.city}</Chip>
+              {builtIn
+                ? <Chip tone="neutral">built-in</Chip>
+                : (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => removeStore(s.id, s.name)}
+                    title="Delete this custom store"
+                  >
+                    Remove
+                  </Button>
+                )
+              }
+            </div>
+          );
+        })}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 12 }}>

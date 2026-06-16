@@ -1208,6 +1208,52 @@ class PlayerRepository(
         }
     }
 
+    /** v0.1.38: pull custom stores from `/api/stores` and merge them
+     *  into [LocationTaxonomy]. Called once on startLiveSync — failures
+     *  leave the built-in list intact. The endpoint is unauthenticated
+     *  so this works pre-login too. */
+    private suspend fun refreshStoresFromServer(base: String) {
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder().url("$base/api/stores").build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) {
+                        LogBuffer.w(TAG, "refreshStoresFromServer HTTP ${r.code}")
+                        return@use
+                    }
+                    val raw = r.body?.string().orEmpty()
+                    val parsed = liveJson.decodeFromString(StoresEnvelope.serializer(), raw)
+                    val mapped = parsed.stores.mapNotNull { s ->
+                        val id = s.id ?: return@mapNotNull null
+                        val name = s.name ?: return@mapNotNull null
+                        val city = s.city ?: return@mapNotNull null
+                        LocationTaxonomy.Store(
+                            id = id,
+                            name = name,
+                            address = s.address.orEmpty(),
+                            cityCode = city,
+                        )
+                    }
+                    LocationTaxonomy.setCustomStores(mapped)
+                    LogBuffer.i(TAG, "Loaded ${mapped.size} custom stores from server")
+                }
+            }.onFailure {
+                LogBuffer.w(TAG, "refreshStoresFromServer failed: ${it.message}")
+            }
+        }
+    }
+
+    @Serializable
+    private data class StoresEnvelope(val stores: List<RemoteStore> = emptyList())
+
+    @Serializable
+    private data class RemoteStore(
+        val id: String? = null,
+        val name: String? = null,
+        val address: String? = null,
+        val city: String? = null,
+    )
+
     /** v0.1.29: tablet-driven calibration trigger for the on-device
      *  command palette. Hits the server's own
      *  `/api/sync-groups/<deviceId>/calibrate` endpoint as if from
@@ -1600,6 +1646,10 @@ class PlayerRepository(
         liveScope.launch {
             // Register once (best-effort, logs on failure).
             store.liveServerUrl.first()?.let { registerLive(it.trimEnd('/')) }
+            // v0.1.38: pull custom stores once on startup so any
+            // additions from the CMS land in the on-tablet picker
+            // without needing an APK update. Fire-and-forget.
+            store.liveServerUrl.first()?.let { refreshStoresFromServer(it.trimEnd('/')) }
             while (true) {
                 val url = store.liveServerUrl.first()
                 if (url.isNullOrBlank()) {

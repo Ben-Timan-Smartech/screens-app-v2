@@ -268,6 +268,14 @@ SYNC_GROUPS_JSON = Path(os.environ.get(
     "SCREENS_SYNC_GROUPS_PATH",
     _state_path_default("sync_groups.json"),
 ))
+# v0.1.38: stores added from the CMS Locations tab. Built-ins live in
+# the static taxonomy on both clients (app/components/data.jsx and
+# LocationTaxonomy.kt) so the picker has a default if /api/stores is
+# unreachable; this file is just the additions.
+CUSTOM_STORES_JSON = Path(os.environ.get(
+    "SCREENS_CUSTOM_STORES_PATH",
+    _state_path_default("custom_stores.json"),
+))
 
 # Cloud Run injects $PORT (defaults to 8080); on a laptop we keep 8765.
 PORT = int(os.environ.get("PORT", "8765"))
@@ -285,6 +293,8 @@ RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
 _STATE_LOCK = threading.RLock()
 _per_screen: dict[str, dict] = {}   # deviceId -> {revision, items, pushedAt, mixSplash, pendingCommands}
 _screens: dict[str, dict] = {}      # deviceId -> registry (last heartbeat, device info, etc.)
+# v0.1.38: keyed by slug id. {id, name, address, city}
+_custom_stores: dict[str, dict] = {}
 
 
 # ── State persistence ────────────────────────────────────────────────
@@ -399,16 +409,22 @@ def _save_screens() -> None:
     _atomic_write_json(SCREENS_JSON, _screens)
 
 
+def _save_custom_stores() -> None:
+    """Persist _custom_stores. Call inside _STATE_LOCK after any mutation."""
+    _atomic_write_json(CUSTOM_STORES_JSON, _custom_stores)
+
+
 def _load_state_from_disk() -> None:
     """One-shot loader, called once on module import. Best-effort —
     a missing or corrupt file just means we start with empty state,
     same as fresh boot before persistence existed."""
-    global _per_screen, _screens, _sync_groups
+    global _per_screen, _screens, _sync_groups, _custom_stores
     with _STATE_LOCK:
         for path, target_name in [
             (PER_SCREEN_JSON, "_per_screen"),
             (SCREENS_JSON, "_screens"),
             (SYNC_GROUPS_JSON, "_sync_groups"),
+            (CUSTOM_STORES_JSON, "_custom_stores"),
         ]:
             if not path.is_file():
                 continue
@@ -421,6 +437,8 @@ def _load_state_from_disk() -> None:
                     _per_screen = raw
                 elif target_name == "_screens":
                     _screens = raw
+                elif target_name == "_custom_stores":
+                    _custom_stores = raw
                 else:
                     _sync_groups = raw
                 print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
@@ -1752,6 +1770,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json(payload)
             return
 
+        # v0.1.38: custom stores. Public read so the tablet's
+        # LocationTaxonomy can merge in additions at app launch
+        # without needing a user session. The CMS reads it on boot
+        # too. POST + DELETE are gated below in the write section.
+        if path == "/api/stores":
+            with _STATE_LOCK:
+                stores = sorted(_custom_stores.values(), key=lambda s: s.get("id", ""))
+            self._send_json({"stores": stores})
+            return
+
         if path == "/api/screens":
             if self._require_perm("screens.view") is None:
                 return
@@ -2410,6 +2438,52 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"ok": True, "queued": True})
             return
 
+        # ── Custom stores (v0.1.38) ──────────────────────────────
+        # POST /api/stores  { id, name, address, city }
+        # Adds a store to the dynamic taxonomy used by both clients.
+        # Built-ins live in app/components/data.jsx + LocationTaxonomy.kt
+        # and can't be edited from here — the form just appends.
+        if path == "/api/stores":
+            if self._require_perm("settings.edit") is None:
+                return
+            raw_id = (body.get("id") or "").strip().lower()
+            name = (body.get("name") or "").strip()
+            address = (body.get("address") or "").strip()
+            city = (body.get("city") or "").strip()
+            # Slug: only kebab-case lowercase alnum + hyphens. Anything
+            # else would clash with existing built-in ids that this
+            # shape expects ("smartech-selfridges", "tmrw-rinascente").
+            slug_ok = bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", raw_id))
+            if not slug_ok:
+                self._send_json({"error": "bad_id", "detail": "id must be kebab-case lowercase, 2-63 chars"}, status=400); return
+            if not name:
+                self._send_json({"error": "bad_name"}, status=400); return
+            if not city:
+                self._send_json({"error": "bad_city"}, status=400); return
+            # Reject collisions with known built-in ids so a custom
+            # entry can't shadow a real retail store the picker
+            # already shows.
+            builtin_ids = {
+                "tmrw-times-square", "smartech-selfridges",
+                "smartech-kadewe", "tmrw-rinascente",
+                "events", "test",
+            }
+            with _STATE_LOCK:
+                if raw_id in builtin_ids:
+                    self._send_json({"error": "reserved_id"}, status=409); return
+                if raw_id in _custom_stores:
+                    self._send_json({"error": "duplicate_id"}, status=409); return
+                store = {"id": raw_id, "name": name, "address": address, "city": city}
+                _custom_stores[raw_id] = store
+                _save_custom_stores()
+            _log_activity(
+                kind="settings",
+                text=f"Added store '{name}' ({raw_id})",
+                icon="plus",
+            )
+            self._send_json({"ok": True, "store": store})
+            return
+
         # ── Splash mapping update ────────────────────────────────
         # POST /api/splashes/mapping  { city: "NYC", brand: "tmrw"|"smartech"|null }
         if path == "/api/splashes/mapping":
@@ -2801,6 +2875,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _serve_api_delete(self) -> None:
         path = self.path.split("?", 1)[0]
+        # v0.1.38: DELETE /api/stores/<id> removes a custom store.
+        # Built-ins (defined in data.jsx + LocationTaxonomy.kt) can't
+        # be deleted because they're not in _custom_stores; the
+        # handler 404s for any id not in the dict.
+        store_m = re.match(r"^/api/stores/([A-Za-z0-9_-]+)$", path)
+        if store_m:
+            if self._require_perm("settings.edit") is None:
+                return
+            store_id = store_m.group(1)
+            with _STATE_LOCK:
+                if store_id not in _custom_stores:
+                    self._send_json({"error": "not_found"}, status=404); return
+                name = _custom_stores[store_id].get("name") or store_id
+                del _custom_stores[store_id]
+                _save_custom_stores()
+            _log_activity(
+                kind="settings",
+                text=f"Deleted store '{name}'",
+                icon="trash",
+                tone="err",
+            )
+            self._send_json({"ok": True})
+            return
+
         m = re.match(r"^/api/users/([A-Za-z0-9_-]+)$", path)
         if not m:
             self.send_error(404, "Unknown API endpoint"); return
