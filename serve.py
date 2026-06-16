@@ -490,6 +490,14 @@ def _log_activity(
 POLL_MODES = ("fast", "normal", "slow")
 DEFAULT_POLL_MODE = "normal"
 
+# v0.1.40: stores that opt OUT of the auto-group-by-storeId behaviour.
+# Real retail stores want every screen on the same wall in sync by
+# default — pop-up + dev stores are catch-alls where screens are
+# almost always running independent content. Tablets at these stores
+# can still opt INTO a sync group from the staff overlay's Join
+# picker; we just don't force them into one on registration.
+AUTO_GROUP_EXEMPT_STORES = {"events", "test"}
+
 
 def _ensure_screen_state(device_id: str) -> dict:
     """Lazily create a per-screen state record. Caller must hold _STATE_LOCK."""
@@ -2203,9 +2211,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # without anyone touching the CMS. Admins can still
                 # opt out (set syncGroup to null) or override (to a
                 # custom group key like "wall-A").
+                #
+                # v0.1.40: skip auto-group for AUTO_GROUP_EXEMPT_STORES
+                # (Events, Test). These are catch-all stores for pop-ups
+                # + dev fixtures where forcing every tablet into a single
+                # group is almost never what the operator wants — they're
+                # usually running independent content. Tablets can still
+                # opt INTO a group from the on-screen Join picker.
                 loc = body.get("location") or {}
                 store_id = loc.get("storeId")
-                if state.get("syncGroup") is None and store_id:
+                if (
+                    state.get("syncGroup") is None
+                    and store_id
+                    and store_id not in AUTO_GROUP_EXEMPT_STORES
+                ):
                     state["syncGroup"] = f"store:{store_id}"
                     _save_per_screen()
                 _save_screens()
@@ -3242,6 +3261,24 @@ def main() -> None:
     # process's persisted state. Without this every Cloud Run redeploy
     # would wipe every screen's playlist and audio/splash flags.
     _load_state_from_disk()
+    # v0.1.40: clear any auto-set sync groups on Events / Test screens
+    # that were created before this release (when the auto-group logic
+    # didn't exempt them). Only touches groups that look auto-set
+    # (prefix "store:" + an exempt id); user-chosen group names are
+    # left alone.
+    with _STATE_LOCK:
+        cleared = 0
+        for d, s in _per_screen.items():
+            grp = s.get("syncGroup")
+            if not grp or not grp.startswith("store:"):
+                continue
+            sid = grp[len("store:"):]
+            if sid in AUTO_GROUP_EXEMPT_STORES:
+                s["syncGroup"] = None
+                cleared += 1
+        if cleared:
+            _save_per_screen()
+            print(f"[migrate] cleared auto-set sync group on {cleared} screens (events/test)", file=sys.stderr)
     # Daily re-scan in a background thread. Doesn't run on boot — the
     # existing library.json from the last run is used; Drive Sync UI lets
     # the user trigger an on-demand scan if needed.
