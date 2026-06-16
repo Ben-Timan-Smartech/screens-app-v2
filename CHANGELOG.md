@@ -18,6 +18,54 @@ Rules:
 
 ---
 
+## v0.1.34
+
+New top-level **Sync groups** view in the CMS. Up to now you could
+only see which screens belonged to which group by opening a single
+screen's detail page and reading its sync card. That answers "what
+group is *this* screen in" but not "what groups exist across my
+fleet" — the question every store manager actually asks.
+
+### What the page shows
+
+For each sync group:
+
+- The group id + current playlist revision
+- Member count + how many are online (green when 100 % healthy)
+- Number of videos in the shared playlist
+- A **Calibrate** button — fires the 60-second synchronised clock
+  overlay on every member, same as the in-card button on Screen
+  detail
+- An **Open first member** link as a quick jump to Screen detail
+  for inspecting / leaving the group
+
+Below each summary, a row per member showing online dot,
+name + store/screen code, and current revision — clicking any row
+opens that screen's detail page.
+
+### Plus the orphan list
+
+Underneath the groups, a separate card lists every screen that's
+**not in any sync group**. Useful for "why isn't the front-shop
+tablet syncing?" — if it's in the orphan list, it's playing
+independently. Click through to its detail page to join it.
+
+### No new server endpoint
+
+Derived client-side from `/api/screens`, which already returns
+each screen's `syncGroup` field. `useLiveScreens` was already
+polling that endpoint, so the page reuses the existing flow with
+no new network surface and no new permissions to manage. Same
+`screens.view` gate as the main Screens list.
+
+### Sidebar entry
+
+Between Screens and Schedules, with the brand sync icon. Gated
+on `screens.view` (anyone who can see the fleet can see the
+groupings).
+
+CMS-only release.
+
 ## v0.1.33
 
 "Mix splash keeps turning itself off when I select it" — fixing
