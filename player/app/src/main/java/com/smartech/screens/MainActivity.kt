@@ -20,6 +20,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
 import com.smartech.screens.player.PlayerController
 import com.smartech.screens.player.PlayerScreen
+import com.smartech.screens.player.TabletCommandPalette
 import com.smartech.screens.staff.HoldProgressIndicator
 import com.smartech.screens.staff.OnboardingScreen
 import com.smartech.screens.staff.StaffOverlay
@@ -49,6 +50,21 @@ class MainActivity : ComponentActivity() {
      * the collector hasn't subscribed yet on first composition.
      */
     private val unlockBus = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /**
+     * v0.1.29: USB-keyboard command-palette bus. Emits Unit every time
+     * the user presses `/` on a keyboard plugged into the box (the
+     * mirror of the CMS-side `/` palette). Distinct from [unlockBus]
+     * because:
+     *   • The command palette is a lightweight quick-action launcher
+     *     for things that don't need PIN escalation (refresh, show
+     *     calibration clock).
+     *   • Destructive actions inside the palette still route through
+     *     [unlockBus], which fires the existing PIN-gated staff
+     *     overlay.
+     * Same buffer-capacity-1 reasoning as [unlockBus].
+     */
+    private val commandPaletteBus = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     /**
      * The wall-clock timestamp at which the current hold-OK gesture began,
@@ -218,6 +234,19 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.align(Alignment.TopEnd),
                     )
 
+                    // v0.1.29: keyboard `/` command palette. Painted
+                    // below UpdaterOverlay so an in-flight update
+                    // still wins the screen. The palette gates its
+                    // own visibility on commandPaletteBus emissions
+                    // (fired from dispatchKeyEvent when `/` lands).
+                    // PIN-gated commands route into unlockBus to
+                    // open the existing staff overlay flow.
+                    TabletCommandPalette(
+                        repository = repo,
+                        externalOpen = commandPaletteBus,
+                        onRequestUnlock = { unlockBus.tryEmit(Unit) },
+                    )
+
                     // Self-update overlay — shows during APK download +
                     // install, and on failure. Painted last so it sits on
                     // top of everything else (player, staff, onboarding).
@@ -247,6 +276,22 @@ class MainActivity : ComponentActivity() {
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val k = event.keyCode
+        // v0.1.29: USB-keyboard `/` opens the tablet-side command
+        // palette — same shortcut as the CMS. Fires on ACTION_DOWN
+        // (single-tap, not hold). Suppressed when the staff overlay
+        // is already up, because then `/` should just be a character
+        // entering whatever field has focus there.
+        if (k == KeyEvent.KEYCODE_SLASH || k == KeyEvent.KEYCODE_NUMPAD_DIVIDE) {
+            if (event.action == KeyEvent.ACTION_DOWN
+                && event.repeatCount == 0
+                && !staffOverlayVisible.value
+            ) {
+                LogBuffer.i(TAG, "Command palette hotkey (/) fired")
+                commandPaletteBus.tryEmit(Unit)
+                return true   // consume so the keystroke doesn't bleed elsewhere
+            }
+            if (!staffOverlayVisible.value) return true
+        }
         if (isOkLikeKey(k)) {
             when (event.action) {
                 KeyEvent.ACTION_DOWN -> {

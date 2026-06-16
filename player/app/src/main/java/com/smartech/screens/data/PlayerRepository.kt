@@ -1143,6 +1143,49 @@ class PlayerRepository(
         }
     }
 
+    /** v0.1.29: tablet-driven calibration trigger for the on-device
+     *  command palette. Hits the server's own
+     *  `/api/sync-groups/<deviceId>/calibrate` endpoint as if from
+     *  the CMS — the server treats a lone deviceId as a one-screen
+     *  "group" and writes `calibrateUntilMs` straight onto the
+     *  per-screen record. The next poll surfaces it in /api/state
+     *  and [calibrateUntilMsFlow] flips. No new server code; this
+     *  is just a tablet-local convenience caller.
+     *
+     *  Best-effort — failures log but don't throw, since this is
+     *  fired from a UI button and the user can just press it again.
+     */
+    suspend fun triggerLocalCalibration(durationSec: Int) {
+        val base = store.liveServerUrl.first()?.trimEnd('/') ?: return
+        val deviceId = store.ensureDeviceId()
+        val body = """{"durationSec":$durationSec}"""
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/sync-groups/${urlEncode(deviceId)}/calibrate")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) {
+                        LogBuffer.w(TAG, "triggerLocalCalibration HTTP ${r.code}")
+                    } else {
+                        LogBuffer.i(TAG, "Local calibration triggered (${durationSec}s)")
+                    }
+                }
+                // Bust the rev so the next refresh re-pulls /api/state
+                // immediately instead of returning early on the
+                // unchanged-revision short-circuit.
+                lastLiveRevision = -1
+            }.onFailure {
+                LogBuffer.w(TAG, "triggerLocalCalibration failed: ${it.message}")
+            }
+        }
+        // Force a poll right now so the new calibrateUntilMs lands
+        // without waiting for the next scheduled tick. refreshNow
+        // pumps the live-sync loop's coroutine.
+        refreshNow()
+    }
+
     /** Trigger an immediate playlist refresh from any UI surface
      *  (staff overlay's "Refresh now" button or the CMS-side refresh
      *  command). Fires off the live polling loop's queue so it doesn't

@@ -308,4 +308,14 @@ class DeviceStore(private val context: Context) {
     fun locScreenCodeBlocking(): String? = runCatching {
         kotlinx.coroutines.runBlocking { locScreenCode.first() }
     }.getOrNull()
+
+    /** v0.1.29: device-ID accessor for the tablet command palette,
+     *  which runs synchronously inside a Compose composable and
+     *  needs a value (or null) without suspending. Same blocking
+     *  pattern as [deviceIdBlocking] but with a more explicit name
+     *  for callers that don't want to assume the ID is registered
+     *  yet. */
+    fun ensureDeviceIdBlockingOrNull(): String? = runCatching {
+        kotlinx.coroutines.runBlocking { ensureDeviceId() }
+    }.getOrNull()
 }
