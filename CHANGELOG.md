@@ -18,6 +18,47 @@ Rules:
 
 ---
 
+## v0.1.39
+
+Resumable video downloads — spotty in-store wifi no longer means
+re-downloading the same 300 MB clip from byte zero.
+
+### What changed
+
+- **`.part` files survive across attempts and restarts.** The init
+  block in `VideoCache` used to reap every `.part` file on startup
+  (so the app didn't ship a half-written video). It now leaves them
+  alone — they're the resume marker.
+- **Range-resume on retry.** When a download attempt finds existing
+  bytes in `<videoId>.mp4.part`, the next request sends
+  `Range: bytes=<existing>-`. A `206 Partial Content` appends to the
+  file; a `200 OK` (server ignored Range, e.g. older CDN) truncates
+  and restarts from zero; `416 Range Not Satisfiable` wipes the
+  partial and retries.
+- **Capped exponential backoff.** Up to 6 attempts per download with
+  delays 1.5s → 3s → 6s → 12s → 24s → 30s. Each attempt picks up
+  where the previous one stopped — so a connection that drops every
+  20 seconds still eventually finishes, instead of looping forever
+  re-fetching the first few MB.
+- **Dedicated downloader HTTP client.** The shared OkHttp client has
+  a 60-second call timeout (correct for API requests). For a 300 MB
+  video on 1 Mbps wifi that's hopelessly tight. `VideoCache` now
+  spins its own client off the shared one — same connection pool +
+  interceptors — with no call timeout and a longer read timeout.
+- **`reconcile` reaps orphan `.part` files.** Custom stores aside,
+  the cleanup pass on playlist refresh deletes `.part` files whose
+  video id is no longer in the playlist *and* not currently inflight.
+
+### What this means in practice
+
+A tablet that loses wifi mid-download will resume from the next
+attempt instead of starting over. If the tablet is restarted, the
+next launch picks up the existing `.part` and continues. The CMS
+"Recent activity" warnings about repeated download failures should
+drop noticeably at events with weak coverage.
+
+---
+
 ## v0.1.38
 
 Add new stores from the CMS — no APK rebuild needed.

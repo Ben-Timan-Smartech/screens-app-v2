@@ -2,36 +2,60 @@ package com.smartech.screens.data
 
 import android.content.Context
 import android.util.Log
+import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 /**
  * Disk-backed LRU video cache. Lives under the app's internal files dir —
  * survives app restarts, cleared on uninstall. Honours a soft cap (default 8GB)
  * with oldest-access-first eviction.
  *
- * Layout: `<filesDir>/videos/<videoId>.mp4`.
+ * Layout: `<filesDir>/videos/<videoId>.mp4` for completed downloads,
+ *         `<filesDir>/videos/<videoId>.mp4.part` for in-progress.
  *
- * Download strategy: stream from [OkHttpClient] straight to disk, atomically
- * rename from `.part` on completion. Partial files are orphaned on crash and
- * reaped on next startup.
+ * v0.1.39: resumable downloads. The `.part` file is preserved across:
+ *   - retries within a single [ensure] call (transient drops → backoff + Range)
+ *   - process restarts (init no longer reaps .part files; ensure resumes
+ *     from whatever bytes are already on disk)
+ *
+ * Spotty in-store wifi was burning through full re-downloads of 100+ MB
+ * videos on every drop. With Range-resume + an HTTP client that doesn't
+ * impose a callTimeout, the same drop costs us only the bytes after the
+ * last write.
  */
 class VideoCache(
     context: Context,
-    private val http: OkHttpClient,
+    sharedHttp: OkHttpClient,
 ) {
     private val root: File = File(context.filesDir, "videos").apply { mkdirs() }
     private val inflight = ConcurrentHashMap<String, Boolean>()
 
-    init {
-        // Reap stray .part files from a previous crash.
-        root.listFiles { f -> f.name.endsWith(".part") }?.forEach { it.delete() }
-    }
+    // v0.1.39: dedicated downloader client. The shared OkHttp client has a
+    // 60 s callTimeout (correct for API requests) — for a 300 MB video on
+    // 1 Mbps wifi that's nowhere near enough. We inherit the connection
+    // pool + interceptors via newBuilder() and lift the call timeout while
+    // keeping connect/read sensible so a truly dead socket still bails.
+    private val http: OkHttpClient = sharedHttp.newBuilder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.MILLISECONDS) // unbounded — Range-resume handles drops
+        .retryOnConnectionFailure(true)
+        .build()
+
+    // v0.1.39: was `root.listFiles { ... }?.forEach { it.delete() }` which
+    // reaped .part files on every cold start, killing resumable state.
+    // Now we leave them alone — they're the canonical resume marker.
+    // Stale .part files for videos no longer in the playlist get cleaned
+    // up by [reconcile] alongside their .mp4 siblings.
+    init { /* intentionally empty — keep .part across restarts */ }
 
     fun file(videoId: String): File = File(root, "$videoId.mp4")
     fun has(videoId: String): Boolean = file(videoId).exists() && file(videoId).length() > 0
@@ -60,37 +84,123 @@ class VideoCache(
         }
     }
 
+    /**
+     * Stream the URL into `<target>.part`, atomically rename on completion.
+     *
+     * v0.1.39: on each attempt, if the .part file already has bytes on disk
+     * (either from a prior failed attempt or a prior process), send
+     * `Range: bytes=<existing>-` and append the response body. We retry
+     * IOException with exponential backoff up to [maxAttempts]; each retry
+     * picks up exactly where the previous one stopped because the .part
+     * file is preserved across the inner loop.
+     *
+     * The retry loop handles transient connection drops — the kind in-store
+     * wifi throws every few minutes. Permanent failures (HTTP 404, no DNS)
+     * still surface after the retries are exhausted.
+     */
     private fun downloadTo(
         url: String,
         target: File,
         onProgress: ((bytes: Long, total: Long?) -> Unit)?,
     ) {
         val partial = File(target.parentFile, target.name + ".part")
-        val request = Request.Builder().url(url).build()
-        http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IllegalStateException("Download failed: HTTP ${response.code} for $url")
-            }
-            val body = response.body ?: throw IllegalStateException("Empty body for $url")
-            val total: Long? = body.contentLength().takeIf { it > 0 }
-            // Initial 0-byte tick so UI can show "starting…" without waiting
-            // for the first chunk on slow connections.
-            onProgress?.invoke(0L, total)
-            FileOutputStream(partial).use { out ->
-                val buffer = ByteArray(64 * 1024)
-                var read: Int
-                var accumulated = 0L
-                body.byteStream().use { input ->
-                    while (input.read(buffer).also { read = it } != -1) {
-                        out.write(buffer, 0, read)
-                        accumulated += read
-                        onProgress?.invoke(accumulated, total)
+        val maxAttempts = 6
+        var attempt = 0
+        var backoffMs = 1_500L
+        var lastError: Throwable? = null
+        while (attempt < maxAttempts) {
+            attempt++
+            val existing = if (partial.exists()) partial.length() else 0L
+            try {
+                val builder = Request.Builder().url(url)
+                if (existing > 0L) {
+                    builder.header("Range", "bytes=$existing-")
+                    LogBuffer.i(TAG, "Resuming download of ${target.name} from byte $existing (attempt $attempt)")
+                }
+                http.newCall(builder.build()).execute().use { response ->
+                    when (response.code) {
+                        206 -> {
+                            // Server honored the range — body has bytes
+                            // starting at `existing`. Append to file.
+                            val remaining = response.body?.contentLength() ?: -1L
+                            val total = if (remaining > 0) existing + remaining else null
+                            streamBodyToPart(response, partial, existing, total, onProgress, append = true)
+                        }
+                        200 -> {
+                            // Either we asked for the whole thing (existing
+                            // == 0) or the server ignored our Range header.
+                            // Either way we have the full payload — truncate
+                            // any stale .part bytes and start fresh.
+                            if (existing > 0L) {
+                                LogBuffer.w(TAG, "Server ignored Range; restarting ${target.name} from 0")
+                            }
+                            val total = response.body?.contentLength()?.takeIf { it > 0 }
+                            streamBodyToPart(response, partial, 0L, total, onProgress, append = false)
+                        }
+                        416 -> {
+                            // Range not satisfiable — usually means the .part
+                            // file is now larger than the resource (server
+                            // replaced the video, or we miscounted). Wipe
+                            // the partial and retry from scratch.
+                            LogBuffer.w(TAG, "HTTP 416 for ${target.name}; discarding partial and retrying")
+                            partial.delete()
+                            throw IOException("Range not satisfiable; reset")
+                        }
+                        else -> {
+                            // Non-retriable for client errors, retriable for
+                            // 5xx. We treat both as IOException so the loop
+                            // backs off; if it's a real 404 the retries will
+                            // exhaust and we bubble up.
+                            throw IOException("HTTP ${response.code} for $url")
+                        }
                     }
                 }
+                // Success — promote .part to .mp4 atomically.
+                if (!partial.renameTo(target)) {
+                    partial.delete()
+                    throw IOException("Could not rename .part into place")
+                }
+                return
+            } catch (e: IOException) {
+                lastError = e
+                LogBuffer.w(TAG, "Download attempt $attempt/$maxAttempts failed for ${target.name}: ${e.message}")
+                if (attempt >= maxAttempts) break
+                try {
+                    Thread.sleep(backoffMs)
+                } catch (ie: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw e
+                }
+                // Capped exponential — 1.5s, 3s, 6s, 12s, 24s, 30s.
+                backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
             }
-            if (!partial.renameTo(target)) {
-                partial.delete()
-                throw IllegalStateException("Could not rename part file into place")
+        }
+        throw lastError ?: IOException("Download failed after $maxAttempts attempts")
+    }
+
+    private fun streamBodyToPart(
+        response: okhttp3.Response,
+        partial: File,
+        startingBytes: Long,
+        total: Long?,
+        onProgress: ((bytes: Long, total: Long?) -> Unit)?,
+        append: Boolean,
+    ) {
+        val body = response.body ?: throw IOException("Empty body")
+        // Initial tick so the UI shows "starting…" before the first chunk
+        // lands on slow connections.
+        onProgress?.invoke(startingBytes, total)
+        FileOutputStream(partial, append).use { out ->
+            val buffer = ByteArray(64 * 1024)
+            var accumulated = startingBytes
+            body.byteStream().use { input ->
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read == -1) break
+                    out.write(buffer, 0, read)
+                    accumulated += read
+                    onProgress?.invoke(accumulated, total)
+                }
             }
         }
     }
@@ -108,6 +218,16 @@ class VideoCache(
                 val id = f.nameWithoutExtension
                 if (id !in keep) {
                     if (f.delete()) evicted += id
+                }
+            }
+            // v0.1.39: also reap orphan .part files for videos that
+            // are no longer in the playlist. Skip parts for videos
+            // currently inflight — those FDs are still being written.
+            // (Pattern: "<videoId>.mp4.part" → strip ".mp4.part".)
+            root.listFiles { f -> f.isFile && f.name.endsWith(".mp4.part") }?.forEach { f ->
+                val id = f.name.removeSuffix(".mp4.part")
+                if (id !in keep && id !in inflight) {
+                    f.delete()
                 }
             }
 
