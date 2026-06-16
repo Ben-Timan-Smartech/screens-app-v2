@@ -35,7 +35,11 @@ object LocationTaxonomy {
         City("GLB", Region.GLOBAL),
     )
 
-    val stores: List<Store> = listOf(
+    // Built-in stores. Custom stores added from the CMS land on the
+    // tablet via [setCustomStores] which merges /api/stores at app
+    // launch. Built-ins always win on id collision so a misconfigured
+    // server entry can't shadow a known retail store.
+    private val builtIn: List<Store> = listOf(
         Store(
             id = "tmrw-times-square",
             name = "tm:rw Times Square",
@@ -61,9 +65,8 @@ object LocationTaxonomy {
             cityCode = "ROM",
         ),
         // v0.1.37: ad-hoc stores. Events for pop-ups + trade shows,
-        // Test for dev/QA fixtures. A CMS-side "add new store" flow
-        // is still pending — for now this hardcoded list is the
-        // source of truth and additions require an APK update.
+        // Test for dev/QA fixtures. v0.1.38 added a CMS-side add-store
+        // form which appends to the list at runtime via [setCustomStores].
         Store(
             id = "events",
             name = "Events",
@@ -77,6 +80,22 @@ object LocationTaxonomy {
             cityCode = "GLB",
         ),
     )
+
+    @Volatile private var custom: List<Store> = emptyList()
+
+    /**
+     * v0.1.38: replace the dynamic store list with the server's
+     * /api/stores response. Called once at app launch from
+     * [com.smartech.screens.data.PlayerRepository.refreshStoresFromServer].
+     * Built-ins always win on id collision.
+     */
+    fun setCustomStores(next: List<Store>) {
+        val builtInIds = builtIn.map { it.id }.toSet()
+        custom = next.filter { it.id !in builtInIds }
+    }
+
+    /** Built-ins first, then any custom stores fetched from the server. */
+    val stores: List<Store> get() = builtIn + custom
 
     val concepts: List<String> = listOf(
         "Smartech", "Playhouse", "Sanctuary", "Bikeshop",

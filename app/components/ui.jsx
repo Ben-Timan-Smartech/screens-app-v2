@@ -471,6 +471,60 @@ const setScreenSyncGroup = async (deviceId, syncGroup) => {
   return res.json();
 };
 
+// addStore — v0.1.38. POST /api/stores. Adds a row to the dynamic
+// taxonomy LOCATION_TAXONOMY.stores so both the CMS dropdowns and
+// any tablet that fetches /api/stores at launch see it.
+// Built-in stores can't be edited from here; the server rejects
+// reserved ids with HTTP 409.
+const addStore = async ({ id, name, address, city }) => {
+  const res = await fetch('/api/stores', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, name, address, city }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `add-store failed: ${res.status}`);
+  }
+  const out = await res.json();
+  // Optimistic merge — refresh the in-memory taxonomy so the next
+  // render sees the new store without a full reload.
+  if (out.store && !LOCATION_TAXONOMY.stores.some(s => s.id === out.store.id)) {
+    LOCATION_TAXONOMY.stores.push(out.store);
+  }
+  window.dispatchEvent(new CustomEvent('stores-refresh'));
+  return out.store;
+};
+
+// deleteStore — DELETE /api/stores/<id>. Server only allows deletion
+// of custom (non-built-in) stores; 404s otherwise.
+const deleteStore = async (id) => {
+  const res = await fetch(`/api/stores/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`delete-store failed: ${res.status}`);
+  const i = LOCATION_TAXONOMY.stores.findIndex(s => s.id === id);
+  if (i >= 0) LOCATION_TAXONOMY.stores.splice(i, 1);
+  window.dispatchEvent(new CustomEvent('stores-refresh'));
+  return res.json();
+};
+
+// refreshStoresFromServer — fetched once at app boot so any custom
+// stores added since the last full reload show up in the dropdowns.
+// Skipped if /api/stores 500s or the network is down; the built-in
+// list still works fine on its own.
+const refreshStoresFromServer = async () => {
+  try {
+    const res = await fetch('/api/stores');
+    if (!res.ok) return;
+    const data = await res.json();
+    const builtInIds = new Set(LOCATION_TAXONOMY.stores.map(s => s.id));
+    for (const s of (data.stores || [])) {
+      if (!s.id || builtInIds.has(s.id)) continue;
+      LOCATION_TAXONOMY.stores.push(s);
+    }
+    window.dispatchEvent(new CustomEvent('stores-refresh'));
+  } catch { /* offline — keep built-ins */ }
+};
+
 // uploadVideo — v0.1.20 in-CMS desktop upload. POST multipart to
 // /api/library/upload. Returns a promise that resolves with the new
 // library entry; the `onProgress` callback fires with a 0..1 fraction
@@ -1379,4 +1433,10 @@ Object.assign(window, {
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,
+  addStore, deleteStore, refreshStoresFromServer,
 });
+
+// v0.1.38: pull any custom stores the server has on boot so the
+// dropdowns the rest of the CMS renders include them on first paint.
+// Fire-and-forget — failures keep the built-in list working.
+refreshStoresFromServer();

@@ -18,6 +18,45 @@ Rules:
 
 ---
 
+## v0.1.38
+
+Add new stores from the CMS — no APK rebuild needed.
+
+### CMS Settings → Locations → Stores
+
+The Stores list is now editable. **+ Add store** opens an inline form
+with name, address, city (dropdown from the existing taxonomy), and a
+kebab-case id that auto-suggests itself from the name as you type.
+Save commits via the new `POST /api/stores` endpoint and the row
+appears in the list immediately.
+
+Custom stores get a **Remove** button. Built-in stores (Times Square,
+Selfridges, KaDeWe, Rinascente, Events, Test) are tagged **built-in**
+and can't be deleted from here — they live in source and ship with
+every APK.
+
+### Server: `/api/stores` endpoints
+
+- `GET /api/stores` — public read, returns the custom additions only
+  (built-ins are baked into both clients).
+- `POST /api/stores` — gated on `settings.edit`. Validates kebab-case
+  id (2-63 chars), rejects collisions with built-ins and existing
+  customs, persists to `custom_stores.json` on the FUSE-mounted
+  bucket so deploys don't wipe additions.
+- `DELETE /api/stores/<id>` — gated on `settings.edit`. 404s on
+  built-in ids since they aren't in the dynamic dict.
+
+### Tablet pulls custom stores on launch
+
+`PlayerRepository.startLiveSync()` now fires a one-shot fetch to
+`/api/stores` after registration and feeds the result into
+`LocationTaxonomy.setCustomStores()`. The on-tablet store picker
+(Device admin → Location → Store) reflects the additions on next
+app launch without needing a new APK. Built-ins always win on id
+collision.
+
+---
+
 ## v0.1.37
 
 Easier admin access, faster legacy poll cadence, two new stores.
