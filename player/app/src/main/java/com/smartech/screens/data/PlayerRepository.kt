@@ -1644,6 +1644,22 @@ class PlayerRepository(
      */
     fun startLiveSync() {
         liveScope.launch {
+            // v0.1.41: pre-seed the live server URL BEFORE the polling
+            // loop reads it. Without this, a fresh first boot raced the
+            // pre-seed coroutine in ScreensApp.onCreate — the polling
+            // loop ran first, saw null, set ConnectionStatus to
+            // DISCONNECTED, and the UI sat on "Not configured" until the
+            // next tick (5 min on the legacy Slow default). Pre-seeding
+            // here makes the state flow flip straight to CONNECTING and
+            // then ONLINE on the first network round-trip.
+            if (store.liveServerUrl.first().isNullOrBlank()) {
+                val default = com.smartech.screens.BuildConfig.API_BASE.removeSuffix("/api")
+                runCatching { store.setLiveServerUrl(default) }
+                    .onSuccess { LogBuffer.i(TAG, "Pre-seeded liveServerUrl=$default") }
+                    .onFailure { LogBuffer.w(TAG, "Pre-seed failed: ${it.message}") }
+            }
+            _connection.value = ConnectionStatus.CONNECTING
+
             // Register once (best-effort, logs on failure).
             store.liveServerUrl.first()?.let { registerLive(it.trimEnd('/')) }
             // v0.1.38: pull custom stores once on startup so any
