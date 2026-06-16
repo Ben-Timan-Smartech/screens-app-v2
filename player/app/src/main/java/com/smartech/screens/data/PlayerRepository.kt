@@ -401,6 +401,10 @@ class PlayerRepository(
          *  including self. Empty when the screen isn't grouped.
          *  Surfaced in the Device admin "Sync group" card. */
         val syncGroupMembers: List<LiveGroupMember> = emptyList(),
+        /** v0.1.36: every distinct sync group across the fleet, so
+         *  the tablet's "Join a group" picker has something to render
+         *  without making the operator type a group ID. */
+        val availableSyncGroups: List<AvailableSyncGroup> = emptyList(),
         val playback: LivePlayback? = null,
         /** Server's wall-clock at response build time. We use it to
          *  correct for transit latency when seeking. */
@@ -433,6 +437,16 @@ class PlayerRepository(
         val screenCode: String? = null,
         val storeId: String? = null,
         val isSelf: Boolean = false,
+    )
+
+    /** v0.1.36: lightweight summary of a sync group, used to populate
+     *  the "Join a group" picker on the tablet. The server emits one
+     *  of these per distinct `syncGroup` value across the fleet. */
+    @Serializable
+    data class AvailableSyncGroup(
+        val id: String = "",
+        val memberCount: Int = 0,
+        val onlineCount: Int = 0,
     )
 
     /** Server-emitted group sync info. As of v0.1.12 the only field
@@ -521,6 +535,11 @@ class PlayerRepository(
      *  when not grouped. */
     private val _syncGroupMembers = MutableStateFlow<List<LiveGroupMember>>(emptyList())
     val syncGroupMembersFlow: StateFlow<List<LiveGroupMember>> = _syncGroupMembers
+
+    /** v0.1.36: every distinct sync group on the fleet. Drives the
+     *  "Join a group" picker on the tablet's content + admin pages. */
+    private val _availableSyncGroups = MutableStateFlow<List<AvailableSyncGroup>>(emptyList())
+    val availableSyncGroupsFlow: StateFlow<List<AvailableSyncGroup>> = _availableSyncGroups
 
     /** v0.1.14: per-screen HDMI mode override pushed from the CMS.
      *  Null = auto (don't touch the box's mode). Non-null is a modeId
@@ -775,6 +794,8 @@ class PlayerRepository(
         // card. Update unconditionally — list contents may shift even
         // when the group id doesn't (a sibling came online, etc.).
         _syncGroupMembers.value = state.syncGroupMembers
+        // v0.1.36: fleet-wide list of groups for the Join picker.
+        _availableSyncGroups.value = state.availableSyncGroups
 
         // Display mode override. MainActivity collects this flow and
         // applies preferredDisplayModeId on change. We only mutate

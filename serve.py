@@ -1668,6 +1668,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             })
                         # Sort: self first, then alphabetical for stability.
                         group_members.sort(key=lambda m: (not m["isSelf"], (m.get("name") or "").lower()))
+                    # v0.1.36: list every distinct sync group across the
+                    # fleet so the tablet's "Join a group" picker has
+                    # something to render without typing. Cheap: O(N)
+                    # over _per_screen, which is at most a few hundred
+                    # screens. Online count uses the same 15 s window
+                    # the member list uses, so the UI reads consistently.
+                    available_groups: dict[str, dict] = {}
+                    now_ts2 = time.time()
+                    for d, st in _per_screen.items():
+                        gid = st.get("syncGroup")
+                        if not gid:
+                            continue
+                        meta2 = _screens.get(d) or {}
+                        last_hb2 = meta2.get("lastHeartbeat") or 0
+                        bucket = available_groups.setdefault(gid, {
+                            "id": gid, "memberCount": 0, "onlineCount": 0,
+                        })
+                        bucket["memberCount"] += 1
+                        if (now_ts2 - last_hb2) < 15:
+                            bucket["onlineCount"] += 1
+                    available_sync_groups = sorted(
+                        available_groups.values(), key=lambda g: g["id"],
+                    )
                     poll_mode = s.get("pollMode", DEFAULT_POLL_MODE)
                     payload = {
                         "screenId":    screen_id,
@@ -1692,6 +1715,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "lowDataMode": (poll_mode == "slow"),
                         "syncGroup":   sync_group_id,
                         "syncGroupMembers": group_members,
+                        # v0.1.36: every distinct group on the fleet so
+                        # tablets can render a Join picker without typing.
+                        "availableSyncGroups": available_sync_groups,
                         "playback":    playback,
                         "serverNowMs": int(time.time() * 1000),
                         # Display mode override (v0.1.14). null means
