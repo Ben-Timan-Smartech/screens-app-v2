@@ -397,6 +397,10 @@ class PlayerRepository(
          *  loop it should be — so every screen in the group stays
          *  aligned. */
         val syncGroup: String? = null,
+        /** v0.1.35: every screen in this screen's sync group,
+         *  including self. Empty when the screen isn't grouped.
+         *  Surfaced in the Device admin "Sync group" card. */
+        val syncGroupMembers: List<LiveGroupMember> = emptyList(),
         val playback: LivePlayback? = null,
         /** Server's wall-clock at response build time. We use it to
          *  correct for transit latency when seeking. */
@@ -414,6 +418,21 @@ class PlayerRepository(
         val commands: List<LiveCommand> = emptyList(),
         val splashUrl: String? = null,
         val splashName: String? = null,
+    )
+
+    /** v0.1.35: a sibling in this screen's sync group. The Device
+     *  admin "Sync group" card lists these with an online dot +
+     *  the screen code so the operator can see who else is in
+     *  step (or isn't). `isSelf` marks the local screen so the
+     *  card can render it differently. */
+    @Serializable
+    data class LiveGroupMember(
+        val deviceId: String = "",
+        val name: String? = null,
+        val online: Boolean = false,
+        val screenCode: String? = null,
+        val storeId: String? = null,
+        val isSelf: Boolean = false,
     )
 
     /** Server-emitted group sync info. As of v0.1.12 the only field
@@ -496,6 +515,12 @@ class PlayerRepository(
      *  in a group, so no sync corrections are applied. */
     private val _syncGroup = MutableStateFlow<String?>(null)
     val syncGroupFlow: StateFlow<String?> = _syncGroup
+
+    /** v0.1.35: rest of the screens in this screen's sync group,
+     *  with online state. Device admin renders this list. Empty
+     *  when not grouped. */
+    private val _syncGroupMembers = MutableStateFlow<List<LiveGroupMember>>(emptyList())
+    val syncGroupMembersFlow: StateFlow<List<LiveGroupMember>> = _syncGroupMembers
 
     /** v0.1.14: per-screen HDMI mode override pushed from the CMS.
      *  Null = auto (don't touch the box's mode). Non-null is a modeId
@@ -746,6 +771,10 @@ class PlayerRepository(
             _syncGroup.value = state.syncGroup
             LogBuffer.i(TAG, "Sync group → ${state.syncGroup ?: "(none)"}")
         }
+        // v0.1.35: full member list for the Device admin Sync group
+        // card. Update unconditionally — list contents may shift even
+        // when the group id doesn't (a sibling came online, etc.).
+        _syncGroupMembers.value = state.syncGroupMembers
 
         // Display mode override. MainActivity collects this flow and
         // applies preferredDisplayModeId on change. We only mutate

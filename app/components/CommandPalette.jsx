@@ -132,6 +132,15 @@ const buildCommands = () => [
     run: () => navigate('/screens'),
   },
   {
+    id: 'nav.sync-groups',
+    label: 'Go to Sync groups',
+    hint: 'Every group + member screens at a glance',
+    description: 'Top-level view of every sync group across the fleet. Shows members with online state, current playlist size, and a Calibrate button per group. Orphan screens (not in any group) appear at the bottom.',
+    keywords: 'sync groups synchronised stores frame locked',
+    perm: 'screens.view',
+    run: () => navigate('/sync-groups'),
+  },
+  {
     id: 'nav.activity',
     label: 'Go to Activity log',
     hint: 'Recent CMS + screen events',
