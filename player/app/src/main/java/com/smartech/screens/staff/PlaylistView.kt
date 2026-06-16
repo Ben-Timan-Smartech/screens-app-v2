@@ -242,7 +242,7 @@ fun PlaylistView(
 
                 // Poll mode — three discrete cadences instead of the
                 // old binary low-data toggle. Fast = 10 s (install / debug),
-                // Normal = 60 s (default), Slow = 10 min (cellular / metered;
+                // Normal = 60 s (default), Slow = 5 min (cellular / metered;
                 // also skips the ~70 MB per-location splash).
                 Column {
                     Text("Poll mode", color = Bone, fontSize = 14.sp, fontWeight = FontWeight.Medium)
@@ -250,7 +250,7 @@ fun PlaylistView(
                         when (pollMode) {
                             PlayerRepository.PollMode.FAST   -> "Checking the server every 10 s."
                             PlayerRepository.PollMode.NORMAL -> "Checking the server every 60 s. Default."
-                            PlayerRepository.PollMode.SLOW   -> "Checking every 10 min; skipping the per-location splash to save data."
+                            PlayerRepository.PollMode.SLOW   -> "Checking every 5 min; skipping the per-location splash to save data."
                         },
                         color = Color(0x99FFFFFF), fontSize = 12.sp,
                     )
@@ -296,7 +296,7 @@ fun PlaylistView(
 
                 // Refresh now — fires a one-shot poll bypass-style so
                 // staff can see a pushed playlist land without waiting
-                // for the next poll tick (up to 10 minutes in Slow mode).
+                // for the next poll tick (up to 5 minutes in Slow mode).
                 Box(
                     Modifier
                         .fillMaxWidth()

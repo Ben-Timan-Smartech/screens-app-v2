@@ -503,11 +503,16 @@ class PlayerRepository(
 
     /** Poll cadence the server has assigned to this screen. The polling
      *  loop reads this on every tick. SLOW also skips the per-location
-     *  splash download to save data. Cached videos are unaffected. */
+     *  splash download to save data. Cached videos are unaffected.
+     *
+     *  v0.1.37: SLOW dropped from 10 min → 5 min. 10 min meant pushed
+     *  playlist changes could lag visibly for staff watching the wall;
+     *  5 min is still slow enough to be cellular-friendly. Wire value
+     *  unchanged so an older server still maps "slow" → SLOW. */
     enum class PollMode(val intervalMs: Long, val wire: String) {
         FAST(10_000L, "fast"),
         NORMAL(60_000L, "normal"),
-        SLOW(600_000L, "slow");
+        SLOW(300_000L, "slow");
 
         companion object {
             fun parse(wire: String?, legacyLowDataMode: Boolean?): PollMode {
@@ -521,7 +526,17 @@ class PlayerRepository(
         }
     }
 
-    private val _pollMode = MutableStateFlow(PollMode.NORMAL)
+    // v0.1.37: legacy build starts in SLOW (5 min) by default. Legacy
+    // targets old Android 6/7 hardware that's usually on stretched
+    // wifi at events — fast polling for those is overkill. Modern
+    // build keeps NORMAL (60 s). The server overrides on first
+    // heartbeat for a never-seen device based on the same `appFlavor`
+    // signal, so this stays in sync if the operator never touches
+    // the CMS poll-mode picker.
+    private val _pollMode = MutableStateFlow(
+        if (com.smartech.screens.BuildConfig.FLAVOR == "legacy") PollMode.SLOW
+        else PollMode.NORMAL
+    )
     val pollModeFlow: StateFlow<PollMode> = _pollMode
     val pollMode: PollMode get() = _pollMode.value
 
@@ -1240,7 +1255,7 @@ class PlayerRepository(
      *  (staff overlay's "Refresh now" button or the CMS-side refresh
      *  command). Fires off the live polling loop's queue so it doesn't
      *  wait for the next sleep tick — useful when the tablet is in
-     *  Slow mode (10 min between regular polls) and someone wants to
+     *  Slow mode (5 min between regular polls) and someone wants to
      *  see their push land right now. */
     fun refreshNow() {
         LogBuffer.i(TAG, "refreshNow() requested")
@@ -1527,6 +1542,7 @@ class PlayerRepository(
               "decoderTier": ${q(info.decoderTier)},
               "safeBitrateMbps": ${info.safeBitrateMbps},
               "appVersion": ${q(com.smartech.screens.BuildConfig.VERSION_NAME)},
+              "appFlavor": ${q(com.smartech.screens.BuildConfig.FLAVOR)},
               "cacheBytes": ${cache.totalBytes()},
               "freeStorageBytes": ${appContext.filesDir.usableSpace},
               "cachedVideoIds": [${cachedIds}],
@@ -1555,7 +1571,8 @@ class PlayerRepository(
               "deviceId": "$deviceId",
               "name": ${q(name)},
               "location": ${locationJson()},
-              "appVersion": "${com.smartech.screens.BuildConfig.VERSION_NAME}"
+              "appVersion": "${com.smartech.screens.BuildConfig.VERSION_NAME}",
+              "appFlavor": "${com.smartech.screens.BuildConfig.FLAVOR}"
             }
         """.trimIndent()
         runCatching {

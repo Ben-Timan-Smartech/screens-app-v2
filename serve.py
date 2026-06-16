@@ -2151,6 +2151,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "registeredAt":    time.time(),
                     "lastHeartbeat":   time.time(),
                     "appVersion":      body.get("appVersion"),
+                    "appFlavor":       body.get("appFlavor"),
                     "deviceModel":     body.get("deviceModel"),
                     "ramMb":           body.get("ramMb"),
                     "screenWidth":     body.get("screenWidth"),
@@ -2158,7 +2159,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "orientation":     body.get("orientation"),
                 }
                 is_new = "registeredAt" not in (_screens.get(device_id, {}))
+                was_fresh = device_id not in _per_screen
                 state = _ensure_screen_state(device_id)
+                # v0.1.37: same legacy-flavor default the heartbeat
+                # path applies — first-time-seen tablet starts SLOW
+                # when it's the legacy build.
+                if was_fresh and body.get("appFlavor") == "legacy":
+                    state["pollMode"] = "slow"
+                    state["lowDataMode"] = True
+                    _save_per_screen()
                 # Auto-group by store. When a screen registers with a
                 # location.storeId and doesn't already have an explicit
                 # sync group, default to "store:<storeId>" — so every
@@ -2242,7 +2251,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     _screens[device_id] = s
                 # Merge anything the tablet sent. None values mean "no change".
                 for key in (
-                    "name", "location", "appVersion", "deviceModel",
+                    "name", "location", "appVersion", "appFlavor", "deviceModel",
                     "ramMb", "screenWidth", "screenHeight", "orientation",
                     "tier", "cachedVideoIds", "cacheBytes", "freeStorageBytes",
                     "currentRevision", "status",
@@ -2267,7 +2276,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if val is not None:
                         s[key] = val
                 s["lastHeartbeat"] = time.time()
+                # v0.1.37: pick the right pollMode default for a brand-
+                # new tablet. Legacy flavor (Android 6/7 hardware on
+                # event wifi) starts SLOW (5 min); modern stays NORMAL
+                # (60 s). Only applies on first registration — we never
+                # clobber a value the CMS or staff overlay has already
+                # chosen. `was_fresh` checks _per_screen membership
+                # before _ensure_screen_state lazily creates it.
+                was_fresh = device_id not in _per_screen
                 state = _ensure_screen_state(device_id)
+                if was_fresh and body.get("appFlavor") == "legacy":
+                    state["pollMode"] = "slow"
+                    state["lowDataMode"] = True
+                    _save_per_screen()
                 _save_screens()
             self._send_json({
                 "ok":          True,
