@@ -18,6 +18,53 @@ Rules:
 
 ---
 
+## v0.1.35
+
+Sync groups visible everywhere a sync group should be visible.
+
+### CMS command palette
+
+`/` → "go to sync groups" (or any of `sync` / `groups` / `stores`)
+now navigates to the new v0.1.34 Sync groups page. One-line nav
+entry; same `screens.view` permission as the sidebar item.
+
+### Tablet Device admin → Sync group card
+
+The Device admin overlay used to show sync-group membership as
+one line in the Info card: `Sync group: store:NYC1`. That tells
+you you're in *a* group but not *who else* is in it.
+
+v0.1.35 adds a dedicated **Sync group** card below Device info
+(rendered only when the screen IS in a group — the Info row
+above still reads "(independent)" otherwise). Header carries a
+Calibrate button that fires the 60-second synchronised clock on
+every member, same as the in-CMS one. The card body lists each
+member with:
+
+- A green/grey dot — online if the server saw a heartbeat in the
+  last 15 s, muted otherwise
+- Name + store/screen code
+- A small `this screen` tag on the local row so the operator can
+  find themselves in the list
+
+### Server: one new field on `/api/state`
+
+The handler for a screen-id'd state response now includes:
+
+```json
+"syncGroupMembers": [
+  {"deviceId": "...", "name": "...", "online": true,
+   "screenCode": "...", "storeId": "...", "isSelf": true}
+]
+```
+
+Self is sorted first so the local row always renders at the top
+of the card. Empty list when the screen isn't grouped. Added to
+`/api/state` rather than a new endpoint so the tablet doesn't
+need a second network round-trip per poll.
+
+CMS + tablet release.
+
 ## v0.1.34
 
 New top-level **Sync groups** view in the CMS. Up to now you could

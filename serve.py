@@ -1645,6 +1645,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             current_revision=s["revision"],
                             now=time.time(),
                         )
+                    # v0.1.35: list the group's other members so the
+                    # tablet's Device admin can render "you're in
+                    # group X with Y other screens" without a
+                    # second round-trip. Lightweight projection —
+                    # just the bits the admin UI displays.
+                    group_members: list[dict] = []
+                    if sync_group_id:
+                        now_ts = time.time()
+                        for d, st in _per_screen.items():
+                            if st.get("syncGroup") != sync_group_id:
+                                continue
+                            meta = _screens.get(d) or {}
+                            last_hb = meta.get("lastHeartbeat") or 0
+                            group_members.append({
+                                "deviceId":   d,
+                                "name":       meta.get("name") or d,
+                                "online":     (now_ts - last_hb) < 15,
+                                "screenCode": (meta.get("location") or {}).get("screenCode"),
+                                "storeId":    (meta.get("location") or {}).get("storeId"),
+                                "isSelf":     d == screen_id,
+                            })
+                        # Sort: self first, then alphabetical for stability.
+                        group_members.sort(key=lambda m: (not m["isSelf"], (m.get("name") or "").lower()))
                     poll_mode = s.get("pollMode", DEFAULT_POLL_MODE)
                     payload = {
                         "screenId":    screen_id,
@@ -1668,6 +1691,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # pollMode instead.
                         "lowDataMode": (poll_mode == "slow"),
                         "syncGroup":   sync_group_id,
+                        "syncGroupMembers": group_members,
                         "playback":    playback,
                         "serverNowMs": int(time.time() * 1000),
                         # Display mode override (v0.1.14). null means
