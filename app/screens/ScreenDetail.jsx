@@ -1050,20 +1050,30 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               </div>
             </Card>
 
-            {/* Splash mix toggle — only meaningful when live. */}
-            <Card padding={16}>
-              <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 6 }}>Display</div>
-              <ToggleRow
-                label="Mix splash with playlist"
-                sub={canEdit
-                  ? (isLive
-                    ? 'Plays the bundled splash between videos. Default on.'
-                    : 'Plays the bundled splash between videos. Saves now, applies when the tablet reconnects.')
-                  : 'Plays the bundled splash between videos. Default on.'}
-                value={hasHistory ? !!lastKnown.mixSplash : true}
-                onChange={handleMixSplashToggle}
-                disabled={!canEdit}
-              />
+            {/* Splash mix toggle — only meaningful when live.
+                v0.1.33: locked off when the screen is in a sync group.
+                The server forces mixSplash=false in /api/state for any
+                screen with a syncGroup (the splash's extra duration
+                breaks the loop math), so flipping it here would just
+                bounce back on the next poll. Greyed out + explainer. */}
+            {(() => {
+              const inGroup = hasHistory && !!lastKnown.syncGroup;
+              return (
+                <Card padding={16}>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 6 }}>Display</div>
+                  <ToggleRow
+                    label="Mix splash with playlist"
+                    sub={inGroup
+                      ? `Disabled — screen is in sync group '${lastKnown.syncGroup}'. Mix splash breaks the group's loop math; leave the group to enable.`
+                      : (canEdit
+                          ? (isLive
+                              ? 'Plays the bundled splash between videos. Default on.'
+                              : 'Plays the bundled splash between videos. Saves now, applies when the tablet reconnects.')
+                          : 'Plays the bundled splash between videos. Default on.')}
+                    value={inGroup ? false : (hasHistory ? !!lastKnown.mixSplash : true)}
+                    onChange={handleMixSplashToggle}
+                    disabled={!canEdit || inGroup}
+                  />
               <ToggleRow
                 label="Audio"
                 sub={canEdit
@@ -1082,6 +1092,8 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 isLive={isLive}
               />
             </Card>
+              );
+            })()}
 
             {/* Sync group picker — own card because it can list every
                 other registered screen. Keeps the Display card from

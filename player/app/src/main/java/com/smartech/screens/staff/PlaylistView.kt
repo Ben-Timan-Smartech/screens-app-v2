@@ -81,6 +81,14 @@ fun PlaylistView(
     val mixSplash by repository.mixSplashFlow.collectAsState()
     val audioOn by repository.audioOnFlow.collectAsState()
     val pollMode by repository.pollModeFlow.collectAsState()
+    // v0.1.33: read sync-group membership so the Mix splash toggle
+    // can grey out + explain itself when the screen is in a group.
+    // The server forces mixSplash=false in /api/state for any screen
+    // with a syncGroup (v0.1.11 fix — mix-splash's bonus duration
+    // breaks the loop math). The stored value is preserved but the
+    // tablet always sees false, so the toggle was popping back off
+    // every poll.
+    val syncGroup by repository.syncGroupFlow.collectAsState()
     // intendedPlaylist mirrors what the server says is on this screen, even
     // when some items are still downloading. That way the row appears the
     // moment the user adds it — with a progress bar — rather than waiting
@@ -163,23 +171,38 @@ fun PlaylistView(
                 Spacer(Modifier.weight(1f))
 
                 // Splash mix toggle in the rail (high contrast).
+                // v0.1.33: locked off when the screen is in a sync
+                // group. The server forces mixSplash=false in
+                // /api/state for grouped screens (v0.1.11 fix: the
+                // splash's extra duration breaks the loop math
+                // tablets use to stay aligned). Letting the user
+                // tap the toggle ON only to watch it bounce back
+                // OFF on the next poll is worse than just telling
+                // them why it's disabled.
+                val inGroup = syncGroup != null
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("Mix splash", color = Bone, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                         Text(
-                            "Plays the bundled splash between videos.",
+                            if (inGroup)
+                                "Disabled — screen is in sync group '${syncGroup}'. Leave the group to mix splash."
+                            else
+                                "Plays the bundled splash between videos.",
                             color = Color(0x99FFFFFF), fontSize = 12.sp,
                         )
                     }
                     DarkToggle(
-                        on = mixSplash,
+                        on = mixSplash && !inGroup,
                         onChange = { value ->
                             LogBuffer.i("PlaylistView", "Mix splash tapped → $value")
                             scope.launch {
                                 repository.setMixSplashOnServer(value)
                             }
                         },
-                        enabled = true,   // never block the toggle on busy
+                        // Greyed out when in a group so the operator
+                        // can see the option exists but understand
+                        // why they can't toggle it from here.
+                        enabled = !inGroup,
                     )
                 }
 
@@ -663,12 +686,21 @@ private fun DownloadProgressStrip(p: PlayerRepository.DownloadProgress) {
 // Toggle styled for the dark rail. Bone-on-Ink rather than Ink-on-Bone.
 @Composable
 private fun DarkToggle(on: Boolean, onChange: (Boolean) -> Unit, enabled: Boolean = true) {
+    // v0.1.33: visually distinct disabled state so the operator can
+    // see at a glance that the toggle is locked. Used by the Mix
+    // splash row when the screen is in a sync group — without the
+    // dimming the toggle looked clickable but flicked back the
+    // moment they touched it.
+    val trackAlpha = if (enabled) 1.0f else 0.35f
     Box(
         Modifier
             .width(48.dp)
             .height(28.dp)
             .clip(RoundedCornerShape(999.dp))
-            .background(if (on) Bone else Color(0x33FFFFFF))
+            .background(
+                (if (on) Bone else Color(0x33FFFFFF))
+                    .copy(alpha = trackAlpha)
+            )
             .clickable(enabled = enabled) { onChange(!on) },
     ) {
         Box(
@@ -677,7 +709,7 @@ private fun DarkToggle(on: Boolean, onChange: (Boolean) -> Unit, enabled: Boolea
                 .width(20.dp)
                 .height(20.dp)
                 .clip(CircleShape)
-                .background(if (on) Ink else Bone)
+                .background((if (on) Ink else Bone).copy(alpha = trackAlpha))
         )
     }
 }

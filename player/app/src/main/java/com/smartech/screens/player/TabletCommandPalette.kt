@@ -83,8 +83,13 @@ fun TabletCommandPalette(
 
     // v0.1.32: live state flows so toggle commands can show the
     // correct verb in their label — "Mute" vs "Unmute" etc.
+    // v0.1.33: also read sync-group membership; the Mix splash
+    // toggle is forced off by the server when the screen is in a
+    // group, so the command needs to drop out of the palette
+    // entirely rather than pretending it can flip something.
     val audioOn by repository.audioOnFlow.collectAsState()
     val mixSplash by repository.mixSplashFlow.collectAsState()
+    val syncGroup by repository.syncGroupFlow.collectAsState()
 
     LaunchedEffect(externalOpen) {
         externalOpen.collect {
@@ -117,8 +122,11 @@ fun TabletCommandPalette(
     )
     // Keyed on the live flags so the toggle labels rebuild whenever
     // the state flips — otherwise the palette would show "Mute" even
-    // after audio was already muted by a CMS push.
-    val commands = remember(audioOn, mixSplash) {
+    // after audio was already muted by a CMS push. syncGroup is in
+    // the key so the Mix-splash command's enabled/disabled wording
+    // tracks group membership.
+    val commands = remember(audioOn, mixSplash, syncGroup) {
+        val inSyncGroup = syncGroup != null
         listOf(
             // ── Safe, no-PIN actions ─────────────────────────────
             Cmd(
@@ -153,16 +161,36 @@ fun TabletCommandPalette(
                     }
                 },
             ),
+            // v0.1.33: when the screen is in a sync group, the
+            // server forces mixSplash=false in /api/state regardless
+            // of what we set. Toggling from the palette would just
+            // bounce back. Label the command honestly so the
+            // operator doesn't think they're broken.
             Cmd(
-                label = if (mixSplash) "Stop mixing splash" else "Mix splash with playlist",
-                hint = if (mixSplash)
-                    "splash · branding · play only pushed videos"
-                else
-                    "splash · branding · interleave the bundled splash between videos",
+                label = when {
+                    inSyncGroup -> "Mix splash (locked — in sync group)"
+                    mixSplash -> "Stop mixing splash"
+                    else -> "Mix splash with playlist"
+                },
+                hint = when {
+                    inSyncGroup ->
+                        "splash · branding · disabled — leave sync group '${syncGroup}' to enable"
+                    mixSplash ->
+                        "splash · branding · play only pushed videos"
+                    else ->
+                        "splash · branding · interleave the bundled splash between videos"
+                },
                 pinGated = false,
                 run = {
-                    scope.launch {
-                        runCatching { repository.setMixSplashOnServer(!mixSplash) }
+                    if (inSyncGroup) {
+                        LogBuffer.i(
+                            "TabletCommandPalette",
+                            "Mix splash command ignored — screen is in sync group '${syncGroup}'",
+                        )
+                    } else {
+                        scope.launch {
+                            runCatching { repository.setMixSplashOnServer(!mixSplash) }
+                        }
                     }
                 },
             ),
