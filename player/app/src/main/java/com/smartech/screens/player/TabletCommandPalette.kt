@@ -17,7 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.focusable
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -34,13 +34,14 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.smartech.screens.data.PlayerRepository
@@ -74,7 +75,7 @@ fun TabletCommandPalette(
     onRequestUnlock: () -> Unit,
 ) {
     var visible by remember { mutableStateOf(false) }
-    var query by remember { mutableStateOf(TextFieldValue("")) }
+    var query by remember { mutableStateOf("") }
     var activeIdx by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
@@ -82,12 +83,15 @@ fun TabletCommandPalette(
     LaunchedEffect(externalOpen) {
         externalOpen.collect {
             visible = true
-            query = TextFieldValue("")
+            query = ""
             activeIdx = 0
         }
     }
 
-    // Auto-focus the input every time the overlay opens.
+    // Auto-focus the palette card every time the overlay opens. We
+    // focus the outer Box (which is `.focusable()`), NOT a text
+    // input — see the [Box] block below. That gives us keystrokes
+    // via `onPreviewKeyEvent` without ever invoking the IME.
     LaunchedEffect(visible) {
         if (visible) focusRequester.requestFocus()
     }
@@ -132,8 +136,8 @@ fun TabletCommandPalette(
         )
     }
 
-    val filtered = remember(commands, query.text) {
-        val q = query.text.trim().lowercase()
+    val filtered = remember(commands, query) {
+        val q = query.trim().lowercase()
         if (q.isEmpty()) commands
         else commands.filter { c ->
             val blob = "${c.label} ${c.hint}".lowercase()
@@ -165,35 +169,72 @@ fun TabletCommandPalette(
                 .background(Color(0xFFF7F6F2))
                 .border(1.dp, Color(0xFFB8B1A0), RoundedCornerShape(14.dp))
                 .clickable(onClick = {})   // swallow scrim clicks inside the card
+                // v0.1.31: focusable + key capture replaces the
+                // BasicTextField that used to live below. On TV-class
+                // devices BasicTextField was popping the on-screen
+                // IME — useless on a kiosk box and visually awful.
+                // Capturing characters via nativeKeyEvent.unicodeChar
+                // means we get USB keyboard input WITHOUT invoking
+                // any IME at all. The focusable + focusRequester
+                // pair gives the Box itself keystroke focus.
+                .focusRequester(focusRequester)
+                .focusable()
                 .onPreviewKeyEvent { evt ->
                     if (evt.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     when (evt.key) {
                         Key.DirectionDown -> {
                             activeIdx = (safeIdx + 1).coerceAtMost(filtered.size - 1)
-                            true
+                            return@onPreviewKeyEvent true
                         }
                         Key.DirectionUp -> {
                             activeIdx = (safeIdx - 1).coerceAtLeast(0)
-                            true
+                            return@onPreviewKeyEvent true
                         }
                         Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> {
                             val cur = filtered.getOrNull(safeIdx)
                             if (cur != null) execute(cur)
-                            true
+                            return@onPreviewKeyEvent true
                         }
                         Key.Escape -> {
                             visible = false
-                            true
+                            return@onPreviewKeyEvent true
                         }
-                        else -> false
+                        Key.Backspace -> {
+                            if (query.isNotEmpty()) {
+                                query = query.dropLast(1)
+                                activeIdx = 0
+                            }
+                            return@onPreviewKeyEvent true
+                        }
                     }
+                    // Printable characters: read off the native key
+                    // event's unicode mapping, which already handles
+                    // Shift + locale layout for us. Skip if any
+                    // modifier other than Shift is held — Ctrl-K /
+                    // Alt-something shouldn't type into the field.
+                    val unicode = evt.nativeKeyEvent.unicodeChar
+                    if (unicode != 0
+                        && !evt.isCtrlPressed
+                        && !evt.isAltPressed
+                        && !evt.isMetaPressed
+                    ) {
+                        val ch = unicode.toChar()
+                        if (ch >= ' ') {
+                            query += ch
+                            activeIdx = 0
+                            return@onPreviewKeyEvent true
+                        }
+                    }
+                    false
                 }
                 .padding(20.dp),
         ) {
             Column(Modifier.fillMaxWidth()) {
-                // Search input — a BasicTextField wired to focusRequester
-                // so the keyboard input lands here without the user having
-                // to click anything.
+                // v0.1.31: search input is now a Text row, not a
+                // BasicTextField. Characters land here via the outer
+                // Box's `onPreviewKeyEvent` so we never invoke the
+                // soft keyboard / IME — important on TV-class boxes
+                // where the IME is both useless and visually awful.
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -210,17 +251,27 @@ fun TabletCommandPalette(
                         fontFamily = FontFamily.Monospace,
                         modifier = Modifier.width(24.dp),
                     )
-                    BasicTextField(
-                        value = query,
-                        onValueChange = { query = it; activeIdx = 0 },
-                        singleLine = true,
-                        textStyle = TextStyle(
+                    if (query.isEmpty()) {
+                        Text(
+                            "Type to filter…",
+                            color = Color(0xFF6E6B62),
+                            fontSize = 16.sp,
+                        )
+                    } else {
+                        Text(
+                            query,
                             color = Color(0xFF141414),
                             fontSize = 16.sp,
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(focusRequester),
+                        )
+                    }
+                    // Blinking caret indicator so the operator knows
+                    // the field is "live" without an IME.
+                    Spacer(Modifier.width(2.dp))
+                    Text(
+                        "▌",
+                        color = Color(0xFFE8A33D),
+                        fontSize = 16.sp,
+                        fontFamily = FontFamily.Monospace,
                     )
                 }
                 Spacer(Modifier.height(14.dp))

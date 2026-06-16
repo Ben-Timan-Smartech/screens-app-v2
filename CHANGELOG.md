@@ -18,6 +18,40 @@ Rules:
 
 ---
 
+## v0.1.31
+
+Tablet command palette no longer pops the soft keyboard.
+
+### Why it did
+
+v0.1.29 used a `BasicTextField` for the search input. Focusing a
+real text field on Android tells the system "this view wants
+text" and Android dutifully shows the IME — which on a TV-class
+box (no touchscreen, but plenty of Android infrastructure) means
+a full on-screen keyboard appearing over the player. Useless to a
+USB-keyboard user, ugly on the screen.
+
+### Fix
+
+The search input is no longer a `BasicTextField`. It's a plain
+`Text` that displays the current query plus a blinking amber
+caret. Keystrokes land via the outer Box's `onPreviewKeyEvent`,
+which reads `nativeKeyEvent.unicodeChar` to map each key to its
+character (Shift + locale layout handled automatically). The Box
+is `.focusable()` and grabs focus on open, so keystrokes go to
+this handler instead of bleeding through to the player below.
+**No IME is ever invoked**, on any device class.
+
+Backspace deletes the last character. Modifier keys (Ctrl, Alt,
+Meta) other than Shift are ignored so they don't type junk into
+the query.
+
+The visible UX is identical for the keyboard user — type, see
+characters appear, press Enter — just without the OS keyboard
+joining the party.
+
+Tablet-only.
+
 ## v0.1.30
 
 Hotfix for v0.1.29 — the code was fine, the build was not.
