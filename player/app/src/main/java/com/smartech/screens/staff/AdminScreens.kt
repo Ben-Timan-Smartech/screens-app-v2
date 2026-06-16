@@ -172,6 +172,7 @@ fun DeviceAdminScreen(
     val orientation by store.orientationOverride.collectAsState(initial = null)
     val syncGroup by repository.syncGroupFlow.collectAsState()
     val syncGroupMembers by repository.syncGroupMembersFlow.collectAsState()
+    val availableSyncGroups by repository.availableSyncGroupsFlow.collectAsState()
     val cacheCap by store.cacheCapBytes.collectAsState(initial = 8L * 1024 * 1024 * 1024)
     val info = remember { DeviceInfo.snapshot(ctx) }
 
@@ -302,22 +303,38 @@ fun DeviceAdminScreen(
             // v0.1.35: Sync group card — lists every member of this
             // screen's group with online state + a Calibrate button
             // so the operator can verify clock sync without leaving
-            // the device admin. Hidden when the screen isn't in any
-            // group (the Info card above already shows "(independent)"
-            // in that case).
-            if (!syncGroup.isNullOrBlank()) {
-                item {
-                    SyncGroupCardSection(
-                        groupId = syncGroup ?: "",
-                        members = syncGroupMembers,
-                        onCalibrate = {
-                            scope.launch {
-                                runCatching { repository.triggerLocalCalibration(60) }
-                                    .onFailure { LogBuffer.w("Admin", "Calibrate failed: ${it.message}") }
-                            }
-                        },
-                    )
-                }
+            // the device admin.
+            // v0.1.36: now always visible. When the screen isn't in a
+            // group, the card pivots to a Join picker listing every
+            // existing sync group on the fleet, so staff can attach
+            // this tablet without going back to the CMS. Leaving the
+            // group is also one tap from here.
+            item {
+                SyncGroupCard(
+                    currentGroupId = syncGroup,
+                    members = syncGroupMembers,
+                    availableGroups = availableSyncGroups,
+                    onJoin = { gid ->
+                        scope.launch {
+                            runCatching { repository.setSyncGroupOnServer(gid) }
+                                .onFailure { LogBuffer.w("Admin", "Join group failed: ${it.message}") }
+                            repository.refreshNow()
+                        }
+                    },
+                    onLeave = {
+                        scope.launch {
+                            runCatching { repository.setSyncGroupOnServer(null) }
+                                .onFailure { LogBuffer.w("Admin", "Leave group failed: ${it.message}") }
+                            repository.refreshNow()
+                        }
+                    },
+                    onCalibrate = {
+                        scope.launch {
+                            runCatching { repository.triggerLocalCalibration(60) }
+                                .onFailure { LogBuffer.w("Admin", "Calibrate failed: ${it.message}") }
+                        }
+                    },
+                )
             }
 
             // Location — cascading dropdowns
@@ -512,125 +529,6 @@ private fun CardSection(title: String, content: @Composable () -> Unit) {
                 .border(1.dp, BoneLine, RoundedCornerShape(12.dp))
         ) {
             content()
-        }
-    }
-}
-
-/**
- * v0.1.35: Sync group card for the Device admin.
- *
- * Mirrors the CMS-side Sync groups page but scoped to this screen's
- * group: header with the group id, a Calibrate button that fires the
- * 60-second clock overlay on every member, then a row per member with
- * an online dot + name + screen code. Self is rendered with a small
- * "this screen" tag so the operator can find themselves in the list.
- *
- * Hidden entirely when the screen isn't in a group — the Device info
- * card above already shows "(independent)" for that case.
- */
-@Composable
-private fun SyncGroupCardSection(
-    groupId: String,
-    members: List<com.smartech.screens.data.PlayerRepository.LiveGroupMember>,
-    onCalibrate: () -> Unit,
-) {
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "Sync group",
-                color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Medium,
-                modifier = Modifier.weight(1f),
-            )
-            // Calibrate runs without leaving admin — fires the 60s
-            // synchronised clock overlay on every group member.
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(BoneSoft)
-                    .border(1.dp, BoneLine, RoundedCornerShape(6.dp))
-                    .clickable { onCalibrate() }
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-            ) {
-                Text(
-                    "Calibrate",
-                    color = Ink, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                )
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color.White)
-                .border(1.dp, BoneLine, RoundedCornerShape(12.dp))
-                .padding(vertical = 8.dp),
-        ) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Group", color = Muted, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                Text(
-                    groupId,
-                    color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace,
-                )
-            }
-            Divider()
-            if (members.isEmpty()) {
-                Text(
-                    "Waiting for member list… (next poll)",
-                    color = Muted, fontSize = 13.sp,
-                    modifier = Modifier.padding(18.dp),
-                )
-            } else {
-                members.forEachIndexed { i, m ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 18.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        // Online dot — green when the server saw a
-                        // heartbeat from this member within the last
-                        // 15 s, muted otherwise.
-                        Box(
-                            Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (m.online) Color(0xFF3D8C4B) else Color(0xFFB5B0A2)
-                                )
-                        )
-                        Spacer(Modifier.size(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                m.name ?: m.deviceId,
-                                color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
-                            )
-                            val sub = listOfNotNull(m.storeId, m.screenCode).joinToString(" · ")
-                            if (sub.isNotEmpty()) {
-                                Text(sub, color = Muted, fontSize = 12.sp)
-                            }
-                        }
-                        if (m.isSelf) {
-                            Text(
-                                "this screen",
-                                color = Color(0xFF3A3832),
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .border(1.dp, BoneLine, RoundedCornerShape(4.dp))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                            )
-                        }
-                    }
-                    if (i < members.size - 1) Divider()
-                }
-            }
         }
     }
 }

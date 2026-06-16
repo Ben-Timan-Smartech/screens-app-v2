@@ -18,6 +18,45 @@ Rules:
 
 ---
 
+## v0.1.36
+
+Join + leave sync groups from the tablet without going back to the CMS.
+
+### Tablet content page → Sync group card
+
+The Sync group card (added in v0.1.35) now also lives on the content
+("What's on this screen") page, between the playlist and the footer
+actions. Same card the Device admin shows — staff editing a playlist
+can glance down and see who they're locked to without paging through
+admin first.
+
+### Join + Leave from the card
+
+The card now has two states:
+
+- **In a group** — header gets a red **Leave** button next to
+  Calibrate. Tapping Leave confirms, then POSTs `syncGroup: null` for
+  this tablet's deviceId. The screen falls back to independent
+  playback on the next poll (instant via `refreshNow()`).
+- **Not in a group** — instead of being hidden, the card shows a row
+  per existing sync group on the fleet with a member count, an
+  online count, and a **Join** button. Tapping Join POSTs that
+  group ID for this tablet. No typing — every row is a focus
+  target so a remote works.
+
+Creating a brand-new group stays a CMS task (Screens → pick a screen
+→ Sync group → type a new name). The tablet picker only lists groups
+that already exist on the fleet, which matches how the CMS UI works.
+
+### Server
+
+`/api/state` now ships `availableSyncGroups: [{id, memberCount,
+onlineCount}]` — a cheap O(N) projection of distinct group values
+across every registered screen. That powers the tablet's Join
+picker and keeps the wire format obvious for anyone debugging.
+
+---
+
 ## v0.1.35
 
 Sync groups visible everywhere a sync group should be visible.

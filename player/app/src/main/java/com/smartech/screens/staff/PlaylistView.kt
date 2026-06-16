@@ -89,6 +89,12 @@ fun PlaylistView(
     // tablet always sees false, so the toggle was popping back off
     // every poll.
     val syncGroup by repository.syncGroupFlow.collectAsState()
+    // v0.1.36: surface the Sync group card on the content page so
+    // staff can see + change group membership without diving into
+    // Device admin. The card pivots between member-list (in a group)
+    // and join picker (not in one), and exposes a Leave action.
+    val syncGroupMembers by repository.syncGroupMembersFlow.collectAsState()
+    val availableSyncGroups by repository.availableSyncGroupsFlow.collectAsState()
     // intendedPlaylist mirrors what the server says is on this screen, even
     // when some items are still downloading. That way the row appears the
     // moment the user adds it — with a progress bar — rather than waiting
@@ -406,6 +412,44 @@ fun PlaylistView(
                     }
                 }
             }
+
+            Spacer(Modifier.height(20.dp))
+
+            // v0.1.36: Sync group card on the content page. When in a
+            // group it lists every member with an online dot + offers
+            // a Leave button; when independent it lists every group on
+            // the fleet so staff can join one with a single click —
+            // no CMS round-trip. Sits between the playlist and the
+            // footer actions so a staff member who's mid-edit can
+            // glance down and see who they're locked to.
+            SyncGroupCard(
+                currentGroupId = syncGroup,
+                members = syncGroupMembers,
+                availableGroups = availableSyncGroups,
+                onJoin = { gid ->
+                    LogBuffer.i("PlaylistView", "Sync join tapped → $gid")
+                    scope.launch {
+                        runCatching { repository.setSyncGroupOnServer(gid) }
+                            .onFailure { LogBuffer.w("PlaylistView", "Join failed: ${it.message}") }
+                        repository.refreshNow()
+                    }
+                },
+                onLeave = {
+                    LogBuffer.i("PlaylistView", "Sync leave tapped")
+                    scope.launch {
+                        runCatching { repository.setSyncGroupOnServer(null) }
+                            .onFailure { LogBuffer.w("PlaylistView", "Leave failed: ${it.message}") }
+                        repository.refreshNow()
+                    }
+                },
+                onCalibrate = {
+                    LogBuffer.i("PlaylistView", "Calibrate tapped")
+                    scope.launch {
+                        runCatching { repository.triggerLocalCalibration(60) }
+                            .onFailure { LogBuffer.w("PlaylistView", "Calibrate failed: ${it.message}") }
+                    }
+                },
+            )
 
             Spacer(Modifier.height(20.dp))
 
