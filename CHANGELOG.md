@@ -18,6 +18,35 @@ Rules:
 
 ---
 
+## v0.1.30
+
+Hotfix for v0.1.29 — the code was fine, the build was not.
+
+### Why v0.1.29 didn't ship an APK
+
+`player/gradle/gradle-daemon-jvm.properties` had `toolchainVendor=
+JETBRAINS` plus a cached foojay URL ID for the matching JDK 21.
+foojay rotates those IDs server-side, and on 2026-06-16 the cached
+IDs all started returning HTTP 400 from `api.foojay.io/disco/v3.0/
+ids/.../redirect`. Every release build failed at the Gradle
+toolchain provisioning step before compiling a line of Kotlin. v0.1.29
+never produced an installable APK.
+
+### Fix
+
+Switched `toolchainVendor` to `ADOPTIUM` (Eclipse Temurin — the
+de-facto Android JDK distribution and the one GitHub Actions
+runners pre-install) and removed the cached URL pins so Gradle
+re-queries foojay each build instead of trusting stale IDs. On the
+runner, Temurin 21 is already on disk, so Gradle picks it up
+locally without hitting foojay at all.
+
+Same v0.1.29 payload — tablet command palette, calibration clock
+shortcut, all of it — just on a build pipeline that actually
+produces a binary.
+
+Build-config only. Tablet code unchanged from v0.1.29.
+
 ## v0.1.29
 
 Tablet-side command palette — press `/` on a USB keyboard plugged
