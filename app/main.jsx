@@ -153,6 +153,8 @@ const Router = () => {
       if (!screenId) return <ScreensStoreView storeId={storeId} />;
       return <ScreenDetail storeId={storeId} screenId={screenId} />;
     }
+    case 'sync-groups':
+      return <SyncGroups />;
     case 'schedules':
       return <Schedules initialMode={rest[0] === 'new' ? 'create' : 'list'} />;
     case 'activity':

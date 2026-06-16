@@ -1144,6 +1144,9 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
       {can(user, 'screens.view') && (
         <SidebarItem icon={<Icon.screens />} label="Screens" current={current === 'screens'} count={fleetCount || undefined} onClick={() => navigate('/screens')} />
       )}
+      {can(user, 'screens.view') && (
+        <SidebarItem icon={<Icon.sync />} label="Sync groups" current={current === 'sync-groups'} onClick={() => navigate('/sync-groups')} />
+      )}
       {can(user, 'schedules.view') && (
         <SidebarItem icon={<Icon.schedule />} label="Schedules" current={current === 'schedules'} count={scheduleCount || undefined} onClick={() => navigate('/schedules')} />
       )}
