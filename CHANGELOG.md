@@ -18,6 +18,52 @@ Rules:
 
 ---
 
+## v0.1.32
+
+Four more commands in the tablet `/` palette. The catalogue now
+covers most things an operator wants without having to walk
+through the PIN-gated admin overlay.
+
+### What's new
+
+| Command | PIN? | What it does | Useful filters |
+|---|---|---|---|
+| **Update player APK** | No | Triggers the in-app updater immediately — same flow as the CMS "Update player APK" button + the 6h auto-check. | `/update` · `/upgrade` |
+| **Mute / Unmute screen audio** | No | Toggles the screen-wide audio flag. Label tracks live state — shows "Mute" when audio is on, "Unmute" when it's off. | `/audio` · `/sound` |
+| **Mix splash / Stop mixing splash** | No | Toggles the splash-between-videos behaviour. Same dynamic-label treatment. | `/splash` · `/branding` |
+| **Reboot screen** | No | Restarts the player activity in place (cache + registration survive). For when ExoPlayer gets visibly wedged. | `/reboot` · `/restart` |
+
+Plus existing commands (unchanged): Refresh playlist now, Show
+calibration clock (60 s), Open device admin (PIN-gated).
+
+### State-aware labels
+
+`Mute screen audio` and `Unmute screen audio` swap based on
+`repository.audioOnFlow` so you don't see "Mute" when audio is
+already muted. Same for `Mix splash` / `Stop mixing splash`. The
+`commands` list re-keys on those flows, which is cheap (~6 items)
+and means the palette is always honest about what Enter will do.
+
+### Filter keyword tags
+
+Each command's `hint` field now embeds the common search terms an
+operator might type — `/update`, `/upgrade`, `/audio`, `/sound`,
+`/splash`, `/branding`, `/reboot`, `/restart`. The existing
+word-AND filter picks them up automatically, so typing `/audio`
+from the palette finds the toggle even if you don't remember the
+exact label.
+
+### Reboot intentionally not PIN-gated
+
+The reboot path just relaunches the activity; cache + registration
+survive. Anyone with physical access to the box can power-cycle
+it anyway. Hiding the in-app version behind PIN would have made
+the palette feel coy without adding real security. The `Open
+device admin` command stays PIN-gated for the truly destructive
+actions (Clear cache, Reinitialise, Location reset).
+
+Tablet-only.
+
 ## v0.1.31
 
 Tablet command palette no longer pops the soft keyboard.
