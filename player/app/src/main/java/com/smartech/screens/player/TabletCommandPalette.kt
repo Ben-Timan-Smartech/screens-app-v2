@@ -21,6 +21,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -80,6 +81,11 @@ fun TabletCommandPalette(
     val scope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
 
+    // v0.1.32: live state flows so toggle commands can show the
+    // correct verb in their label — "Mute" vs "Unmute" etc.
+    val audioOn by repository.audioOnFlow.collectAsState()
+    val mixSplash by repository.mixSplashFlow.collectAsState()
+
     LaunchedEffect(externalOpen) {
         externalOpen.collect {
             visible = true
@@ -109,17 +115,60 @@ fun TabletCommandPalette(
         val pinGated: Boolean,
         val run: () -> Unit,
     )
-    val commands = remember {
+    // Keyed on the live flags so the toggle labels rebuild whenever
+    // the state flips — otherwise the palette would show "Mute" even
+    // after audio was already muted by a CMS push.
+    val commands = remember(audioOn, mixSplash) {
         listOf(
+            // ── Safe, no-PIN actions ─────────────────────────────
             Cmd(
                 label = "Refresh playlist now",
-                hint = "Re-poll the server immediately",
+                hint = "refresh · sync · re-poll the server immediately",
                 pinGated = false,
                 run = { repository.refreshNow() },
             ),
             Cmd(
+                label = "Update player APK",
+                hint = "update · upgrade · self-install latest build",
+                pinGated = false,
+                run = {
+                    scope.launch {
+                        runCatching {
+                            repository.updater?.checkAndUpdate(surfaceFailures = true)
+                                ?: LogBuffer.w("TabletCommandPalette", "Updater not wired")
+                        }
+                    }
+                },
+            ),
+            Cmd(
+                label = if (audioOn) "Mute screen audio" else "Unmute screen audio",
+                hint = if (audioOn)
+                    "audio · sound · silence the screen"
+                else
+                    "audio · sound · let videos play with sound",
+                pinGated = false,
+                run = {
+                    scope.launch {
+                        runCatching { repository.setAudioOnServer(!audioOn) }
+                    }
+                },
+            ),
+            Cmd(
+                label = if (mixSplash) "Stop mixing splash" else "Mix splash with playlist",
+                hint = if (mixSplash)
+                    "splash · branding · play only pushed videos"
+                else
+                    "splash · branding · interleave the bundled splash between videos",
+                pinGated = false,
+                run = {
+                    scope.launch {
+                        runCatching { repository.setMixSplashOnServer(!mixSplash) }
+                    }
+                },
+            ),
+            Cmd(
                 label = "Show calibration clock (60 s)",
-                hint = "Giant ticking server-corrected clock",
+                hint = "calibrate · clock · sync diagnostic · giant ticking server-corrected clock",
                 pinGated = false,
                 run = {
                     scope.launch {
@@ -127,9 +176,20 @@ fun TabletCommandPalette(
                     }
                 },
             ),
+            // ── Restart (no-PIN, but use with care) ──────────────
+            Cmd(
+                label = "Reboot screen",
+                hint = "reboot · restart · relaunch the player activity (cache + registration survive)",
+                pinGated = false,
+                run = {
+                    LogBuffer.w("TabletCommandPalette", "Reboot from / palette")
+                    repository.scheduleSelfRestart()
+                },
+            ),
+            // ── PIN escalation ───────────────────────────────────
             Cmd(
                 label = "Open device admin",
-                hint = "PIN-gated — reboot, clear cache, diagnostics",
+                hint = "admin · settings · pin · clear cache, location, diagnostics",
                 pinGated = true,
                 run = { onRequestUnlock() },
             ),
