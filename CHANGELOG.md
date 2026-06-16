@@ -18,6 +18,38 @@ Rules:
 
 ---
 
+## v0.1.40
+
+Two event-day fixes.
+
+### Stop auto-grouping Events + Test screens
+
+When a tablet registered with `storeId = "events"` or `"test"` the
+server was helpfully dropping it into `store:events` / `store:test`
+sync groups — the same default that's correct for real retail stores
+(every screen on the same wall should be in step) but very wrong for
+catch-all stores where each tablet is usually showing different
+content.
+
+The auto-group logic now exempts those two store ids. Tablets can
+still **opt INTO** a group from the staff-overlay Join picker if they
+do want one. A one-shot migration runs at server boot to clear the
+auto-set group from any previously-affected screen.
+
+### Legacy update installs the legacy APK
+
+The in-app updater always grabbed `modernUrl` from the release
+endpoint, regardless of which flavor the tablet itself was running.
+Legacy tablets that hit Update wound up downloading the modern APK,
+which won't install on Android 6/7.
+
+The updater now picks `legacyUrl` when `BuildConfig.FLAVOR == "legacy"`
+and falls back to a clear "no legacy APK in this release — sideload
+required" message when a release was built modern-only via
+`workflow_dispatch`. Modern tablets are unaffected.
+
+---
+
 ## v0.1.39
 
 Resumable video downloads — spotty in-store wifi no longer means

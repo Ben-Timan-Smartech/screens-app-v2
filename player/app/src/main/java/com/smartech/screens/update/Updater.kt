@@ -130,13 +130,33 @@ class Updater(
                 _state.value = State.UpToDate(BuildConfig.VERSION_NAME)
                 return
             }
-            val url = latest.modernUrl
+            // v0.1.40: pick the APK that matches this build's flavor.
+            // Pre-v0.1.40 the updater always grabbed `modernUrl`, so
+            // legacy tablets that hit "Update" downloaded the modern
+            // APK and either refused to install (signature mismatch
+            // looks the same — Android cares about the package's
+            // declared minSdk) or installed but broke under the boot
+            // env. We now route by `BuildConfig.FLAVOR` and fall back
+            // to modern only when no legacy URL is in the release
+            // (e.g. a workflow_dispatch with include_legacy=false).
+            val isLegacy = BuildConfig.FLAVOR == "legacy"
+            val url = when {
+                isLegacy && !latest.legacyUrl.isNullOrBlank() -> latest.legacyUrl
+                !isLegacy -> latest.modernUrl
+                // Legacy build but no legacy APK in this release — bail
+                // rather than push a modern APK that won't install.
+                else -> null
+            }
             if (url.isNullOrBlank()) {
-                if (surfaceFailures) _state.value = State.Failed("Release ${latest.versionName} has no APK URL")
+                val msg = if (isLegacy)
+                    "Release ${latest.versionName} has no legacy APK — sideload required"
+                else
+                    "Release ${latest.versionName} has no APK URL"
+                if (surfaceFailures) _state.value = State.Failed(msg)
                 else _state.value = State.Idle
                 return
             }
-            LogBuffer.i(TAG, "Update available: ${latest.versionName} (code ${latest.versionCode}) — downloading")
+            LogBuffer.i(TAG, "Update available: ${latest.versionName} (code ${latest.versionCode}) flavor=${BuildConfig.FLAVOR} — downloading")
             val apk = download(url, latest.versionName ?: "unknown")
             if (apk == null) {
                 if (surfaceFailures) _state.value = State.Failed("Download failed")
