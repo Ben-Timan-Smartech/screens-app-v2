@@ -18,6 +18,57 @@ Rules:
 
 ---
 
+## v0.1.33
+
+"Mix splash keeps turning itself off when I select it" — fixing
+the UX, not the underlying behaviour.
+
+### The behaviour you were seeing
+
+Since v0.1.11, the server forces `mixSplash: false` in `/api/state`
+for any screen with a `syncGroup`. The splash's extra duration
+breaks the loop math the tablet uses to stay frame-locked with
+the rest of the group — letting it play would steadily drift the
+group apart. The stored preference is preserved, so leaving the
+group restores splash behaviour, but while you're in a group the
+tablet always sees `false` on every poll.
+
+The toggle, meanwhile, was always enabled. You tapped it ON, the
+server stored ON, the next poll arrived with `false`, the flow
+flipped back, and the toggle popped OFF. Looked broken.
+
+### What changed
+
+The toggle is now visibly disabled when the screen is in a sync
+group, in three places:
+
+- **Tablet playlist view** — the toggle dims to ~35% opacity and
+  the sub-label reads "Disabled — screen is in sync group 'X'.
+  Leave the group to mix splash." `DarkToggle` now respects its
+  `enabled` flag visually instead of just blocking clicks.
+- **CMS Screen detail → Display card** — same treatment. Toggle
+  shows OFF + greyed, sub-label reads "Disabled — screen is in
+  sync group 'X'. Mix splash breaks the group's loop math; leave
+  the group to enable."
+- **Tablet `/` command palette** — the Mix splash command label
+  becomes `Mix splash (locked — in sync group)` and pressing
+  Enter on it logs a warning instead of firing a request that
+  would just be overridden on the next poll.
+
+### Behaviour summary
+
+| Screen state | Mix splash UX |
+|---|---|
+| Solo (no sync group) | Toggle works normally, value persists |
+| In a sync group | Toggle visibly locked OFF with explanation |
+| Leaves the group | Stored preference restores instantly |
+
+### No server change
+
+The server's override stays — sync still relies on it. v0.1.33
+is pure client UX so the locking is transparent instead of
+silent. Tablet + CMS.
+
 ## v0.1.32
 
 Four more commands in the tablet `/` palette. The catalogue now
