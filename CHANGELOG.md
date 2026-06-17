@@ -18,6 +18,53 @@ Rules:
 
 ---
 
+## v0.1.57
+
+CMS UX cleanup — unregister, sync group, fit-to-page, mobile critical path.
+
+### Unregister now removes the screen immediately
+
+Hitting "Unregister device" on a screen used to queue a command that
+only ran when the tablet next reconnected — so an offline screen
+hung around on the CMS list forever and the toast said it was
+"queued for next reconnect", which made no sense. Unregister is now
+a server-side delete: the screen disappears from `/api/screens`
+immediately and you're bounced back to the store view. If the
+tablet later reconnects, it gets "unknown screen" on its next poll
+and falls back to onboarding.
+
+### Sync group → tap to expand
+
+The Sync group card on the screen detail page was a permanent
+member-grid + buttons ~250 px tall, even when the screen wasn't in
+a group. It's now a one-line summary pill ("● Syncing with N other
+screens" or "● Independent playback") with a Manage / Set up
+button that opens the full picker in a modal. Same controls, far
+less vertical space on the common case.
+
+### Screen detail fits one viewport
+
+The Schedule "Coming soon" card is gone (Schedules is hidden until
+the feature actually exists, so the tease was just noise). The
+Danger zone — Update / Reboot / Clear cache / Unregister — is now
+collapsed behind a "More actions ▾" toggle. On a 13" laptop the
+page now fits without scrolling for typical configurations.
+
+### Mobile critical path
+
+The screens-list, screen-detail, and "Add content" picker were
+mobile-broken in subtle ways: the in-store grid hard-coded 4
+columns (≈80 px tiles on a phone), the selection bar offset itself
+by the desktop sidebar width even when the sidebar was a drawer,
+and the Add-content modal's 220 px brand rail ate most of a 380 px
+viewport. The grid is now auto-fill with a 150 px minimum, the
+selection bar centres on the full viewport when the sidebar is in
+drawer mode, and the brand rail collapses to a dropdown above the
+video grid on phones. The "Add 3 to {screen name}" button trims to
+"Add (3)" on mobile so it doesn't overflow.
+
+---
+
 ## v0.1.56
 
 CMS cleanup batch.
