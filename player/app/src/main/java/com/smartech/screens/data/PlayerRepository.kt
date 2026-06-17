@@ -1068,6 +1068,40 @@ class PlayerRepository(
      */
     suspend fun pushPlaylistToServer(items: List<VideoItem>, mode: String = "replace") {
         LogBuffer.i(TAG, "pushPlaylistToServer mode=$mode items=${items.size}")
+        // v0.1.48: optimistic local update for the on-tablet Add-content
+        // flow. As soon as the staff picks a video, surface it in the
+        // playlist view with the existing download-progress badge —
+        // staff get "added → downloading" feedback within one frame
+        // instead of waiting up to a full poll interval for the server
+        // round-trip + /api/state response. Replace mode mirrors the
+        // server's contract (full overwrite). The next /api/state poll
+        // reconciles either way; if the push failed server-side we just
+        // re-render whatever the server says.
+        if (mode == "append" && items.isNotEmpty()) {
+            val existingIds = _intendedPlaylist.value.map { it.id }.toSet()
+            val fresh = items.filter { it.id !in existingIds }
+            if (fresh.isNotEmpty()) {
+                _intendedPlaylist.value = _intendedPlaylist.value + fresh
+                // Kick off the download immediately so the row's
+                // progress badge starts ticking right away — same
+                // behaviour as a server-driven playlist update. The
+                // detailed progress reporting in refreshLivePlaylist
+                // takes over once the server confirms; this is just
+                // the head start so the staff don't watch a static
+                // spinner for 60 s on Normal poll mode.
+                for (v in fresh) {
+                    liveScope.launch {
+                        runCatching { cache.ensure(v) }
+                            .onFailure {
+                                LogBuffer.w(TAG, "Optimistic pre-cache failed for ${v.id}: ${it.message}")
+                            }
+                    }
+                }
+            }
+        } else if (mode == "replace") {
+            _intendedPlaylist.value = items
+        }
+
         val base = store.liveServerUrl.first()?.trimEnd('/')
         if (base.isNullOrBlank()) {
             LogBuffer.w(TAG, "pushPlaylistToServer skipped — no liveServerUrl set")

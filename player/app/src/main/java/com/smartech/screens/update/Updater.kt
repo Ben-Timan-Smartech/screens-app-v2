@@ -244,14 +244,6 @@ class Updater(
         val authority = "${appContext.packageName}.fileprovider"
         val uri: Uri = FileProvider.getUriForFile(appContext, authority, apk)
 
-        // ACTION_INSTALL_PACKAGE was deprecated in API 29 in favour of
-        // ACTION_VIEW with the apk mime type. Both still work; the
-        // platform routes to the package installer either way.
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
         // On Android 8+ apps need REQUEST_INSTALL_PACKAGES and the user
         // (or a device admin) has to grant install-from-unknown-sources
         // for this app once. If it's not granted, send them to that
@@ -272,13 +264,77 @@ class Updater(
             _state.value = State.Failed("Allow installs from this app, then trigger the update again.")
             return
         }
-        try {
-            appContext.startActivity(intent)
-            LogBuffer.i(TAG, "Installer intent dispatched for ${apk.name}")
-        } catch (e: Exception) {
-            LogBuffer.w(TAG, "Installer launch failed: ${e.message}", e)
-            _state.value = State.Failed("Couldn't launch installer: ${e.message}")
+
+        // v0.1.48: fallback chain. Stock Android binds the system
+        // PackageInstaller to ACTION_VIEW + content URI from API 24+,
+        // but some Amlogic / cheap-tablet ROMs (Sumvision Cyclone,
+        // TX3 Mini) ship a TV launcher that doesn't include the
+        // installer's intent filter — `startActivity` throws
+        // ActivityNotFoundException. Try each plausible intent shape
+        // before giving up so the in-app updater can actually swap
+        // builds on those boxes.
+        //
+        //   1. ACTION_VIEW + content://   — current Android default.
+        //   2. ACTION_INSTALL_PACKAGE     — deprecated in API 29 but
+        //                                   still wired on older ROMs.
+        //   3. (last resort) explicit launch of the well-known
+        //      PackageInstaller component.
+        val candidates = buildList {
+            add(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/vnd.android.package-archive")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+            @Suppress("DEPRECATION")
+            add(
+                Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+                    setDataAndType(uri, "application/vnd.android.package-archive")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+                    putExtra(Intent.EXTRA_RETURN_RESULT, false)
+                    putExtra(Intent.EXTRA_INSTALLER_PACKAGE_NAME, appContext.packageName)
+                }
+            )
         }
+
+        // First pass: pick the first intent whose target activity
+        // actually resolves. PackageManager.resolveActivity returns
+        // null when no app declares an intent-filter match — we'd
+        // rather discover that here than via the surprise of
+        // startActivity() throwing.
+        val pm = appContext.packageManager
+        for ((idx, intent) in candidates.withIndex()) {
+            val resolved = pm.resolveActivity(intent, 0)
+            if (resolved == null) {
+                LogBuffer.w(TAG, "Installer candidate $idx (${intent.action}) — no activity found, trying next")
+                continue
+            }
+            LogBuffer.i(
+                TAG,
+                "Installer candidate $idx (${intent.action}) resolved to " +
+                    "${resolved.activityInfo.packageName}/${resolved.activityInfo.name}",
+            )
+            try {
+                appContext.startActivity(intent)
+                LogBuffer.i(TAG, "Installer intent dispatched for ${apk.name}")
+                return
+            } catch (e: Exception) {
+                LogBuffer.w(TAG, "Installer candidate $idx launch threw: ${e.message}", e)
+            }
+        }
+
+        // Nothing on the device claims the APK-install intent. This is
+        // a ROM-config issue, not something the user can fix from the
+        // app — but at least tell them what to do.
+        LogBuffer.w(TAG, "No installer activity found on this device — APK left at ${apk.absolutePath}")
+        _state.value = State.Failed(
+            "This device has no package installer registered. Install manually by " +
+                "copying the APK from ${apk.absolutePath} and tapping it from a file " +
+                "manager, or sideload via ADB.",
+        )
     }
 
     companion object {

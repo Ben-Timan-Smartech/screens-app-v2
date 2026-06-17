@@ -18,6 +18,70 @@ Rules:
 
 ---
 
+## v0.1.48
+
+Three small but visible staff-flow fixes.
+
+### Visible Back / Cancel buttons on Add content
+
+The Brand and Video picker screens had "Back" and "Cancel" rendered
+as **muted-gray text**. On a TV across the room that read like a
+label, not a button — staff couldn't see how to back out of the Add
+content flow (other than via the remote's Back key, which not every
+TV remote even has). The remote's Back still works; the screen
+itself just didn't say so.
+
+Both now render as proper bordered pills, matching the **Done** /
+**Refresh now** styling everywhere else in the staff overlay. Back
+gets a `← ` glyph so it's unmistakable.
+
+### Picked video appears on the playlist immediately
+
+Picking a video used to show the Success screen, then the playlist
+re-fetched on the next /api/state poll (60 s on Normal, 5 min on
+Slow) before the new item was visible. Staff who clicked back to
+the playlist before that lost the visual confirmation.
+
+`pushPlaylistToServer(mode="append")` now mutates the local
+`intendedPlaylist` flow optimistically. The row appears in the
+playlist within one frame, picking up the existing download-progress
+badge. The next server poll reconciles silently. If the server push
+failed, the next poll just snaps back to the server's view.
+
+The optimistic insert also kicks off the video's download
+immediately via `cache.ensure`, so on Slow-mode tablets staff don't
+watch a static "queued" badge for 5 minutes — bytes start flowing
+the moment they pick.
+
+### Update on legacy tablets — installer fallback
+
+> `Couldn't launch installer: No activity found to handle Intent
+> { act=android.intent.action.VIEW dat=content://…/screens-v0.1.47.apk
+> typ=application/vnd.android.package-archive flg=0x10000001 }`
+
+Some Amlogic / cheap-TV-box ROMs (Sumvision Cyclone, TX3 Mini)
+don't register the system PackageInstaller against the modern
+`ACTION_VIEW + content://` intent shape. `Updater.launchInstaller`
+now tries a fallback chain and picks the first one that resolves:
+
+1. `ACTION_VIEW + content://` — current Android default.
+2. `ACTION_INSTALL_PACKAGE + content://` — deprecated in API 29
+   but still wired on older / off-brand ROMs.
+
+We call `PackageManager.resolveActivity` before each attempt so we
+can pick a known-good intent rather than relying on `startActivity`
+to throw and recover from the exception.
+
+If both candidates fail, the failure message now tells the operator
+*where* the APK landed on disk so they can install it manually via
+a file manager or `adb install`.
+
+(Note: legacy tablets currently on v0.1.45 or earlier still need
+one manual sideload of v0.1.48 to pick up the fix, since the
+in-app updater fix has to be in the *currently-installed* build.)
+
+---
+
 ## v0.1.47
 
 Drive sync Phase 3 — apply change diffs to a cached inventory.
