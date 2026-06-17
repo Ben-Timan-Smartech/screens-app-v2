@@ -18,6 +18,28 @@ Rules:
 
 ---
 
+## v0.1.42
+
+Hotfix — release builds were failing in CI from v0.1.39 onward.
+
+v0.1.41 added a `tasks.withType<KotlinCompile>().configureEach`
+block that used the deprecated `kotlinOptions { freeCompilerArgs +=
+... }` DSL to strip Kotlin's null-check intrinsics. The newer Kotlin
+Gradle Plugin promoted that call to a hard error rather than a
+deprecation warning, so the Android compile step failed and no APKs
+were published for v0.1.39 / v0.1.40 / v0.1.41 even though their
+git tags exist.
+
+Switched to the supported `compilerOptions.freeCompilerArgs.addAll(...)`
+API. Same intrinsic-stripping behaviour, same release-build-only
+scope, just the current DSL.
+
+(The other deprecation warnings on `resourceConfigurations` and the
+`android { kotlinOptions { ... } }` block are still just warnings;
+they don't fail the build and stay for now.)
+
+---
+
 ## v0.1.41
 
 Legacy-build polish + a first-boot fix that hit legacy hardest.
