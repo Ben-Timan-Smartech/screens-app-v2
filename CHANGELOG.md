@@ -18,6 +18,38 @@ Rules:
 
 ---
 
+## v0.1.55
+
+Hotfix — Drive sync was crashing with a 403.
+
+```
+HttpError 403 ... 'The attempted action requires shared drive
+membership.' ... teamDriveMembershipRequired
+```
+
+The v0.1.46 broad-query path uses `corpora='drive'`, which Drive
+only honours when the service account is a **member** of the
+shared drive — not just granted Viewer on the brand-content folder.
+On this install the SA had folder-level access only, so every sync
+threw at `list_drive_inventory` and never produced a library.
+
+`collect_videos_drive_v2` now catches the 403 (and any other
+HttpError) and returns `(None, None)`. The existing caller fallback
+kicks in and uses the v1 recursive walker, which works with
+folder-level permissions — slower (multiple round-trips) but
+correct. A clear log line explains how to restore the fast path:
+add the service-account email as a member of the shared drive
+(Drive → shared drive → Manage members → Add member).
+
+The Phase 2 change-token short-circuit and Phase 3 incremental
+apply also use `corpora='drive'` and would 403 in the same install,
+but those paths already had try/except around them — they just
+silently fall through to the broad-query path, which now correctly
+falls through to v1. End result: a non-member service account
+still gets a working sync, just on the slower v1 walker.
+
+---
+
 ## v0.1.54
 
 In-app updater works on more ROMs, and the manual-install fallback

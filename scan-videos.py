@@ -705,7 +705,8 @@ def collect_videos_drive_v2(brands_id: str) -> tuple[list[dict] | None, list[dic
     pulls the full inventory in one paginated sweep, classifies. Returns
     `(videos, inventory)` so the caller can persist the raw inventory
     for the v0.1.47 incremental-apply path. Returns `(None, None)` when
-    the content isn't in a shared drive — caller falls back to v1.
+    the content isn't in a shared drive OR when the broad-query API
+    refuses our access — caller falls back to the v1 recursive walker.
     """
     if drive_client is None:
         return (None, None)
@@ -714,7 +715,29 @@ def collect_videos_drive_v2(brands_id: str) -> tuple[list[dict] | None, list[dic
         print("[broad-query] brand folder isn't in a shared drive — falling back to recursive walk", flush=True)
         return (None, None)
     print(f"[broad-query] fetching whole-drive inventory for drive {drive_id}", flush=True)
-    inventory = drive_client.list_drive_inventory(drive_id)
+    # v0.1.55: the broad query uses corpora='drive', which Drive only
+    # honours when the service account is a *member* of the shared
+    # drive — not just granted Viewer on the brand-content folder.
+    # When the SA only has folder-level access, this 403s with
+    # `teamDriveMembershipRequired`. Catch it cleanly and fall back to
+    # the v1 recursive walker, which works with folder permissions.
+    try:
+        inventory = drive_client.list_drive_inventory(drive_id)
+    except Exception as e:
+        msg = str(e).lower()
+        if "teamdrivemembershiprequired" in msg or "403" in msg:
+            print(
+                "[broad-query] Drive returned 403 'teamDriveMembershipRequired' — the "
+                "service account isn't a member of the shared drive. "
+                "Falling back to the v1 recursive walker (slower but works "
+                "with folder-level Viewer access). To restore the fast path: "
+                "add the service-account email as a member of the shared "
+                "drive (Drive > shared drive > Manage members > Add member).",
+                flush=True,
+            )
+        else:
+            print(f"[broad-query] list_drive_inventory failed ({e}); falling back to recursive walker", flush=True)
+        return (None, None)
     videos = _classify_inventory(brands_id, inventory)
     return (videos, inventory)
 
