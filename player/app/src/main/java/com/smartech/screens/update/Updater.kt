@@ -58,6 +58,18 @@ class Updater(
     private val http: OkHttpClient,
     private val backendBaseUrlProvider: suspend () -> String?,
 ) {
+    // v0.1.51: dedicated client for the APK download. Same pattern as
+    // VideoCache (v0.1.39): the shared API client's 60 s callTimeout
+    // is correct for /api/release/latest (a tiny JSON) but kills a
+    // 4 MB APK download on a slow event-wifi connection. We inherit
+    // the connection pool + interceptors via newBuilder() and lift
+    // the call timeout while keeping connect/read sensible.
+    private val downloadHttp: OkHttpClient = http.newBuilder()
+        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+        .callTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS) // unbounded — Range-resume handles drops
+        .retryOnConnectionFailure(true)
+        .build()
     sealed class State {
         data object Idle : State()
         data object Checking : State()
@@ -196,46 +208,122 @@ class Updater(
         }
     }
 
+    /**
+     * Stream the APK from `url` into `<filesDir>/updates/<name>.apk`,
+     * resuming across attempts via Range requests.
+     *
+     * v0.1.51: mirrors the VideoCache.downloadTo path. Spotty wifi
+     * at events made the in-app updater unusable on legacy boxes:
+     * a 4 MB APK at 50 KB/s on a flapping connection had no chance
+     * inside the old 60 s callTimeout, and the previous code wiped
+     * the partial file on any IOException. Now:
+     *
+     *   • `.part` for the SAME versionName survives across attempts
+     *     and across process restarts. `.part` for OTHER versions
+     *     gets cleaned up so disk doesn't fill.
+     *   • Each attempt sends `Range: bytes=<existing>-` if there are
+     *     existing bytes on disk. 206 appends; 200 truncates (server
+     *     ignored Range); 416 wipes + retries.
+     *   • IOException → capped exponential backoff (1.5 s → 30 s)
+     *     up to 6 attempts.
+     */
     private suspend fun download(url: String, versionName: String): File? = withContext(Dispatchers.IO) {
         val dir = File(appContext.filesDir, "updates").apply { mkdirs() }
-        // Clean up old APK files so we don't accumulate them.
-        dir.listFiles { f -> f.name.endsWith(".apk") }?.forEach { it.delete() }
         val target = File(dir, "screens-v$versionName.apk")
         val partial = File(dir, target.name + ".part")
-        runCatching {
-            val req = Request.Builder().url(url).build()
-            http.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    LogBuffer.w(TAG, "APK download HTTP ${resp.code} for $url")
-                    return@use null
+        // v0.1.51: clean up any APKs / .part files that DON'T match
+        // the version we're about to fetch. Survives the current
+        // version's .part so we can resume across process restarts.
+        dir.listFiles()?.forEach { f ->
+            if (f.name.endsWith(".apk") && f.name != target.name) f.delete()
+            else if (f.name.endsWith(".apk.part") && f.name != partial.name) f.delete()
+        }
+
+        val maxAttempts = 6
+        var attempt = 0
+        var backoffMs = 1_500L
+        var lastError: Throwable? = null
+        while (attempt < maxAttempts) {
+            attempt++
+            val existing = if (partial.exists()) partial.length() else 0L
+            try {
+                val reqBuilder = Request.Builder().url(url)
+                if (existing > 0L) {
+                    reqBuilder.header("Range", "bytes=$existing-")
+                    LogBuffer.i(TAG, "Resuming APK download from byte $existing (attempt $attempt)")
                 }
-                val body = resp.body ?: return@use null
-                val total = body.contentLength().takeIf { it > 0 }
-                _state.value = State.Downloading(versionName, 0L, total)
-                FileOutputStream(partial).use { out ->
-                    val buf = ByteArray(64 * 1024)
-                    var read: Int
-                    var got = 0L
-                    body.byteStream().use { input ->
-                        while (input.read(buf).also { read = it } != -1) {
-                            out.write(buf, 0, read)
-                            got += read
-                            _state.value = State.Downloading(versionName, got, total)
+                downloadHttp.newCall(reqBuilder.build()).execute().use { resp ->
+                    when (resp.code) {
+                        206 -> {
+                            val body = resp.body ?: throw java.io.IOException("Empty body on 206")
+                            val remaining = body.contentLength().takeIf { it > 0 } ?: -1L
+                            val total = if (remaining > 0) existing + remaining else null
+                            _state.value = State.Downloading(versionName, existing, total)
+                            streamBodyToPart(body, partial, existing, total, versionName, append = true)
+                        }
+                        200 -> {
+                            if (existing > 0L) {
+                                LogBuffer.w(TAG, "Server ignored Range; restarting APK download from 0")
+                            }
+                            val body = resp.body ?: throw java.io.IOException("Empty body on 200")
+                            val total = body.contentLength().takeIf { it > 0 }
+                            _state.value = State.Downloading(versionName, 0L, total)
+                            streamBodyToPart(body, partial, 0L, total, versionName, append = false)
+                        }
+                        416 -> {
+                            LogBuffer.w(TAG, "HTTP 416 for APK; discarding partial and retrying")
+                            partial.delete()
+                            throw java.io.IOException("Range not satisfiable; reset")
+                        }
+                        else -> {
+                            throw java.io.IOException("APK download HTTP ${resp.code} for $url")
                         }
                     }
                 }
+                // Success — promote .part → .apk atomically.
                 if (!partial.renameTo(target)) {
                     partial.delete()
-                    LogBuffer.w(TAG, "Could not rename downloaded APK into place")
-                    return@use null
+                    throw java.io.IOException("Could not rename .part into place")
                 }
                 LogBuffer.i(TAG, "Downloaded ${target.absolutePath} (${target.length()} bytes)")
-                target
+                return@withContext target
+            } catch (e: java.io.IOException) {
+                lastError = e
+                LogBuffer.w(TAG, "APK download attempt $attempt/$maxAttempts failed: ${e.message}")
+                if (attempt >= maxAttempts) break
+                try {
+                    Thread.sleep(backoffMs)
+                } catch (ie: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return@withContext null
+                }
+                backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
             }
-        }.getOrElse {
-            LogBuffer.w(TAG, "APK download failed: ${it.message}", it)
-            partial.delete()
-            null
+        }
+        LogBuffer.w(TAG, "APK download failed after $maxAttempts attempts: ${lastError?.message}", lastError)
+        null
+    }
+
+    private fun streamBodyToPart(
+        body: okhttp3.ResponseBody,
+        partial: File,
+        startingBytes: Long,
+        total: Long?,
+        versionName: String,
+        append: Boolean,
+    ) {
+        FileOutputStream(partial, append).use { out ->
+            val buf = ByteArray(64 * 1024)
+            var got = startingBytes
+            body.byteStream().use { input ->
+                while (true) {
+                    val read = input.read(buf)
+                    if (read == -1) break
+                    out.write(buf, 0, read)
+                    got += read
+                    _state.value = State.Downloading(versionName, got, total)
+                }
+            }
         }
     }
 
