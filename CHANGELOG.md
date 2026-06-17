@@ -18,6 +18,36 @@ Rules:
 
 ---
 
+## v0.1.50
+
+Auto-group-by-storeId is gone.
+
+The v0.1.11 default was: tablet registers with `location.storeId` →
+server drops it into `store:<storeId>`. Helpful in the original
+"every screen in this store needs to be in sync" use case, but it
+kept biting in the opposite case — tablets ending up grouped after
+an APK update or fresh registration just because they happened to
+share a storeId. v0.1.40 carved out events/test; v0.1.50 just kills
+the whole behaviour.
+
+Sync groups are now strictly **opt-in**. The two ways a screen joins:
+
+- The on-tablet **Join** picker (staff overlay → content / device
+  admin → Sync group card, from v0.1.36).
+- The CMS Screen-detail Sync-group input.
+
+The register handler no longer touches `syncGroup`. A migration on
+server boot clears every existing `store:*` group from `_per_screen`
+— custom group names the operator explicitly typed (e.g. `wall-A`)
+don't start with `store:` and stay intact.
+
+If you genuinely want every screen at a store to sync, group them
+yourself once via the Join picker — the new sync-group UI from v0.1.36
+makes that one tap per tablet — and they'll stay grouped across
+updates because nothing auto-clears explicit choices.
+
+---
+
 ## v0.1.49
 
 ### Multi-select Add content on the tablet
