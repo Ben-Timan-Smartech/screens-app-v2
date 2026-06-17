@@ -18,6 +18,25 @@ Rules:
 
 ---
 
+## v0.1.44
+
+Third hotfix in the v0.1.39 cascade. Each release shipped fine
+locally but failed on a CI runner with a newer Kotlin Gradle Plugin
+that promoted warnings to hard errors.
+
+This one was in `VideoCache.reconcile()` — the v0.1.39 orphan
+.part-file cleanup used `id !in inflight` where `inflight` is a
+`ConcurrentHashMap<String, Boolean>`. The `in` operator on a
+ConcurrentHashMap calls `Map.contains()`, which Kotlin flags as
+ambiguous because for that one type it could mean `containsKey` OR
+`containsValue`. Older KGP emitted a warning; newer KGP turns it
+into a compile error.
+
+Switched to the explicit `!inflight.containsKey(id)`. Same
+behaviour, no ambiguity.
+
+---
+
 ## v0.1.43
 
 Second hotfix after v0.1.42 — release builds were still failing.

@@ -226,7 +226,12 @@ class VideoCache(
             // (Pattern: "<videoId>.mp4.part" → strip ".mp4.part".)
             root.listFiles { f -> f.isFile && f.name.endsWith(".mp4.part") }?.forEach { f ->
                 val id = f.name.removeSuffix(".mp4.part")
-                if (id !in keep && id !in inflight) {
+                // v0.1.44: use explicit containsKey instead of `id !in inflight`.
+                // The `in` operator on a ConcurrentHashMap calls Map.contains(),
+                // which the Kotlin compiler flags as ambiguous (could mean
+                // containsKey OR containsValue) — newer KGP turns that warning
+                // into a hard compile error.
+                if (id !in keep && !inflight.containsKey(id)) {
                     f.delete()
                 }
             }
