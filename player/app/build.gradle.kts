@@ -37,11 +37,19 @@ android {
         versionCode = appVersionCode
         versionName = appVersionName
 
-        // v0.1.41: ship only the locales + densities we actually use.
-        // Trims a few hundred KB off the APK from transitive library
-        // strings (Material3 etc. localise) and unused density buckets.
-        // Per-flavor overrides below tighten this further on legacy.
-        resourceConfigurations += listOf("en", "xhdpi", "xxhdpi")
+        // v0.1.43: ship only English string resources. Drops the
+        // localised string bundles Material3 + other AndroidX libs
+        // pull in (de/es/fr/it/ja/pt/ru/zh/…). Worth a few hundred
+        // KB on the APK.
+        //
+        // NOTE: density filters were removed here. AAPT2 errors out
+        // ("Cannot filter assets for multiple densities using SDK
+        // build tools 21 or later") when more than one density token
+        // is in resConfigs — the modern Android approach is APK or
+        // bundle splits, which we don't use. Density-bucketed PNG
+        // resources are a tiny slice of the APK anyway; the locale
+        // filter does the real work.
+        resourceConfigurations += listOf("en")
         // v0.1.41: route vector drawables through the support library on
         // pre-API-21 codepaths. Cheap insurance for the legacy flavor.
         vectorDrawables.useSupportLibrary = true
@@ -75,9 +83,6 @@ android {
         create("modern") {
             dimension = "compatibility"
             minSdk = 26
-            // Modern devices can use the full density set if the
-            // launcher / icon-pack picks higher buckets.
-            resourceConfigurations += listOf("xxxhdpi")
         }
         create("legacy") {
             dimension = "compatibility"
@@ -85,11 +90,11 @@ android {
             // Suffix the version so it's obvious in Settings → Apps which
             // build is on a given device.
             versionNameSuffix = "-legacy"
-            // v0.1.41: legacy targets armv7 boxes (Sumvision, TX3 Mini)
-            // with ~720p–1080p screens. xxxhdpi mipmaps were dead weight
-            // — those devices are xhdpi at best. mdpi + hdpi cover the
-            // rare 720p screens that still need it.
-            resourceConfigurations += listOf("mdpi", "hdpi")
+            // v0.1.43: density-bucket filters were removed here (see
+            // defaultConfig). AAPT2 rejects multi-density resConfigs in
+            // single-APK builds. The legacy build's PNG mipmaps in
+            // src/legacy/res/mipmap-* still ship at their natural
+            // densities; Android picks the bucket per device at runtime.
         }
     }
 
