@@ -60,6 +60,25 @@ DRIVE_TOKEN_PATH = Path(os.environ.get(
     )).parent / "drive_change_token.json"),
 ))
 
+# v0.1.47 Phase 3: cached broad-query inventory snapshot. After every
+# full scan we write the whole folder+video list here. On a subsequent
+# scan where changes.list returns only a handful of changes, we patch
+# this snapshot in place (via parallel files.get for the changed IDs)
+# and reclassify, skipping the broad query entirely.
+INVENTORY_SNAPSHOT_PATH = Path(os.environ.get(
+    "SCREENS_DRIVE_INVENTORY_PATH",
+    str(Path(os.environ.get(
+        "SCREENS_LIBRARY_PATH",
+        str(Path(__file__).resolve().parent / "app" / "components" / "library.json"),
+    )).parent / "drive_inventory_snapshot.json"),
+))
+
+# Above this many changes since the last cursor we skip the
+# incremental apply and fall through to a full broad-query rebuild —
+# at that point the per-file metadata fetches are no cheaper than a
+# single broad sweep.
+INCREMENTAL_CHANGE_THRESHOLD = 50
+
 OUT_FILE = PROJECT / "app" / "components" / "real-data.jsx"
 # Library JSON path. Defaults to the in-tree CMS components dir (good
 # for local dev) but is overridable so Cloud Run can point it at
@@ -575,27 +594,17 @@ def _has_skipped_ancestor(
     return False
 
 
-def collect_videos_drive_v2(brands_id: str) -> list[dict] | None:
-    """Single-sweep replacement for discover_brands_drive + collect_videos_drive.
-
-    Returns the video list; also mutates the module-global BRANDS to
-    add the discovered brand records (matching the old API). Returns
-    None when we can't determine a shared-drive ID — caller should
-    fall back to the v1 recursive path.
+def _classify_inventory(brands_id: str, inventory: list[dict]) -> list[dict]:
+    """Pure-function classifier — turns a list of `{id, name, mimeType,
+    parents, size, ...}` Drive records into a list of library.json
+    video entries, and populates the module-global BRANDS along the
+    way. Used by both the broad-query path and the v0.1.47 incremental-
+    apply path (which feeds in a patched cached inventory).
     """
-    if drive_client is None:
-        return None
-    drive_id = drive_client.get_parent_drive_id(brands_id)
-    if not drive_id:
-        print("[broad-query] brand folder isn't in a shared drive — falling back to recursive walk", flush=True)
-        return None
-
-    print(f"[broad-query] fetching whole-drive inventory for drive {drive_id}", flush=True)
-    inventory = drive_client.list_drive_inventory(drive_id)
     folders = [f for f in inventory if f.get("mimeType") == "application/vnd.google-apps.folder"]
     files = [f for f in inventory if f.get("mimeType") != "application/vnd.google-apps.folder"]
     folder_by_id: dict[str, dict] = {f["id"]: f for f in folders}
-    print(f"[broad-query] {len(folders)} folders + {len(files)} videos in inventory", flush=True)
+    print(f"[classify] {len(folders)} folders + {len(files)} videos in inventory", flush=True)
 
     # Direct children of BRANDS_ID = brand folders.
     brand_folders = [
@@ -691,6 +700,165 @@ def collect_videos_drive_v2(brands_id: str) -> list[dict] | None:
     return out
 
 
+def collect_videos_drive_v2(brands_id: str) -> tuple[list[dict] | None, list[dict] | None]:
+    """v0.1.46 broad-query entry point. Resolves the shared-drive id,
+    pulls the full inventory in one paginated sweep, classifies. Returns
+    `(videos, inventory)` so the caller can persist the raw inventory
+    for the v0.1.47 incremental-apply path. Returns `(None, None)` when
+    the content isn't in a shared drive — caller falls back to v1.
+    """
+    if drive_client is None:
+        return (None, None)
+    drive_id = drive_client.get_parent_drive_id(brands_id)
+    if not drive_id:
+        print("[broad-query] brand folder isn't in a shared drive — falling back to recursive walk", flush=True)
+        return (None, None)
+    print(f"[broad-query] fetching whole-drive inventory for drive {drive_id}", flush=True)
+    inventory = drive_client.list_drive_inventory(drive_id)
+    videos = _classify_inventory(brands_id, inventory)
+    return (videos, inventory)
+
+
+# ── v0.1.47 Phase 3: incremental change apply ───────────────────────
+#
+# After every successful full scan we persist the inventory list to
+# `drive_inventory_snapshot.json`. On a subsequent scan where
+# `changes.list` returns a manageable number of file IDs, we can skip
+# the broad query entirely:
+#
+#   1. Concurrently `files.get` metadata for every changed ID.
+#   2. Drop removed/trashed/inaccessible IDs from the snapshot.
+#   3. Upsert metadata for the rest.
+#   4. Re-classify against the patched snapshot.
+#
+# Cost scales with `num_changes`, not `inventory_size`. A typical
+# "uploaded one new video" day becomes 1 changes.list + 1 files.get
+# round-trip instead of a 1-3 s broad sweep.
+#
+# Anything that fails along the way (snapshot missing, drive id
+# mismatch, too many changes, parallel fetch error) falls through to
+# the broad-query rebuild. Belt-and-braces — the fast path is purely
+# an optimization on top of the v0.1.46 baseline.
+
+
+def _load_inventory_snapshot() -> tuple[str | None, list[dict] | None]:
+    """Read the persisted inventory snapshot. Returns (driveId,
+    inventory) or (None, None) if absent / unreadable."""
+    if not INVENTORY_SNAPSHOT_PATH.is_file():
+        return (None, None)
+    try:
+        data = json.loads(INVENTORY_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        items = data.get("items")
+        if not isinstance(items, list):
+            return (None, None)
+        return (data.get("driveId"), items)
+    except Exception as e:
+        print(f"[snapshot] couldn't read snapshot: {e}", flush=True)
+        return (None, None)
+
+
+def _save_inventory_snapshot(drive_id: str, inventory: list[dict]) -> None:
+    """Atomic write of the inventory snapshot. Trims to just the
+    fields the incremental-apply path needs so the file stays small
+    (~100-300 KB for a few-thousand-file drive)."""
+    try:
+        trimmed = [
+            {
+                "id":           f.get("id"),
+                "name":         f.get("name"),
+                "mimeType":     f.get("mimeType"),
+                "parents":      f.get("parents"),
+                "size":         f.get("size"),
+                "modifiedTime": f.get("modifiedTime"),
+            }
+            for f in inventory
+            if f.get("id")
+        ]
+        INVENTORY_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = INVENTORY_SNAPSHOT_PATH.with_suffix(INVENTORY_SNAPSHOT_PATH.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps({"driveId": drive_id, "items": trimmed}, indent=2),
+            encoding="utf-8",
+        )
+        tmp.replace(INVENTORY_SNAPSHOT_PATH)
+    except Exception as e:
+        print(f"[snapshot] couldn't write snapshot: {e}", flush=True)
+
+
+def try_incremental_apply(
+    brands_id: str,
+    drive_id: str,
+    changes: list[dict],
+) -> tuple[list[dict] | None, list[dict] | None]:
+    """Attempt the v0.1.47 fast path: patch the cached snapshot with
+    the changed file IDs and reclassify. Returns `(videos, patched_inventory)`
+    on success, `(None, None)` if we should fall through to broad query.
+    """
+    if drive_client is None or not changes:
+        return (None, None)
+    if len(changes) > INCREMENTAL_CHANGE_THRESHOLD:
+        print(f"[incremental] {len(changes)} changes > threshold {INCREMENTAL_CHANGE_THRESHOLD} — falling through to broad query", flush=True)
+        return (None, None)
+    cached_drive, cached_inventory = _load_inventory_snapshot()
+    if cached_drive != drive_id or not cached_inventory:
+        print("[incremental] snapshot missing or drive mismatch — falling through to broad query", flush=True)
+        return (None, None)
+
+    # Fetch metadata for everything that changed, in parallel. We
+    # need this regardless of `removed=True` because Drive sometimes
+    # flips removed→reachable when an ACL changes back.
+    changed_ids = [c["fileId"] for c in changes]
+    print(f"[incremental] fetching metadata for {len(changed_ids)} changed file(s) in parallel", flush=True)
+    try:
+        metadata = drive_client.fetch_files_metadata(changed_ids)
+    except Exception as e:
+        print(f"[incremental] parallel metadata fetch failed ({e}); falling through to broad query", flush=True)
+        return (None, None)
+
+    # Patch the snapshot. Build an id-keyed index of the current
+    # inventory, then apply additions/removals/updates in place.
+    by_id: dict[str, dict] = {f["id"]: f for f in cached_inventory if f.get("id")}
+    removed_count = 0
+    added_count = 0
+    updated_count = 0
+    for fid in changed_ids:
+        meta = metadata.get(fid)
+        if meta is None:
+            # Inaccessible (deleted, trashed, ACL lost). Drop if present.
+            if fid in by_id:
+                del by_id[fid]
+                removed_count += 1
+            continue
+        # We only track folders + video files in the snapshot. If a
+        # changed file is something else (a .txt, an image, etc.),
+        # skip the upsert — the broad-query inventory wouldn't have
+        # included it either.
+        mt = meta.get("mimeType", "")
+        name = (meta.get("name") or "").lower()
+        is_folder = mt == "application/vnd.google-apps.folder"
+        is_video = ("video/" in mt) or name.endswith(".mp4") or name.endswith(".mov")
+        if not (is_folder or is_video):
+            if fid in by_id:
+                del by_id[fid]
+                removed_count += 1
+            continue
+        if fid in by_id:
+            updated_count += 1
+        else:
+            added_count += 1
+        by_id[fid] = meta
+
+    patched = list(by_id.values())
+    print(
+        f"[incremental] snapshot patched — +{added_count} added, "
+        f"~{updated_count} updated, -{removed_count} removed; "
+        f"new size {len(patched)} items",
+        flush=True,
+    )
+    videos = _classify_inventory(brands_id, patched)
+    return (videos, patched)
+
+
 def _load_token() -> tuple[str | None, str | None]:
     """Read the persisted change-token. Returns (driveId, token) or
     (None, None) if absent / unreadable."""
@@ -753,6 +921,10 @@ def main():
             drive_id_for_token = None
             print(f"[token] couldn't resolve drive id: {e}", flush=True)
         cached_drive, cached_token = _load_token()
+        # v0.1.47: hold onto the changes list (not just count) so the
+        # incremental-apply path below can use it. None means "we
+        # didn't run changes.list" (forced full, or no cursor yet).
+        changes_to_apply: list[dict] | None = None
         if (
             not force_full
             and drive_id_for_token
@@ -760,31 +932,56 @@ def main():
             and cached_token
         ):
             try:
-                num_changes, next_token = drive_client.changes_since(
+                changes, next_token = drive_client.changes_since(
                     drive_id_for_token, cached_token,
                 )
-                if num_changes == 0:
-                    print(f"[token] no Drive changes since last cursor — skipping full scan", flush=True)
+                if not changes:
+                    print("[token] no Drive changes since last cursor — skipping full scan", flush=True)
                     # Persist the same token explicitly so the next call
                     # starts from the same anchor; cheap and avoids any
                     # weird "token expired" edge cases later.
                     _save_token(drive_id_for_token, next_token)
                     return
-                print(f"[token] {num_changes} change(s) since last scan — running full sweep", flush=True)
+                print(f"[token] {len(changes)} change(s) since last scan", flush=True)
+                changes_to_apply = changes
             except Exception as e:
                 print(f"[token] changes.list failed ({e}); falling through to full scan", flush=True)
 
-        # Full scan via the broad-query path; fall back to the
-        # legacy recursive walker if we couldn't resolve a shared
-        # drive (My Drive content, etc.).
-        videos = collect_videos_drive_v2(DRIVE_BRANDS_FOLDER_ID)
+        # v0.1.47 Phase 3: incremental apply when we have a usable
+        # change list. Patches the cached inventory in place via
+        # parallel files.get for the changed IDs only. Falls through
+        # to the broad query on any failure or when too many changes
+        # have piled up to make this worthwhile.
+        videos: list[dict] | None = None
+        used_inventory: list[dict] | None = None
+        if changes_to_apply and drive_id_for_token:
+            videos, used_inventory = try_incremental_apply(
+                DRIVE_BRANDS_FOLDER_ID, drive_id_for_token, changes_to_apply,
+            )
+            if videos is not None:
+                print(f"[incremental] fast path succeeded — {len(videos)} videos via patched snapshot", flush=True)
+
+        # Broad-query rebuild path. Used when there's no cached
+        # snapshot, the changes list is too big, or the incremental
+        # apply opted out.
         if videos is None:
-            print("[broad-query] falling back to recursive walker", flush=True)
-            BRANDS.extend(discover_brands_drive(DRIVE_BRANDS_FOLDER_ID))
-            print(f"Discovered {len(BRANDS)} brand folders via Drive API")
-            videos = collect_videos_drive()
-        else:
-            print(f"Discovered {len(BRANDS)} brand folders via broad-query inventory")
+            videos, used_inventory = collect_videos_drive_v2(DRIVE_BRANDS_FOLDER_ID)
+            if videos is None:
+                print("[broad-query] falling back to recursive walker", flush=True)
+                BRANDS.extend(discover_brands_drive(DRIVE_BRANDS_FOLDER_ID))
+                print(f"Discovered {len(BRANDS)} brand folders via Drive API")
+                videos = collect_videos_drive()
+                # Legacy walker doesn't build an inventory — leave
+                # used_inventory as None so we skip snapshot save.
+            else:
+                print(f"Discovered {len(BRANDS)} brand folders via broad-query inventory")
+
+        # v0.1.47: persist the inventory snapshot so the next scan's
+        # incremental-apply path can reuse it. Only when we have one
+        # (the legacy recursive walker doesn't build one).
+        if drive_id_for_token and used_inventory is not None:
+            _save_inventory_snapshot(drive_id_for_token, used_inventory)
+
         # After a successful scan, capture a fresh cursor pointing at
         # "now" so the next tick can short-circuit if nothing changes
         # in the meantime.

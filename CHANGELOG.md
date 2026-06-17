@@ -18,6 +18,59 @@ Rules:
 
 ---
 
+## v0.1.47
+
+Drive sync Phase 3 — apply change diffs to a cached inventory.
+
+### What v0.1.46 still spent time on
+
+After Phase 1+2 landed:
+- **Idle sync**: ~1 s (changes.list only).
+- **Sync with N changes since last cursor**: ~1-3 s (broad query
+  re-fetches the whole drive inventory just to learn that one new
+  video appeared).
+
+The waste in the second case is obvious — we have a `changes.list`
+result telling us exactly which file IDs moved; we don't need to
+re-fetch everything.
+
+### What v0.1.47 does
+
+After every successful scan we persist the full broad-query inventory
+to `drive_inventory_snapshot.json` (~100-300 KB).
+
+On the next scan, if `changes.list` returns a manageable number of
+changes (≤ 50):
+1. Concurrently `files.get` metadata for the changed IDs only
+   (8-thread pool — Drive's per-file metadata endpoint is rate-limited
+   per *file*, so parallel fan-out is safe and fast).
+2. Drop removed / trashed / inaccessible IDs from the cached snapshot.
+3. Upsert the rest.
+4. Re-classify the patched snapshot via the same brand-by-parent-chain
+   logic the broad query uses.
+
+Cost scales with `num_changes`, not `inventory_size`. A typical
+"someone uploaded a new video" sync becomes:
+- 1 `changes.list` call (~300 ms)
+- 1 parallel `files.get` (~300 ms)
+- 0 broad-query time
+- Total ~600-800 ms.
+
+Anything that breaks along the way — missing snapshot, drive-id
+mismatch, > 50 changes, fetch error — falls through cleanly to the
+v0.1.46 broad-query rebuild. The fast path is purely additive; the
+v0.1.46 baseline is still the correctness floor.
+
+### Side effects worth knowing
+
+- `changes_since` now returns the list of `{fileId, removed}`
+  records, not just a count. Internal API only.
+- `drive_inventory_snapshot.json` is auto-created next to `library.json`
+  (under `SCREENS_LIBRARY_PATH`); override with
+  `SCREENS_DRIVE_INVENTORY_PATH` if you want it elsewhere.
+
+---
+
 ## v0.1.46
 
 Drive sync is dramatically faster.
