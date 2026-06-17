@@ -4,10 +4,25 @@
   Only the downloaded-APK directory is exposed — we don't want random
   app-internal files leaking to whatever app receives the install
   intent.
+
+  v0.1.54: switched from <files-path> (internal app storage,
+  /data/data/<pkg>/files) to <external-files-path>
+  (/storage/emulated/0/Android/data/<pkg>/files). External app-scoped
+  storage is still cleared on uninstall but is reachable from file
+  managers + adb without root, which matters when the in-app
+  installer fails on a quirky ROM and the user needs to sideload the
+  APK manually. The internal entry stays for backwards-compat with
+  any in-flight v0.1.53-or-earlier .part files.
 -->
 <paths>
-    <!-- Matches Updater.kt: APK lands in <filesDir>/updates/. -->
+    <!-- Pre-v0.1.54: APK landed in <filesDir>/updates/. Kept so
+         existing .part files left behind by v0.1.53-or-earlier
+         installs are still addressable via FileProvider. -->
     <files-path
         name="updates"
+        path="updates/" />
+    <!-- v0.1.54+: APK lands in <externalFilesDir>/updates/. -->
+    <external-files-path
+        name="updates_ext"
         path="updates/" />
 </paths>
