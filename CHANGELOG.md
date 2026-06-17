@@ -18,6 +18,38 @@ Rules:
 
 ---
 
+## v0.1.58
+
+Owner-only Brand Asset Manager API key in Settings → Integrations.
+
+### What's new
+
+The Brand Asset Manager API key now has a home in the CMS. Settings →
+**Integrations** (visible only when you're signed in as the Owner) shows
+the current key — masked by default, with a Reveal button — and lets you
+edit, copy, or clear it. Server-side, the key lives in a JSON file on
+the persistent state volume, so a Cloud Run redeploy doesn't reset it.
+
+### Why this matters
+
+Until now there was nowhere in the CMS to put external service
+credentials; pasting them in chat or threading them through env vars was
+the only option, and env vars get wiped on every continuous deploy.
+
+### Security shape
+
+- Read and write both require the Owner role; the server returns 403
+  for anyone else, even if they hit `/api/integrations/brandApiKey`
+  directly. Hiding the tab from non-owners is a UX detail, not the
+  enforcement.
+- Activity log records who changed a key and when, but never the value.
+- The `SCREENS_BRAND_API_KEY` env var seeds the value on first boot;
+  once an Owner saves a key from the CMS, the on-disk JSON wins
+  forever, so a stale env var on a later revision can't quietly
+  replace a rotated key.
+
+---
+
 ## v0.1.57
 
 CMS UX cleanup — unregister, sync group, fit-to-page, mobile critical path.
