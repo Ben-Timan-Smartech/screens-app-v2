@@ -284,6 +284,15 @@ CITY_BRAND_JSON = Path(os.environ.get(
     "SCREENS_CITY_BRAND_PATH",
     _state_path_default("city_brand.json"),
 ))
+# v0.1.58: owner-managed integration secrets (Brand Asset Manager API key,
+# etc.). Stored as a flat {name: {value, updatedAt, updatedBy}} dict so we
+# can extend with more keys without an endpoint change. Lives on the
+# FUSE-mounted bucket on Cloud Run; an env var (SCREENS_BRAND_API_KEY)
+# seeds the value on first boot but the on-disk JSON wins after that.
+SECRETS_JSON = Path(os.environ.get(
+    "SCREENS_SECRETS_PATH",
+    _state_path_default("secrets.json"),
+))
 
 # Cloud Run injects $PORT (defaults to 8080); on a laptop we keep 8765.
 PORT = int(os.environ.get("PORT", "8765"))
@@ -427,6 +436,15 @@ def _save_city_brand() -> None:
     _atomic_write_json(CITY_BRAND_JSON, dict(_city_brand))
 
 
+def _save_secrets() -> None:
+    """Persist _secrets. Call inside _STATE_LOCK after any mutation.
+
+    v0.1.58: contains integration credentials (Brand Asset Manager API
+    key etc.). Lives on the same FUSE-mounted state bucket as the other
+    JSON files — a Cloud Run redeploy must not wipe credentials."""
+    _atomic_write_json(SECRETS_JSON, dict(_secrets))
+
+
 def _load_state_from_disk() -> None:
     """One-shot loader, called once on module import. Best-effort —
     a missing or corrupt file just means we start with empty state,
@@ -439,6 +457,7 @@ def _load_state_from_disk() -> None:
             (SYNC_GROUPS_JSON, "_sync_groups"),
             (CUSTOM_STORES_JSON, "_custom_stores"),
             (CITY_BRAND_JSON, "_city_brand"),
+            (SECRETS_JSON, "_secrets"),
         ]:
             if not path.is_file():
                 continue
@@ -458,6 +477,9 @@ def _load_state_from_disk() -> None:
                     # other code holds references to it. Merge in place.
                     _city_brand.clear()
                     _city_brand.update(raw)
+                elif target_name == "_secrets":
+                    _secrets.clear()
+                    _secrets.update(raw)
                 else:
                     _sync_groups = raw
                 print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
@@ -826,6 +848,17 @@ DEFAULT_CITY_BRAND: dict = {
 
 _splash_registry: dict = {}     # key "brand:tmrw" / "concept:7EVN" -> meta
 _city_brand: dict = {}          # mutable copy of DEFAULT_CITY_BRAND
+# v0.1.58: integration secrets, {name: {value, updatedAt, updatedBy}}.
+# Currently holds the Brand Asset Manager API key; structured as a dict
+# so adding more keys later doesn't require an endpoint change. Only the
+# Owner can read or write this map.
+_secrets: dict = {}
+# Whitelist of accepted secret slugs + their human labels (used in
+# activity-log lines). Endpoints 404 for any name not in this map so a
+# typo or crafted URL can't be used to fish around the secrets file.
+_INTEGRATION_SECRETS: dict[str, str] = {
+    "brandApiKey": "Brand Asset Manager API key",
+}
 
 # ── Library sync (scan-videos.py runner) ────────────────────────────
 # The CMS doesn't keep its own copy of any video — `/media/...` streams
@@ -2022,6 +2055,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"items": items})
             return
 
+        # v0.1.58: integration secrets — Brand Asset Manager API key,
+        # etc. Owner only, on both read and write. Returns the raw value
+        # so the Owner can copy it; the UI masks by default and reveals
+        # on demand. A 403 for non-owners is enforced server-side so a
+        # crafted fetch can't lift the key by spoofing the UI.
+        m_sec = re.match(r"^/api/integrations/([a-zA-Z0-9_-]+)$", path)
+        if m_sec:
+            user = self._current_user()
+            if user is None:
+                self._send_json({"error": "unauthenticated"}, status=401); return
+            if user.get("role") != "owner":
+                self._send_json({"error": "owner_only"}, status=403); return
+            name = m_sec.group(1)
+            if name not in _INTEGRATION_SECRETS:
+                self._send_json({"error": "unknown_secret"}, status=404); return
+            entry = _secrets.get(name) or {}
+            self._send_json({
+                "name":      name,
+                "value":     entry.get("value", ""),
+                "updatedAt": entry.get("updatedAt"),
+                "updatedBy": entry.get("updatedBy"),
+            })
+            return
+
         self.send_error(404, "Unknown API endpoint")
 
     def _serve_api_post(self) -> None:
@@ -2858,6 +2915,50 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         body = self._read_json()
 
+        # v0.1.58: PATCH /api/integrations/<name> { value: "<key>" }.
+        # Owner-only — checked here, not via PERMISSIONS, because it's
+        # a deliberate single-role gate. Empty string clears the secret.
+        # The activity log records who changed it, but never the value.
+        m_sec = re.match(r"^/api/integrations/([a-zA-Z0-9_-]+)$", path)
+        if m_sec:
+            user = self._current_user()
+            if user is None:
+                self._send_json({"error": "unauthenticated"}, status=401); return
+            if user.get("role") != "owner":
+                self._send_json({"error": "owner_only"}, status=403); return
+            name = m_sec.group(1)
+            if name not in _INTEGRATION_SECRETS:
+                self._send_json({"error": "unknown_secret"}, status=404); return
+            if "value" not in body:
+                self._send_json({"error": "missing_value"}, status=400); return
+            new_value = (body.get("value") or "").strip()
+            with _STATE_LOCK:
+                if new_value:
+                    _secrets[name] = {
+                        "value":     new_value,
+                        "updatedAt": int(time.time()),
+                        "updatedBy": user.get("display_name") or user.get("email"),
+                    }
+                else:
+                    _secrets.pop(name, None)
+                _save_secrets()
+            _log_activity(
+                kind="settings",
+                text=(f"Cleared {_INTEGRATION_SECRETS[name]}"
+                      if not new_value else
+                      f"Updated {_INTEGRATION_SECRETS[name]}"),
+                icon="settings",
+                who=user.get("display_name"),
+            )
+            entry = _secrets.get(name) or {}
+            self._send_json({
+                "name":      name,
+                "value":     entry.get("value", ""),
+                "updatedAt": entry.get("updatedAt"),
+                "updatedBy": entry.get("updatedBy"),
+            })
+            return
+
         # ── Update a video's library-side flags ─────────────────
         # PATCH /api/library/videos/<id> { defaultUnmute: bool }
         # Used by the CMS content library to toggle a per-video
@@ -3320,6 +3421,21 @@ def main() -> None:
     # process's persisted state. Without this every Cloud Run redeploy
     # would wipe every screen's playlist and audio/splash flags.
     _load_state_from_disk()
+    # v0.1.58: env-var seed for the Brand Asset Manager API key. Only
+    # used when the on-disk JSON has no value — once an Owner saves a
+    # key from Settings → Integrations, the JSON wins. This means a
+    # rotated key set via the CMS isn't quietly overwritten by a stale
+    # env var on the next Cloud Run revision.
+    _env_brand_api_key = os.environ.get("SCREENS_BRAND_API_KEY", "").strip()
+    if _env_brand_api_key and not (_secrets.get("brandApiKey") or {}).get("value"):
+        with _STATE_LOCK:
+            _secrets["brandApiKey"] = {
+                "value": _env_brand_api_key,
+                "updatedAt": int(time.time()),
+                "updatedBy": "env:SCREENS_BRAND_API_KEY",
+            }
+            _save_secrets()
+        print("[secrets] seeded brandApiKey from SCREENS_BRAND_API_KEY", file=sys.stderr)
     # v0.1.50: clear ALL auto-set "store:<id>" sync groups. The
     # auto-group-by-storeId logic is gone (see the register handler);
     # this clears the residue from earlier installs so the current

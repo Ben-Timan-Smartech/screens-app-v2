@@ -728,6 +728,199 @@ const DriveSyncTab = () => {
   );
 };
 
+// ─────────────────────────────────────────────────────────────
+// Integrations tab — owner-only. Surfaces the Brand Asset Manager
+// API key for view + edit. Server enforces the same role gate on
+// every request, so this UI is a convenience; a non-owner who
+// manually fetches /api/integrations/brandApiKey gets a 403.
+//
+// Display rule: the value is masked by default and revealed on
+// demand. Mask shows the first 6 + last 4 chars so the owner can
+// tell two keys apart at a glance without exposing the whole thing.
+// ─────────────────────────────────────────────────────────────
+const maskApiKey = (s) => {
+  if (!s) return '';
+  if (s.length <= 12) return '•'.repeat(s.length);
+  return s.slice(0, 6) + '•'.repeat(Math.max(4, s.length - 10)) + s.slice(-4);
+};
+
+const fmtUpdatedAt = (epochSec) => {
+  if (!epochSec) return 'never';
+  try {
+    return new Date(epochSec * 1000).toLocaleString();
+  } catch (_) {
+    return '—';
+  }
+};
+
+const BrandApiKeyRow = () => {
+  const [data, setData] = React.useState(null);   // { value, updatedAt, updatedBy }
+  const [loading, setLoading] = React.useState(true);
+  const [err, setErr] = React.useState(null);
+  const [show, setShow] = React.useState(false);
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const r = await fetch('/api/integrations/brandApiKey', { cache: 'no-store' });
+      if (!r.ok) {
+        setErr(`HTTP ${r.status}`);
+        setData({ value: '', updatedAt: null, updatedBy: null });
+      } else {
+        const j = await r.json();
+        setData({ value: j.value || '', updatedAt: j.updatedAt, updatedBy: j.updatedBy });
+        setErr(null);
+      }
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  React.useEffect(() => { refresh(); }, [refresh]);
+
+  const startEdit = () => {
+    setDraft(data?.value || '');
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+    setDraft('');
+  };
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const r = await fetch('/api/integrations/brandApiKey', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: draft.trim() }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${r.status}`);
+      }
+      const j = await r.json();
+      setData({ value: j.value || '', updatedAt: j.updatedAt, updatedBy: j.updatedBy });
+      setEditing(false);
+      setDraft('');
+      showToast(j.value ? 'Brand API key saved' : 'Brand API key cleared', 'ok');
+    } catch (e) {
+      showToast(`Save failed: ${e.message}`, 'err');
+    } finally {
+      setSaving(false);
+    }
+  };
+  const copy = async () => {
+    if (!data?.value) return;
+    try {
+      await navigator.clipboard.writeText(data.value);
+      showToast('Copied to clipboard', 'ok');
+    } catch (_) {
+      showToast('Copy failed', 'err');
+    }
+  };
+
+  const present = !!data?.value;
+
+  return (
+    <div style={{ padding: '16px 20px', borderBottom: 'var(--border-faint)' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>Brand Asset Manager API key</div>
+        {present
+          ? <Chip tone="ok">Set</Chip>
+          : <Chip tone="warn">Not set</Chip>}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--ink-4)', marginBottom: 10 }}>
+        Used by the CMS to read brands, logos, and splash assets from the Brand Asset Manager.
+        Last updated {fmtUpdatedAt(data?.updatedAt)}{data?.updatedBy ? ` by ${data.updatedBy}` : ''}.
+      </div>
+
+      {loading ? (
+        <div style={{ fontSize: 12, color: 'var(--ink-4)' }}>Loading…</div>
+      ) : editing ? (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <Input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Paste new key — empty to clear"
+            size="sm"
+            style={{
+              flex: 1, minWidth: 240,
+              fontFamily: 'var(--font-mono)', fontSize: 12,
+            }}
+            autoFocus
+          />
+          <Button variant="primary" size="sm" disabled={saving} onClick={save}>
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+          <Button variant="ghost" size="sm" disabled={saving} onClick={cancelEdit}>
+            Cancel
+          </Button>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <code style={{
+            flex: 1, minWidth: 240,
+            padding: '6px 10px',
+            background: 'var(--ink-9)',
+            border: 'var(--border)',
+            borderRadius: 4,
+            fontFamily: 'var(--font-mono)', fontSize: 12,
+            color: present ? 'var(--ink-1)' : 'var(--ink-4)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {present ? (show ? data.value : maskApiKey(data.value)) : '— no key set —'}
+          </code>
+          {present && (
+            <Button variant="ghost" size="sm" onClick={() => setShow(s => !s)}>
+              {show ? 'Hide' : 'Reveal'}
+            </Button>
+          )}
+          {present && (
+            <Button variant="ghost" size="sm" onClick={copy}>Copy</Button>
+          )}
+          <Button variant="secondary" size="sm" onClick={startEdit}>
+            {present ? 'Edit' : 'Set key'}
+          </Button>
+        </div>
+      )}
+
+      {err && (
+        <div style={{ fontSize: 11, color: 'var(--err)', marginTop: 8 }}>
+          {err === 'owner_only'
+            ? 'Owner role required.'
+            : err === 'unauthenticated'
+              ? 'Sign in again to view this.'
+              : `Couldn't load: ${err}`}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const IntegrationsTab = () => (
+  <>
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: 'var(--ink-1)' }}>Integrations</div>
+      <div style={{ fontSize: 12, color: 'var(--ink-4)', marginTop: 2 }}>
+        API keys for third-party services the CMS reads from. Only the Owner can view or edit
+        these — non-owners see a 403 even if they hit the endpoints directly.
+      </div>
+    </div>
+    <div style={{ border: 'var(--border)', borderRadius: 10, background: 'var(--ink-10)' }}>
+      <BrandApiKeyRow />
+    </div>
+    <div style={{ marginTop: 14, fontSize: 11, color: 'var(--ink-4)' }}>
+      Keys are stored server-side on the persistent state volume. A Cloud Run redeploy doesn't
+      reset them. To rotate, paste the new key here — the old value is overwritten and the
+      change is recorded in the activity log (the value itself is never logged).
+    </div>
+  </>
+);
+
 const Settings = () => {
   // "Users" tab removed in v0.1.6 — it pointed at a mocked-up local
   // state list while the real users page (sidebar → Users, route
@@ -735,11 +928,18 @@ const Settings = () => {
   // different lists of users was confusing — sidebar Users is now
   // the single source of truth.
   const [tab, setTab] = React.useState('brands');
+  const auth = useAuth();
+  const isOwner = auth?.user?.role === 'owner';
+  // v0.1.58: Integrations tab is owner-only — it shows + edits the
+  // Brand Asset Manager API key. The server enforces the same role
+  // gate on every read/write, so hiding the tab from non-owners is a
+  // UX nicety, not the access control.
   const tabs = [
     { k: 'brands', label: 'Brands' },
     { k: 'locations', label: 'Locations' },
     { k: 'splashes', label: 'Splashes' },
     { k: 'drive', label: 'Drive sync' },
+    ...(isOwner ? [{ k: 'integrations', label: 'Integrations' }] : []),
     { k: 'notify', label: 'Notifications' },
   ];
   const vp = useViewport();
@@ -816,6 +1016,8 @@ const Settings = () => {
           {tab === 'splashes' && <SplashesTab />}
 
           {tab === 'drive' && <DriveSyncTab />}
+
+          {tab === 'integrations' && isOwner && <IntegrationsTab />}
 
           {tab === 'notify' && (
             <>
