@@ -18,6 +18,59 @@ Rules:
 
 ---
 
+## v0.1.54
+
+In-app updater works on more ROMs, and the manual-install fallback
+is finally actionable.
+
+### Why this matters
+
+v0.1.51's resumable APK download fixed the *download* timeout, but
+on certain Amlogic boxes the *install* still failed with
+`This device has no package installer registered`. The v0.1.48
+fallback chain tried `ACTION_VIEW + content://` then
+`ACTION_INSTALL_PACKAGE + content://` and bailed if neither
+resolved. Some custom ROMs:
+
+- Ship the installer activity without the `DEFAULT` intent
+  category — `pm.resolveActivity(intent, 0)` returns null, but
+  `startActivity` would still dispatch.
+- Only accept `file://` URIs (Android 6/7 era).
+- Save the APK in `<filesDir>/updates/`, which is internal app
+  storage that a file manager can't read without root — so the
+  "install manually from this path" error message was useless.
+
+### What's new
+
+- **`file://` URI fallback** added to the candidate list when
+  running on API 23 (Android 6 / Marshmallow). Skipped on API 24+
+  because FileUriExposedException would throw.
+- **Blind-`startActivity` second pass.** After the
+  `resolveActivity`-guarded pass fails on every candidate, the
+  updater retries each by calling `startActivity` directly and
+  catching `ActivityNotFoundException`. This catches installers
+  that don't declare the `DEFAULT` category — `resolveActivity`
+  filters them out but `startActivity` can dispatch to them.
+- **APK now lives in `getExternalFilesDir("updates")`.** Same
+  app-scoped lifecycle (wiped on uninstall) but reachable from
+  any file manager + `adb pull` without root. The manual-install
+  fallback message now gives a path the operator can actually
+  navigate to.
+- **`FileProvider` config** updated to expose
+  `<external-files-path>` alongside the legacy `<files-path>` so
+  the FileProvider URI keeps working.
+- **Clearer error copy** when all paths fail — numbered steps and
+  an `adb install` example.
+
+### Side effect
+
+Any APK or `.part` file left in the old `<filesDir>/updates/`
+directory from v0.1.53-or-earlier installs becomes an orphan. They
+don't get auto-cleaned, but they're ~4 MB and harmless — wiped on
+the next app uninstall or device factory reset.
+
+---
+
 ## v0.1.53
 
 Two fixes that hit the same source — silently-truncated downloads.

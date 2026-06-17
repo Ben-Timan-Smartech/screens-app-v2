@@ -270,7 +270,15 @@ class Updater(
      *     up to 6 attempts.
      */
     private suspend fun download(url: String, versionName: String): File? = withContext(Dispatchers.IO) {
-        val dir = File(appContext.filesDir, "updates").apply { mkdirs() }
+        // v0.1.54: write to external app-scoped storage instead of
+        // internal. Both are wiped on uninstall, but external is
+        // reachable from a file manager + adb pull without root — the
+        // path that lands in the "manual install" fallback message
+        // is now actually actionable. Falls back to internal storage
+        // on devices where external is unavailable (rare; legacy
+        // Amlogic boxes typically have it).
+        val dir = (appContext.getExternalFilesDir("updates") ?: File(appContext.filesDir, "updates"))
+            .apply { mkdirs() }
         val target = File(dir, "screens-v$versionName.apk")
         val partial = File(dir, target.name + ".part")
         // v0.1.51: clean up any APKs / .part files that DON'T match
@@ -410,20 +418,23 @@ class Updater(
             return
         }
 
-        // v0.1.48: fallback chain. Stock Android binds the system
-        // PackageInstaller to ACTION_VIEW + content URI from API 24+,
-        // but some Amlogic / cheap-tablet ROMs (Sumvision Cyclone,
-        // TX3 Mini) ship a TV launcher that doesn't include the
-        // installer's intent filter — `startActivity` throws
-        // ActivityNotFoundException. Try each plausible intent shape
-        // before giving up so the in-app updater can actually swap
-        // builds on those boxes.
+        // v0.1.48/v0.1.54: fallback chain. Stock Android binds the
+        // system PackageInstaller to ACTION_VIEW + content URI from
+        // API 24+, but some Amlogic / cheap-tablet ROMs (Sumvision
+        // Cyclone, TX3 Mini) ship custom installers that don't
+        // declare the standard intent filter — `resolveActivity`
+        // returns null even though there IS a working installer on
+        // the device. Try every plausible intent shape, then as a
+        // last resort fire them through `startActivity` blindly
+        // (some installers register without the DEFAULT category,
+        // which `resolveActivity(intent, 0)` filters out but
+        // `startActivity` can still dispatch to).
         //
-        //   1. ACTION_VIEW + content://   — current Android default.
-        //   2. ACTION_INSTALL_PACKAGE     — deprecated in API 29 but
-        //                                   still wired on older ROMs.
-        //   3. (last resort) explicit launch of the well-known
-        //      PackageInstaller component.
+        //   1. ACTION_VIEW + content://      — current Android.
+        //   2. ACTION_INSTALL_PACKAGE + content:// — older ROMs.
+        //   3. ACTION_VIEW + file://         — Android 6/7 only
+        //                                      (FileUriExposedException
+        //                                       above API 24).
         val candidates = buildList {
             add(
                 Intent(Intent.ACTION_VIEW).apply {
@@ -443,23 +454,37 @@ class Updater(
                     putExtra(Intent.EXTRA_INSTALLER_PACKAGE_NAME, appContext.packageName)
                 }
             )
+            // v0.1.54: file:// scheme for Android 6 (API 23) — some
+            // Amlogic ROMs ship installers wired to the file scheme
+            // only. Skipped on API 24+ where this would throw
+            // FileUriExposedException.
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+                add(
+                    Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(
+                            Uri.fromFile(apk),
+                            "application/vnd.android.package-archive",
+                        )
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                )
+            }
         }
 
-        // First pass: pick the first intent whose target activity
-        // actually resolves. PackageManager.resolveActivity returns
-        // null when no app declares an intent-filter match — we'd
-        // rather discover that here than via the surprise of
-        // startActivity() throwing.
         val pm = appContext.packageManager
+        // First pass: prefer candidates whose target activity
+        // resolves cleanly. resolveActivity(intent, 0) implies
+        // MATCH_DEFAULT_ONLY — most installers declare DEFAULT
+        // category and match here.
         for ((idx, intent) in candidates.withIndex()) {
             val resolved = pm.resolveActivity(intent, 0)
             if (resolved == null) {
-                LogBuffer.w(TAG, "Installer candidate $idx (${intent.action}) — no activity found, trying next")
+                LogBuffer.w(TAG, "Installer candidate $idx (${intent.action} ${intent.data?.scheme}) — no activity, will retry blind")
                 continue
             }
             LogBuffer.i(
                 TAG,
-                "Installer candidate $idx (${intent.action}) resolved to " +
+                "Installer candidate $idx (${intent.action} ${intent.data?.scheme}) resolved to " +
                     "${resolved.activityInfo.packageName}/${resolved.activityInfo.name}",
             )
             try {
@@ -467,18 +492,43 @@ class Updater(
                 LogBuffer.i(TAG, "Installer intent dispatched for ${apk.name}")
                 return
             } catch (e: Exception) {
-                LogBuffer.w(TAG, "Installer candidate $idx launch threw: ${e.message}", e)
+                LogBuffer.w(TAG, "Installer candidate $idx startActivity threw: ${e.message}", e)
             }
         }
 
-        // Nothing on the device claims the APK-install intent. This is
-        // a ROM-config issue, not something the user can fix from the
-        // app — but at least tell them what to do.
+        // v0.1.54: blind pass. Some custom ROMs ship the installer
+        // without the DEFAULT category — `resolveActivity` returns
+        // null for them, but `startActivity` can still find the
+        // activity if it knows the package. We've already logged the
+        // failure of every candidate above; now retry each by going
+        // straight to startActivity and catching ActivityNotFound.
+        for ((idx, intent) in candidates.withIndex()) {
+            try {
+                appContext.startActivity(intent)
+                LogBuffer.i(
+                    TAG,
+                    "Installer candidate $idx (${intent.action} ${intent.data?.scheme}) " +
+                        "dispatched via blind startActivity",
+                )
+                return
+            } catch (e: android.content.ActivityNotFoundException) {
+                LogBuffer.w(TAG, "Installer candidate $idx blind dispatch: ActivityNotFoundException")
+            } catch (e: Exception) {
+                LogBuffer.w(TAG, "Installer candidate $idx blind dispatch threw: ${e.message}", e)
+            }
+        }
+
+        // Nothing on the device claims the APK-install intent. The
+        // path we surface is external app-scoped storage (v0.1.54),
+        // so the operator can actually navigate to it from a file
+        // manager without needing root or adb.
         LogBuffer.w(TAG, "No installer activity found on this device — APK left at ${apk.absolutePath}")
         _state.value = State.Failed(
-            "This device has no package installer registered. Install manually by " +
-                "copying the APK from ${apk.absolutePath} and tapping it from a file " +
-                "manager, or sideload via ADB.",
+            "This device has no package installer registered. Install manually:\n\n" +
+                "1. Open a file manager on the device.\n" +
+                "2. Navigate to ${apk.absolutePath}\n" +
+                "3. Tap the APK to install.\n\n" +
+                "Or sideload via adb: `adb install ${apk.absolutePath}`",
         )
     }
 
