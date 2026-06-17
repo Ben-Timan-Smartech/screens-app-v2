@@ -18,6 +18,41 @@ Rules:
 
 ---
 
+## v0.1.51
+
+Resumable APK download in the in-app updater.
+
+Same root cause v0.1.39 fixed for the video cache, but the updater
+was on its own path: shared OkHttp client with a 60 s callTimeout, a
+single attempt, and a `partial.delete()` on any IOException. On a
+1 MB/s event-wifi link that's just inside the timeout for a 4 MB
+APK — drop into 100 KB/s and the update fails.
+
+The updater now mirrors the VideoCache pattern:
+
+- **Dedicated downloader client** — same connection pool + auth
+  interceptors as the shared client, but no callTimeout and a longer
+  read timeout. The big payload is no longer racing a clock built
+  for tiny JSON.
+- **`.part` files survive across attempts AND across process
+  restarts** — the cleanup pass now keeps the partial for the
+  version you're upgrading TO and only deletes APKs / partials
+  belonging to *other* versions.
+- **Range-resume on retry.** Each attempt sends
+  `Range: bytes=<existing>-`. 206 appends; 200 means the server
+  ignored Range so we restart cleanly; 416 wipes + retries.
+- **Capped exponential backoff** — 6 attempts at 1.5 s → 3 s → 6 s →
+  12 s → 24 s → 30 s. Each attempt picks up exactly where the
+  previous one stopped, so a connection that drops every 30 s
+  eventually finishes the download instead of looping byte-zero.
+
+Translation: a legacy box on flapping wifi that previously failed
+the in-app update now resumes through the drop and completes. If
+the user reboots the tablet mid-download (or it crashes), the next
+launch picks up the .part and continues.
+
+---
+
 ## v0.1.50
 
 Auto-group-by-storeId is gone.
