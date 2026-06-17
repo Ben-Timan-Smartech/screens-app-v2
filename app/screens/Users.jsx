@@ -14,6 +14,76 @@ const ROLE_LABELS = {
   brand_partner: 'Brand partner',
 };
 
+// v0.1.56: inline PIN editor — masked display + click to edit. Saves
+// the new value via PATCH /api/users/<id> { pin: "1234" | "" } when
+// the input blurs or Enter is pressed. Empty PIN clears it.
+const PinCell = ({ user, editable, onSave }) => {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(user.pin || '');
+  const [show, setShow] = useState(false);
+  useEffect(() => { setDraft(user.pin || ''); }, [user.pin]);
+
+  const commit = async () => {
+    const next = draft.replace(/\D/g, '').slice(0, 4);
+    setEditing(false);
+    if (next !== (user.pin || '')) {
+      if (next && next.length !== 4) {
+        window.showToast && window.showToast('PIN must be 4 digits or empty', 'err');
+        setDraft(user.pin || '');
+        return;
+      }
+      await onSave(next);
+    }
+  };
+
+  if (!editable) {
+    return user.pin ? (
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--ink-3)', letterSpacing: 1 }}>••••</span>
+    ) : (
+      <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>—</span>
+    );
+  }
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value.replace(/\D/g, '').slice(0, 4))}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') { setDraft(user.pin || ''); setEditing(false); }
+        }}
+        placeholder="••••"
+        inputMode="numeric"
+        style={{
+          width: 64, height: 26, padding: '0 8px', borderRadius: 4,
+          fontFamily: 'var(--font-mono)', fontSize: 13, letterSpacing: 2,
+          background: 'var(--ink-10)', color: 'var(--ink-1)',
+          border: 'var(--border-strong)',
+        }}
+      />
+    );
+  }
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+      onMouseEnter={() => setShow(true)}
+      onMouseLeave={() => setShow(false)}
+      style={{
+        fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--ink-2)', letterSpacing: 1,
+        padding: '4px 8px', borderRadius: 4, background: 'var(--ink-9)',
+        border: 'var(--border)', cursor: 'pointer', minWidth: 64, textAlign: 'left',
+      }}
+      title="Click to edit"
+    >
+      {user.pin
+        ? (show ? user.pin : '••••')
+        : <span style={{ color: 'var(--ink-4)' }}>Set PIN</span>}
+    </button>
+  );
+};
+
 const ROLE_BLURBS = {
   owner:         'Singular. Full control. Cannot be demoted.',
   super_admin:   'Full control except managing the Owner.',
@@ -196,11 +266,12 @@ const Users = () => {
                 return (
                   <div key={u.id} style={{
                     display: 'grid',
-                    // Mobile: avatar + identity on row 1, role / status / actions
-                    // span row 2 via flex. Laptop+: the existing 5-col layout.
+                    // Mobile: avatar + identity on row 1, role / pin /
+                    // status / actions span row 2 via flex. Laptop+:
+                    // 6 columns including the new PIN cell.
                     gridTemplateColumns: compact
                       ? '36px 1fr'
-                      : '36px 1.6fr 1.2fr 0.8fr auto',
+                      : '36px 1.6fr 1.2fr 80px 0.6fr auto',
                     gap: 10, alignItems: 'center', padding: '12px 16px',
                     borderBottom: 'var(--border-faint)',
                     opacity: u.status === 'disabled' ? 0.55 : 1,
@@ -246,6 +317,11 @@ const Users = () => {
                         {ROLE_BLURBS[u.role]}
                       </div>
                     </div>
+                    <PinCell
+                      user={u}
+                      editable={editable}
+                      onSave={(next) => onUpdate(u, { pin: next })}
+                    />
                     <div style={{ fontSize: 11, color: u.status === 'active' ? 'var(--ok)' : 'var(--ink-4)' }}>
                       {u.status === 'active' ? 'Active' : 'Disabled'}
                     </div>

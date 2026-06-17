@@ -97,20 +97,14 @@ const VideoTile = ({ v, selected, onToggle, onPreview }) => {
       <div
         onClick={(e) => { e.stopPropagation(); onPreview && onPreview(v); }}
         style={{ position: 'relative', cursor: hasMedia ? 'pointer' : 'default', borderRadius: 8, overflow: 'hidden', aspectRatio: '16/9', background: '#0a0a0a' }}>
-        {hasMedia && inView ? (
-          <video
-            ref={videoRef}
-            src={v.mediaUrl}
-            preload="metadata"
-            muted
-            playsInline
-            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-          />
-        ) : (
-          // Placeholder while off-screen — generated text-on-color block.
-          // Costs nothing to render, no network.
-          <Thumbnail title={v.title} brand={v.brand} duration={v.duration} />
-        )}
+        {/* v0.1.56: dropped the inline `<video preload=metadata>` —
+            it kept hitting the Drive proxy from every visible tile,
+            which is heavy on slow links and rendered black more often
+            than it rendered a real first-frame. Generated thumbnail
+            is cheap and always renders correctly. Click still opens
+            the detail panel where the operator can open the file in
+            Drive natively. */}
+        <Thumbnail title={v.title} brand={v.brand} duration={v.duration} />
 
         {/* Play overlay. Icon color is hardcoded #141414 (not var(--ink-0))
             so the dark-mode token flip doesn't render a white play
@@ -322,50 +316,50 @@ const AddContentModal = ({ targetDeviceId, targetName, onClose }) => {
 // product/dims, "on N screens", and the Push selection checkbox at the
 // far right. Same selection semantics as VideoTile.
 // ─────────────────────────────────────────────────────────────
+// v0.1.56: list view row uses a clear column layout instead of the
+// previous bullet-separated inline string. Operators want to scan
+// resolution / length / size as columns. The hover-video thumbnail
+// is gone — it was the source of the bad-preview problem (a flaky
+// Drive stream playing in a 60×34 box mostly produced black). Click
+// the row opens the detail panel instead.
 const VideoListRow = ({ v, selected, onToggle, onPreview, divider }) => {
   const initialDims = (v.width && v.height) ? { w: v.width, h: v.height } : null;
-  const [inView, setInView] = React.useState(false);
-  const rowRef = React.useRef(null);
-  React.useEffect(() => {
-    if (!rowRef.current) return;
-    const obs = new IntersectionObserver(([e]) => {
-      if (e.isIntersecting) { setInView(true); obs.disconnect(); }
-    }, { rootMargin: '200px' });
-    obs.observe(rowRef.current);
-    return () => obs.disconnect();
-  }, []);
+  const lengthLabel = (() => {
+    if (!v.durationSec) return '—';
+    const s = Math.round(v.durationSec);
+    if (s < 60) return `${s}s`;
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  })();
   return (
     <div
-      ref={rowRef}
-      onClick={(e) => { e.stopPropagation(); onToggle && onToggle(); }}
+      onClick={(e) => { e.stopPropagation(); onPreview && onPreview(v); }}
       style={{
-        display: 'flex', alignItems: 'center', gap: 12,
-        padding: '8px 12px',
+        display: 'grid',
+        gridTemplateColumns: '60px 1fr 110px 70px 80px 28px',
+        alignItems: 'center', gap: 12,
+        padding: '10px 12px',
         borderBottom: divider ? 'var(--border-faint)' : 'none',
         background: selected ? 'var(--ink-8)' : 'transparent',
         cursor: 'pointer',
       }}>
-      {/* Thumbnail with click → preview */}
-      <div
-        onClick={(e) => { e.stopPropagation(); onPreview && onPreview(v); }}
-        style={{ width: 60, height: 34, borderRadius: 4, overflow: 'hidden', flexShrink: 0, background: '#0a0a0a', position: 'relative', cursor: 'pointer' }}>
-        {v.mediaUrl && inView ? (
-          <video src={v.mediaUrl} preload="metadata" muted playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-        ) : (
-          <Thumbnail title={v.title} brand={v.brand} aspect="16/9" size="sm" />
-        )}
+      <div style={{ width: 60, height: 34, borderRadius: 4, overflow: 'hidden', flexShrink: 0, background: '#0a0a0a' }}>
+        <Thumbnail title={v.title} brand={v.brand} aspect="16/9" size="sm" />
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.title}</div>
-        <div style={{ fontSize: 11, color: 'var(--ink-4)', display: 'flex', gap: 6, alignItems: 'center' }}>
-          <span>{v.brand}</span>
-          {v.product && <><span>·</span><span>{v.product}</span></>}
-          {initialDims && <><span>·</span><span className="tnum">{dimensionLabel(initialDims.w, initialDims.h)}</span></>}
-          {v.durationSec && <><span>·</span><span className="tnum">{Math.round(v.durationSec)}s</span></>}
-          {v.sizeMb && <><span>·</span><span className="tnum">{v.sizeMb} MB</span></>}
+        <div style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {v.brand}{v.product ? ` · ${v.product}` : ''}
         </div>
       </div>
-      <Button variant="ghost" size="sm" icon={<Icon.play size={13} />} onClick={(e) => { e.stopPropagation(); onPreview && onPreview(v); }} title="Preview" />
+      <div className="tnum" style={{ fontSize: 12, color: 'var(--ink-3)' }}>
+        {initialDims ? dimensionLabel(initialDims.w, initialDims.h) : '—'}
+      </div>
+      <div className="tnum" style={{ fontSize: 12, color: 'var(--ink-3)', textAlign: 'right' }}>
+        {lengthLabel}
+      </div>
+      <div className="tnum" style={{ fontSize: 12, color: 'var(--ink-3)', textAlign: 'right' }}>
+        {v.sizeMb ? `${v.sizeMb} MB` : '—'}
+      </div>
       <div
         onClick={(e) => { e.stopPropagation(); onToggle && onToggle(); }}
         style={{
@@ -374,13 +368,33 @@ const VideoListRow = ({ v, selected, onToggle, onPreview, divider }) => {
           border: selected ? 'none' : '1.5px solid var(--ink-6)',
           color: selected ? 'var(--on-accent)' : 'transparent',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          flexShrink: 0,
+          flexShrink: 0, justifySelf: 'end',
         }}>
         {selected && <Icon.check size={11} />}
       </div>
     </div>
   );
 };
+
+// v0.1.56: column header bar shown above the list-view rows.
+const VideoListHeader = () => (
+  <div style={{
+    display: 'grid',
+    gridTemplateColumns: '60px 1fr 110px 70px 80px 28px',
+    gap: 12, padding: '8px 12px',
+    borderBottom: 'var(--border)',
+    background: 'var(--ink-9)',
+    fontSize: 10, fontWeight: 500,
+    color: 'var(--ink-4)', letterSpacing: 0.5, textTransform: 'uppercase',
+  }}>
+    <span />
+    <span>Title</span>
+    <span>Resolution</span>
+    <span style={{ textAlign: 'right' }}>Length</span>
+    <span style={{ textAlign: 'right' }}>Size</span>
+    <span />
+  </div>
+);
 
 // ─────────────────────────────────────────────────────────────
 // Preview modal — full-bleed video player with native controls.
@@ -486,13 +500,82 @@ const PreviewModal = ({ video, onClose }) => {
           </div>
           <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} />
         </div>
-        <video
-          ref={videoRef}
-          src={video.mediaUrl}
-          controls
-          autoPlay
-          style={{ width: '100%', maxHeight: '70vh', background: '#000', display: 'block' }}
-        />
+        {/* v0.1.56: in-page <video> playback dropped. Streaming
+            through the Drive proxy in a 1080p modal was flaky on most
+            office wifi setups — the buffer-then-stall behaviour made
+            the preview feel broken. Replaced with a metadata sheet
+            plus a "Open in Drive" button so the operator can confirm
+            the right file is in the library and view it natively in
+            Drive if they need to. */}
+        {(() => {
+          // mediaUrl is "/media/<driveId>" for Drive-synced videos,
+          // "/uploaded/<filename>" for direct CMS uploads. Only the
+          // Drive case has an external link to surface.
+          const driveId = video.mediaUrl?.startsWith('/media/')
+            ? decodeURIComponent(video.mediaUrl.slice('/media/'.length))
+            : null;
+          const driveLink = driveId && !driveId.includes('/')
+            ? `https://drive.google.com/file/d/${driveId}/view`
+            : null;
+          const isUpload = video.mediaUrl?.startsWith('/uploaded/');
+          return (
+            <div style={{ padding: '20px 20px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {/* Big thumbnail of the brand mark instead of a player. */}
+              <div style={{
+                width: '100%', aspectRatio: '16 / 9',
+                background: 'var(--ink-9)', borderRadius: 8,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: 'var(--ink-3)', fontSize: 13, gap: 10,
+                position: 'relative', overflow: 'hidden',
+              }}>
+                <Thumbnail title={video.title} brand={video.brand} aspect="16/9" size="lg" />
+              </div>
+
+              {/* Two-column property sheet. */}
+              <div style={{
+                display: 'grid', gridTemplateColumns: '120px 1fr', gap: '10px 16px',
+                fontSize: 13,
+              }}>
+                <span style={{ color: 'var(--ink-4)' }}>Filename</span>
+                <span style={{ color: 'var(--ink-2)', fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>
+                  {video.filename || '—'}
+                </span>
+                <span style={{ color: 'var(--ink-4)' }}>Resolution</span>
+                <span className="tnum" style={{ color: 'var(--ink-2)' }}>
+                  {dims ? `${dimensionLabel(dims.w, dims.h)}${aspectLabel(dims.w, dims.h) ? ` · ${aspectLabel(dims.w, dims.h)}` : ''}` : 'Unknown'}
+                </span>
+                <span style={{ color: 'var(--ink-4)' }}>Length</span>
+                <span className="tnum" style={{ color: 'var(--ink-2)' }}>
+                  {video.durationSec
+                    ? `${Math.floor(video.durationSec / 60)}:${String(Math.round(video.durationSec % 60)).padStart(2, '0')}`
+                    : 'Unknown'}
+                </span>
+                <span style={{ color: 'var(--ink-4)' }}>File size</span>
+                <span className="tnum" style={{ color: 'var(--ink-2)' }}>
+                  {video.sizeMb ? `${video.sizeMb} MB` : 'Unknown'}
+                </span>
+                <span style={{ color: 'var(--ink-4)' }}>Source</span>
+                <span style={{ color: 'var(--ink-2)' }}>
+                  {isUpload ? 'Uploaded directly to CMS' : driveId ? 'Google Drive' : 'Unknown'}
+                </span>
+              </div>
+
+              {driveLink && (
+                <a href={driveLink} target="_blank" rel="noopener noreferrer"
+                   style={{
+                     alignSelf: 'flex-start',
+                     display: 'inline-flex', alignItems: 'center', gap: 8,
+                     padding: '8px 14px', borderRadius: 6,
+                     background: 'var(--ink-0)', color: 'var(--on-accent)',
+                     fontSize: 13, fontWeight: 500, textDecoration: 'none',
+                   }}>
+                  <Icon.drive size={14} />
+                  <span>Open in Google Drive</span>
+                </a>
+              )}
+            </div>
+          );
+        })()}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 12,
           padding: '12px 16px', borderTop: 'var(--border)',
@@ -826,7 +909,16 @@ const ContentLibrary = () => {
   const [pushPickerOpen, setPushPickerOpen] = React.useState(false);
   // Brand sidebar search + grid/list view toggle + pagination.
   const [brandQuery, setBrandQuery] = React.useState('');
-  const [view, setView] = React.useState('grid'); // 'grid' | 'list'
+  // v0.1.56: list view is now the default and the choice persists
+  // across sessions. List view shows the columns operators actually
+  // need (resolution, length, file size) more clearly than the grid.
+  const [view, setView] = React.useState(() => {
+    try { return localStorage.getItem('library.viewMode') || 'list'; } catch { return 'list'; }
+  });
+  const setViewMode = (m) => {
+    setView(m);
+    try { localStorage.setItem('library.viewMode', m); } catch {}
+  };
   const [page, setPage] = React.useState(0);
   // Mobile collapses the brand sidebar into a slide-down panel
   // toggled by a chip in the toolbar; this tracks the open/closed
@@ -1009,14 +1101,14 @@ const ContentLibrary = () => {
               variant={view === 'grid' ? 'secondary' : 'ghost'}
               size="sm"
               icon={<Icon.grid size={13} />}
-              onClick={() => setView('grid')}
+              onClick={() => setViewMode('grid')}
               title="Grid view"
             />
             <Button
               variant={view === 'list' ? 'secondary' : 'ghost'}
               size="sm"
               icon={<Icon.list size={13} />}
-              onClick={() => setView('list')}
+              onClick={() => setViewMode('list')}
               title="List view"
             />
           </div>
@@ -1045,7 +1137,8 @@ const ContentLibrary = () => {
               ))}
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, border: 'var(--border)', borderRadius: 8, overflow: 'hidden', background: 'var(--ink-10)' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', border: 'var(--border)', borderRadius: 8, overflow: 'hidden', background: 'var(--ink-10)' }}>
+              <VideoListHeader />
               {pagedVideos.map((v, i) => (
                 <VideoListRow
                   key={v.id} v={v} divider={i < pagedVideos.length - 1}

@@ -276,6 +276,14 @@ CUSTOM_STORES_JSON = Path(os.environ.get(
     "SCREENS_CUSTOM_STORES_PATH",
     _state_path_default("custom_stores.json"),
 ))
+# v0.1.56: city → brand splash mapping. The dict is mutated by the
+# Settings → Splashes UI; pre-v0.1.56 it lived only in memory, so any
+# Cloud Run redeploy silently reset it to defaults. Now persisted
+# alongside the rest of the state so the operator's choices survive.
+CITY_BRAND_JSON = Path(os.environ.get(
+    "SCREENS_CITY_BRAND_PATH",
+    _state_path_default("city_brand.json"),
+))
 
 # Cloud Run injects $PORT (defaults to 8080); on a laptop we keep 8765.
 PORT = int(os.environ.get("PORT", "8765"))
@@ -414,6 +422,11 @@ def _save_custom_stores() -> None:
     _atomic_write_json(CUSTOM_STORES_JSON, _custom_stores)
 
 
+def _save_city_brand() -> None:
+    """Persist _city_brand. Call inside _STATE_LOCK after any mutation."""
+    _atomic_write_json(CITY_BRAND_JSON, dict(_city_brand))
+
+
 def _load_state_from_disk() -> None:
     """One-shot loader, called once on module import. Best-effort —
     a missing or corrupt file just means we start with empty state,
@@ -425,6 +438,7 @@ def _load_state_from_disk() -> None:
             (SCREENS_JSON, "_screens"),
             (SYNC_GROUPS_JSON, "_sync_groups"),
             (CUSTOM_STORES_JSON, "_custom_stores"),
+            (CITY_BRAND_JSON, "_city_brand"),
         ]:
             if not path.is_file():
                 continue
@@ -439,6 +453,11 @@ def _load_state_from_disk() -> None:
                     _screens = raw
                 elif target_name == "_custom_stores":
                     _custom_stores = raw
+                elif target_name == "_city_brand":
+                    # v0.1.56: don't clobber the _city_brand global —
+                    # other code holds references to it. Merge in place.
+                    _city_brand.clear()
+                    _city_brand.update(raw)
                 else:
                     _sync_groups = raw
                 print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
@@ -2520,6 +2539,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     _city_brand.pop(city, None)
                 else:
                     _city_brand[city] = brand
+                # v0.1.56: persist to disk. Pre-v0.1.56 this dict lived
+                # only in memory, so every Cloud Run redeploy silently
+                # reset operator choices.
+                _save_city_brand()
                 # Bump revisions on every screen so they re-fetch and pick up
                 # the new splash without needing a poll-induced delay.
                 for s in _per_screen.values():
@@ -2884,6 +2907,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # Disabling kills all live sessions for that user.
             if status_val == "disabled":
                 db.delete_sessions_for_user(target_id)
+        # v0.1.56: on-tablet PIN for the staff overlay's unlock screen.
+        # Accepts empty string to clear. The tablet pulls this from
+        # /api/users on launch (v0.1.57); for now the hardcoded
+        # UserDirectory.kt is the offline fallback.
+        if "pin" in body:
+            pin_val = (body.get("pin") or "").strip()
+            if pin_val and not (pin_val.isdigit() and len(pin_val) == 4):
+                self._send_json({"error": "bad_pin", "detail": "PIN must be exactly 4 digits or empty"}, status=400); return
+            patch["pin"] = pin_val
         if not patch:
             self._send_json({"error": "nothing_to_update"}, status=400); return
         updated = db.update_user(target_id, patch)

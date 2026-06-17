@@ -341,6 +341,10 @@ def public_user(user: dict) -> dict:
         "status":       user["status"],
         "pictureUrl":   user.get("picture_url"),
         "lastLoginAt":  user.get("last_login_at"),
+        # v0.1.56: on-tablet PIN. Empty string = unset (no PIN
+        # authentication possible for this user). Editable from
+        # Settings → Users in the CMS.
+        "pin":          user.get("pin", ""),
         "permissions": sorted(
             p for p, roles in PERMISSIONS.items() if user["role"] in roles
         ),

@@ -75,6 +75,45 @@ const rollupStore = (screens) => {
   return { total, online, warn, offline };
 };
 
+// v0.1.56: row layout for the new default list view. Same data as
+// ScreenCard, presented as a dense table-style row so an operator
+// can scan 20+ screens without scrolling through a sparse grid.
+const ScreenRow = ({ s, selected, onToggle, onOpen }) => {
+  const statusLabel = { online: 'Online', offline: 'Offline', warn: 'Needs attention', updating: `Updating ${s.progress || 0}%` }[s.status] || s.status;
+  const handleClick = (e) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey) { onToggle && onToggle(); return; }
+    onOpen && onOpen();
+  };
+  return (
+    <button onClick={handleClick}
+      onContextMenu={(e) => { e.preventDefault(); onToggle && onToggle(); }}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 12, width: '100%',
+        padding: '12px 16px', textAlign: 'left', cursor: 'pointer',
+        background: selected ? 'var(--ink-9)' : 'transparent',
+        borderBottom: 'var(--border-faint)',
+        borderLeft: selected ? '2px solid var(--ink-1)' : '2px solid transparent',
+      }}>
+      <StatusDot status={s.status === 'warn' ? 'warn' : s.status === 'offline' ? 'offline' : s.status === 'updating' ? 'updating' : 'online'} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {s.name}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {s.playing ? `Playing · ${s.playing}` : statusLabel}
+          {s.status !== 'online' && s.status !== 'updating' && s.lastSeen ? ` · ${s.lastSeen}` : ''}
+        </div>
+      </div>
+      <div className="scr-mobile-hide" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--ink-4)' }}>
+        {s.orient === 'portrait' ? <Icon.device size={11} /> : <Icon.deviceLand size={11} />}
+        <span className="tnum">{s.tier}</span>
+      </div>
+      <span className="tnum" style={{ fontSize: 11, color: 'var(--ink-3)', width: 70, textAlign: 'right' }}>{s.brand || '—'}</span>
+      <Icon.chevR size={13} />
+    </button>
+  );
+};
+
 const ScreensStoreView = ({ storeId }) => {
   const baseStore = MOCK_STORES.find(s => s.id === storeId) || MOCK_STORES[0];
   const screens = useScreensInStore(baseStore.id);
@@ -84,6 +123,16 @@ const ScreensStoreView = ({ storeId }) => {
   const store = { ...baseStore, ...counts };
   const [selected, setSelected] = React.useState(new Set());
   const toggle = (id) => { const n = new Set(selected); n.has(id) ? n.delete(id) : n.add(id); setSelected(n); };
+  // v0.1.56: list view is now the default. Persist the choice across
+  // navigations so an operator who prefers the card grid doesn't get
+  // bounced back to list every visit.
+  const [viewMode, setViewMode] = React.useState(() => {
+    try { return localStorage.getItem('screens.viewMode') || 'list'; } catch { return 'list'; }
+  });
+  const setView = (m) => {
+    setViewMode(m);
+    try { localStorage.setItem('screens.viewMode', m); } catch {}
+  };
 
   return (
     <AppShell current="screens">
@@ -118,8 +167,21 @@ const ScreensStoreView = ({ storeId }) => {
           </div>
           <span style={{ flex: 1 }} className="scr-mobile-hide" />
           <Input placeholder="Search screens or content…" leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 160, maxWidth: 260 }} />
-          <Button variant="ghost" size="sm" icon={<Icon.grid size={13} />} />
-          <Button variant="ghost" size="sm" icon={<Icon.list size={13} />} />
+          {/* v0.1.56: view toggle is now functional + remembers the choice. */}
+          <Button
+            variant={viewMode === 'grid' ? 'secondary' : 'ghost'}
+            size="sm"
+            icon={<Icon.grid size={13} />}
+            onClick={() => setView('grid')}
+            title="Grid view"
+          />
+          <Button
+            variant={viewMode === 'list' ? 'secondary' : 'ghost'}
+            size="sm"
+            icon={<Icon.list size={13} />}
+            onClick={() => setView('list')}
+            title="List view"
+          />
         </div>
 
         {screens.length === 0 ? (
@@ -132,6 +194,18 @@ const ScreensStoreView = ({ storeId }) => {
                 <div style={{ fontSize: 12 }}>Install the player on a tablet, point it at this server, and pick {store.name} as the store during onboarding.</div>
               </>
             )}
+          </div>
+        ) : viewMode === 'list' ? (
+          <div style={{ border: 'var(--border)', borderRadius: 12, background: 'var(--ink-10)', overflow: 'hidden' }}>
+            {screens.map(s => (
+              <ScreenRow
+                key={s.id}
+                s={s}
+                selected={selected.has(s.id)}
+                onToggle={() => toggle(s.id)}
+                onOpen={() => navigate(`/screens/${store.id}/${s.id}`)}
+              />
+            ))}
           </div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
