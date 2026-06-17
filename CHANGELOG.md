@@ -18,6 +18,42 @@ Rules:
 
 ---
 
+## v0.1.52
+
+Auto-updates only run overnight.
+
+Pre-v0.1.52, the background updater polled every 6 hours regardless
+of clock. Two of those six ticks landed during business hours, so a
+new release could trigger an APK download + install prompt at e.g.
+14:30 in the middle of a shopper-facing playback loop. Annoying at
+best, customer-facing at worst.
+
+The background loop now gates each tick on the local clock — only
+checks for an update when the hour-of-day falls inside **22:00 –
+05:59** (the device's local time). Outside that window the loop just
+logs "Skipping auto-update — outside window" and goes back to sleep.
+
+**Manual triggers are unaffected.** All three explicit paths —
+
+- CMS Screen-detail "Update" command
+- Staff overlay → Device admin → Update
+- Tablet command palette `/update`
+
+— call `checkAndUpdate` directly and bypass the gate. If you want a
+screen updated right now, that still works any time of day.
+
+Polling cadence dropped from 6h to 2h so the loop catches more of
+the night window in case a tick falls just outside it.
+
+The window's hardcoded for now (`AUTO_UPDATE_START_HOUR=22`,
+`AUTO_UPDATE_END_HOUR=6` in [Updater.kt][1]); if a store needs a
+different schedule we can promote it to a server-pushed per-screen
+setting later.
+
+[1]: player/app/src/main/java/com/smartech/screens/update/Updater.kt
+
+---
+
 ## v0.1.51
 
 Resumable APK download in the in-app updater.

@@ -100,19 +100,61 @@ class Updater(
         val legacyUrl: String? = null,
     )
 
-    /** Launch + every 6h. Quiet — failures just log to LogBuffer and
-     *  leave [state] at Idle so the UI doesn't flash an error overlay
-     *  when the user isn't expecting one (e.g. network blip). */
-    fun start(intervalMs: Long = 6L * 60L * 60L * 1000L) {
+    /** Launch + periodic check on a tighter cadence than the original
+     *  6 h — we now gate each tick on the time-of-day window so most
+     *  ticks just immediately return. Quiet — failures only log to
+     *  LogBuffer; [state] stays at Idle so the UI doesn't flash an
+     *  error overlay when the user isn't expecting one.
+     *
+     *  v0.1.52: skip ticks that fall outside the evening window
+     *  ([AUTO_UPDATE_START_HOUR]..[AUTO_UPDATE_END_HOUR], local time).
+     *  Auto-pulling an APK at 14:30 used to interrupt mid-shift
+     *  playback for the install prompt; restricting to overnight
+     *  means screens swap version while the store is closed.
+     *  Manual triggers — CMS "update" command, staff overlay's
+     *  Update button, the tablet command palette — call
+     *  [checkAndUpdate] directly and aren't subject to this gate. */
+    fun start(intervalMs: Long = 2L * 60L * 60L * 1000L) {
         scope.launch {
             // Stagger the first check so we don't compete with the
             // playlist refresh on boot.
             delay(10_000L)
             while (true) {
-                runCatching { checkAndUpdate(surfaceFailures = false) }
-                    .onFailure { LogBuffer.w(TAG, "Background updater tick failed: ${it.message}") }
+                if (inAutoUpdateWindow()) {
+                    runCatching { checkAndUpdate(surfaceFailures = false) }
+                        .onFailure { LogBuffer.w(TAG, "Background updater tick failed: ${it.message}") }
+                } else {
+                    // Verbose enough that we can grep logs for "why
+                    // didn't this device update overnight?" but not
+                    // so chatty it spams the JSONL log.
+                    LogBuffer.i(
+                        TAG,
+                        "Skipping auto-update — outside ${AUTO_UPDATE_START_HOUR}:00–${AUTO_UPDATE_END_HOUR}:00 window",
+                    )
+                }
                 delay(intervalMs)
             }
+        }
+    }
+
+    /** True when the local clock falls inside the configured evening
+     *  window. Wraps midnight: with start=22, end=6 the window covers
+     *  22:00–23:59 + 00:00–05:59. Uses [Calendar] so it works on the
+     *  legacy minSdk-23 boxes (java.time needs API 26 / desugaring). */
+    private fun inAutoUpdateWindow(): Boolean {
+        val cal = java.util.Calendar.getInstance()
+        val hour = cal.get(java.util.Calendar.HOUR_OF_DAY)
+        val s = AUTO_UPDATE_START_HOUR
+        val e = AUTO_UPDATE_END_HOUR
+        return if (s == e) {
+            // start == end means "always" by convention — useful for
+            // disabling the gate via a future runtime override.
+            true
+        } else if (s < e) {
+            hour in s until e
+        } else {
+            // Wraps midnight (e.g. 22..6 means 22..23 OR 0..5).
+            hour >= s || hour < e
         }
     }
 
@@ -427,5 +469,13 @@ class Updater(
 
     companion object {
         private const val TAG = "Updater"
+
+        /** v0.1.52: hours-of-day (local) bracketing the auto-update
+         *  window. Inclusive of start, exclusive of end — so 22..6 means
+         *  the loop checks for updates between 22:00 and 05:59 local
+         *  time. Hardcoded for now; if a store ever needs a different
+         *  window we can lift it to a per-screen server-pushed setting. */
+        private const val AUTO_UPDATE_START_HOUR = 22
+        private const val AUTO_UPDATE_END_HOUR = 6
     }
 }
