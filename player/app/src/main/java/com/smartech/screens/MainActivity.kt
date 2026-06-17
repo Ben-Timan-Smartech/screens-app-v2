@@ -148,6 +148,17 @@ class MainActivity : ComponentActivity() {
             onKick = { repo.refreshPlaylist() },
             onRestart = { repo.scheduleSelfRestart() },
             isOnSplash = { controller.isOnSplash() },
+            // v0.1.49: feed the operator-readable label of the
+            // currently-playing item into every watchdog log line.
+            // ExoPlayer is single-threaded — currentMediaItem must
+            // be touched on Main — but the watchdog calls this from
+            // a Main-dispatched coroutine so we're safe here.
+            currentItemLabel = label@{
+                val id = controller.player.currentMediaItem?.mediaId ?: return@label null
+                if (controller.isOnSplash()) return@label "splash"
+                val match = repo.intendedPlaylist.value.firstOrNull { it.id == id }
+                if (match != null) "${match.title} ($id)" else id
+            },
         )
         watchdog.start()
 

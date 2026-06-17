@@ -60,6 +60,15 @@ class PlaybackWatchdog(
     private val onKick: suspend () -> Unit,
     private val onRestart: () -> Unit,
     private val isOnSplash: () -> Boolean = { false },
+    /**
+     * v0.1.49: caller-supplied label for the currently-playing item,
+     * woven into every watchdog log line so the operator can read
+     * the JSONL log file (or CMS Recent activity) and see which
+     * video is misbehaving. Expected to return a short human-readable
+     * string ("SONOS Era 300 (sonos-3)" / "splash" / null).
+     * Implementation should be cheap — called once per tick.
+     */
+    private val currentItemLabel: () -> String? = { null },
     private val pollIntervalMs: Long = DEFAULT_POLL_INTERVAL_MS,
 ) {
 
@@ -80,6 +89,15 @@ class PlaybackWatchdog(
      *  stall detection so we never act on a single sample. */
     private var lastPositionMs: Long = Long.MIN_VALUE
 
+    /**
+     * v0.1.49: per-item kick counter. Keyed by the mediaId of the
+     * currently-playing item. When the same video racks up multiple
+     * watchdog kicks across loops, it gets a distinct log line so
+     * the operator can spot "video X is the problem" vs "the whole
+     * system is struggling." Cleared on [Player.Listener.onMediaItemTransition].
+     */
+    private val perItemKicks = mutableMapOf<String, Int>()
+
     /** Hop the consecutive-stall counter doesn't trip on a real
      *  loop boundary (REPEAT_MODE_ALL resets position to 0 between
      *  items). Cleared on every [Player.Listener.onMediaItemTransition]. */
@@ -96,7 +114,8 @@ class PlaybackWatchdog(
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            LogBuffer.w(TAG, "ExoPlayer error: ${error.errorCodeName} — ${error.message}")
+            val label = currentItemLabel() ?: "(unknown item)"
+            LogBuffer.w(TAG, "ExoPlayer error on '$label': ${error.errorCodeName} — ${error.message}")
             pendingError = true
         }
     }
@@ -170,19 +189,21 @@ class PlaybackWatchdog(
                 val looksStalled = kotlin.math.abs(advanced) < POSITION_STALL_TOLERANCE_MS
                 if (looksStalled) {
                     stallTicks++
+                    val label = currentItemLabel() ?: "(unknown item)"
                     LogBuffer.w(
                         TAG,
-                        "Position stalled at ${snapshot.positionMs}ms (tick $stallTicks/$STALL_TICKS_BEFORE_KICK)",
+                        "Position stalled at ${snapshot.positionMs}ms on '$label' " +
+                            "(tick $stallTicks/$STALL_TICKS_BEFORE_KICK)",
                     )
                     when (stallTicks) {
                         STALL_TICKS_BEFORE_KICK -> {
-                            escalate(RecoveryLevel.KICK, "position stuck")
+                            escalate(RecoveryLevel.KICK, "position stuck on '$label'")
                         }
                         STALL_TICKS_BEFORE_REBUILD -> {
-                            escalate(RecoveryLevel.REBUILD, "position still stuck after kick")
+                            escalate(RecoveryLevel.REBUILD, "position still stuck on '$label' after kick")
                         }
                         STALL_TICKS_BEFORE_RESTART -> {
-                            escalate(RecoveryLevel.RESTART, "position still stuck after rebuild")
+                            escalate(RecoveryLevel.RESTART, "position still stuck on '$label' after rebuild")
                         }
                     }
                 } else {
@@ -205,6 +226,28 @@ class PlaybackWatchdog(
             LogBuffer.i(TAG, "On splash — downgrading $level to KICK ($reason)")
             RecoveryLevel.KICK
         } else level
+
+        // v0.1.49: per-item kick counter. If the same item triggers
+        // KICK multiple times in a row, log a distinctive "repeat
+        // offender" line so the operator can search the JSONL log
+        // for that and find the bad video quickly. We don't take
+        // automated action — a video that genuinely needs the
+        // intervention might be a stale CDN entry that fixes itself
+        // on the next refresh — but the log line is the breadcrumb
+        // they need.
+        val currentMediaId = withContext(Dispatchers.Main) { player.currentMediaItem?.mediaId }
+        if (effective == RecoveryLevel.KICK && currentMediaId != null) {
+            val count = (perItemKicks[currentMediaId] ?: 0) + 1
+            perItemKicks[currentMediaId] = count
+            if (count == REPEAT_OFFENDER_KICK_THRESHOLD) {
+                val label = currentItemLabel() ?: currentMediaId
+                LogBuffer.w(
+                    TAG,
+                    "Repeat-offender video: '$label' has triggered $count watchdog kicks. " +
+                        "Consider removing it from the playlist or re-encoding.",
+                )
+            }
+        }
 
         when (effective) {
             RecoveryLevel.KICK -> {
@@ -260,5 +303,11 @@ class PlaybackWatchdog(
 
         /** STATE_BUFFERING longer than 4 polls (~2 min) → cheap kick. */
         private const val BUFFERING_TICKS_BEFORE_KICK = 4
+
+        /** v0.1.49: when the same video triggers this many kicks across
+         *  loops, surface a distinct "repeat offender" log line. The
+         *  watchdog doesn't auto-remove anything — that's the operator's
+         *  call after they see the log. */
+        private const val REPEAT_OFFENDER_KICK_THRESHOLD = 3
     }
 }
