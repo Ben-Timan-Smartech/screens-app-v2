@@ -173,15 +173,18 @@ android {
 // release bytecode (~3–5 % across the dex graph) and speeds up hot
 // dispatch paths — noticeable on the slow legacy boxes, invisible on
 // modern. Debug builds keep the assertions for tooling friendliness.
+// v0.1.42: switched from the deprecated `kotlinOptions { freeCompilerArgs += ... }`
+// DSL to the new `compilerOptions.freeCompilerArgs.addAll(...)` API. The newer
+// Kotlin Gradle Plugin (2.0+) promoted the old call to a hard compile error
+// rather than just a deprecation warning, which broke the v0.1.39–v0.1.41
+// release builds in CI.
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     if (name.contains("Release", ignoreCase = true)) {
-        kotlinOptions {
-            freeCompilerArgs += listOf(
-                "-Xno-call-assertions",
-                "-Xno-receiver-assertions",
-                "-Xno-param-assertions",
-            )
-        }
+        compilerOptions.freeCompilerArgs.addAll(
+            "-Xno-call-assertions",
+            "-Xno-receiver-assertions",
+            "-Xno-param-assertions",
+        )
     }
 }
 
