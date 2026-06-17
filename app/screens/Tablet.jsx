@@ -41,10 +41,17 @@ const TabletRail = ({ stage, brand, staff = 'Floor staff', step }) => (
         {stage === 'done'  && 'Done \u2014 you can walk away'}
       </div>
       <div style={{ fontSize: 15, color: 'rgba(255,255,255,0.6)', lineHeight: 1.55, maxWidth: 280 }}>
-        {stage === 'pin'  && 'Your PIN is the last 4 of your staff ID. Session ends automatically when you\u2019re done.'}
-        {stage === 'brand' && 'Search or tap a brand. Only brands with videos assigned to this screen appear.'}
-        {stage === 'video' && 'Tap any video and it will start on the screen in front of you within a few seconds.'}
-        {stage === 'done'  && 'The new video is now playing. Tap anywhere to start over.'}
+        {/* v0.1.56: copy refreshed to match the live staff overlay.
+            Real flow on the tablet now: PIN \u2192 playlist view (existing
+            queue + mix splash + audio + poll mode + sync-group card)
+            \u2192 brand picker \u2192 video picker (tap to toggle, batch add)
+            \u2192 success \u2192 auto-return to playlist after 10s.
+            The CMS preview here still uses the legacy 4-step layout
+            but the copy now reflects what staff actually see. */}
+        {stage === 'pin'  && 'Tap your 4-digit PIN. Defaults shipping today: 9999 (admin), 1111 (Store Team). Session ends automatically when you walk away.'}
+        {stage === 'brand' && 'Search or tap a brand. Only brands with videos in the library appear. Tap Back at the bottom to return to the playlist.'}
+        {stage === 'video' && 'Tap any video to add it. You can pick several before tapping Add to push them all to this screen at once.'}
+        {stage === 'done'  && 'The new content is queued and started downloading. The success screen auto-returns to the playlist after 10 seconds.'}
       </div>
 
       {/* Step indicator */}

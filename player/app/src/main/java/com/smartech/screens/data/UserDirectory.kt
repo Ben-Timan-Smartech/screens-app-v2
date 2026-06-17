@@ -21,17 +21,27 @@ object UserDirectory {
         val pin: String,
     )
 
+    // v0.1.56: seed list reset to the real people who use the app.
+    // PINs come from auth.py / db.json on the server in v0.1.57+; this
+    // hardcoded list is the offline-fallback identity store the tablet
+    // uses when /api/users hasn't been pulled yet (or the server is
+    // unreachable).
+    //
+    //  - Ben Timan (owner)      PIN 9999
+    //  - Store Team (kiosk PIN) PIN 1111
+    //  - Chris                  no PIN yet — set from the CMS Users page
     private val seedUsers: List<User> = listOf(
-        User("u-owner",  "Owner",       Role.SUPER_ADMIN,   "9999"),
-        User("u-staff",  "Floor staff", Role.USER,          "1111"),
-        User("u-alex",   "Alex Mendez", Role.ADMIN,         "4218"),
-        User("u-jordan", "Jordan Park", Role.ADMIN,         "7741"),
-        User("u-mia",    "Mia Chen",    Role.BRAND_MANAGER, "6302"),
-        User("u-theo",   "Theo Reyes",  Role.VIEWER,        "3556"),
+        User("u-owner",      "Ben Timan",  Role.SUPER_ADMIN, "9999"),
+        User("u-store-team", "Store Team", Role.USER,        "1111"),
+        User("u-chris",      "Chris",      Role.ADMIN,       ""),
     )
 
-    /** Returns the user matching [pin], or null. */
-    fun authenticate(pin: String): User? = seedUsers.firstOrNull { it.pin == pin }
+    /** Returns the user matching [pin], or null. Empty PINs never
+     *  authenticate (so the "Chris" placeholder doesn't grant access
+     *  to anyone who types an empty string). */
+    fun authenticate(pin: String): User? =
+        if (pin.isEmpty()) null
+        else seedUsers.firstOrNull { it.pin.isNotEmpty() && it.pin == pin }
 
     fun roleLabel(role: Role): String = when (role) {
         Role.SUPER_ADMIN   -> "Super admin"

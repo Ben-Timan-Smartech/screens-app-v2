@@ -1201,7 +1201,12 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
       {can(user, 'screens.view') && (
         <SidebarItem icon={<Icon.sync />} label="Sync groups" current={current === 'sync-groups'} onClick={() => navigate('/sync-groups')} />
       )}
-      {can(user, 'schedules.view') && (
+      {/* v0.1.56: Schedules hidden. The page still exists at
+          /schedules for anyone who knows the URL, but it's not
+          surfaced in the sidebar until the scheduling feature
+          actually does something — currently the MOCK_SCHEDULES
+          list is always empty and the page is dead weight. */}
+      {false && can(user, 'schedules.view') && (
         <SidebarItem icon={<Icon.schedule />} label="Schedules" current={current === 'schedules'} count={scheduleCount || undefined} onClick={() => navigate('/schedules')} />
       )}
       {can(user, 'activity.view') && (

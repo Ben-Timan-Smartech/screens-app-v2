@@ -97,14 +97,14 @@ const MOCK_SCHEDULES = [];
 //   ADMIN        — swap content + manage screens, schedules
 //   SUPER_ADMIN  — full access incl. device logs and config
 // ─────────────────────────────────────────────────────────────
+// v0.1.56: trimmed to the real users; previous list was synthetic
+// placeholder data. The CMS Users page now reads these as the seed
+// fallback when /api/users is unreachable, and the tablet's
+// UserDirectory mirrors the same three IDs/PINs.
 const MOCK_USERS = [
-  { id: 'u-owner',  name: 'Owner',                  initials: 'OW', email: 'owner@smartech.group',   role: 'SUPER_ADMIN',   pin: '9999', scope: 'All brands',           status: 'active'  },
-  { id: 'u-staff',  name: 'Floor staff',            initials: 'FS', email: 'floor@smartech.group',   role: 'USER',          pin: '1111', scope: 'In-store swap only',   status: 'active'  },
-  { id: 'u-alex',   name: 'Alex Mendez',            initials: 'AM', email: 'alex@smartech.group',    role: 'ADMIN',         pin: '4218', scope: 'All brands',           status: 'active'  },
-  { id: 'u-jordan', name: 'Jordan Park',            initials: 'JP', email: 'jordan@smartech.group',  role: 'ADMIN',         pin: '7741', scope: 'All brands',           status: 'active'  },
-  { id: 'u-mia',    name: 'Mia Chen',               initials: 'MC', email: 'mia@smartech.group',     role: 'BRAND_MANAGER', pin: '6302', scope: 'SONOS · Bose · DVX',   status: 'active'  },
-  { id: 'u-theo',   name: 'Theo Reyes',             initials: 'TR', email: 'theo@smartech.group',    role: 'VIEWER',        pin: '3556', scope: 'Read-only',            status: 'active'  },
-  { id: 'u-inga',   name: 'inga.lopez@external.io', initials: 'IL', email: 'Pending invite',         role: 'BRAND_MANAGER', pin: null,   scope: 'SONOS',                status: 'pending' },
+  { id: 'u-owner',      name: 'Ben Timan',              initials: 'BT', email: 'ben@smartechworld.com', role: 'SUPER_ADMIN', pin: '9999', scope: 'All brands',         status: 'active'  },
+  { id: 'u-store-team', name: 'Store Team',             initials: 'ST', email: '—',                     role: 'USER',        pin: '1111', scope: 'In-store swap only', status: 'active'  },
+  { id: 'u-chris',      name: 'Chris',                  initials: 'CH', email: '—',                     role: 'ADMIN',       pin: '',     scope: 'All brands',         status: 'active'  },
 ];
 
 const ROLE_LABEL = {

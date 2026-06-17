@@ -18,6 +18,79 @@ Rules:
 
 ---
 
+## v0.1.56
+
+CMS cleanup batch.
+
+### Schedules hidden from the sidebar
+
+The Schedules entry was a dead link — the MOCK_SCHEDULES list never
+populated and the page just showed an empty state. Sidebar item is
+now gated behind `false &&` so it stays out of the nav until the
+feature actually does something. The page still exists at
+`/schedules` for anyone who knows the URL.
+
+### Screens — list view by default
+
+Inside a store, the screens grid is now a list view by default. The
+grid / list toggle buttons (previously decorative — no `onClick`)
+now actually toggle, and the choice persists to `localStorage`. The
+list shows status dot, name + currently-playing, device tier, and
+brand in a scannable dense layout.
+
+### Content Library — list view by default, real columns
+
+Same story for the library. List view is now the default and the
+toggle persists. List rows use a proper column grid with a header
+strip (Title · Resolution · Length · Size). Click a row to open the
+detail panel.
+
+### Video preview → detail panel + Drive link
+
+The `<video>` element in the preview modal kept hitting the Drive
+proxy on slow links and rendered black more often than not. Replaced
+with a metadata sheet showing filename, resolution, length, file
+size, source (Drive / direct upload). Drive-sourced videos get an
+**Open in Google Drive** button that links directly to
+`drive.google.com/file/d/<id>/view` so the operator can view the
+file natively.
+
+The hover-`<video preload=metadata>` thumbnail in the grid view is
+also gone — replaced with the generated brand thumbnail. No more
+N video elements all racing the Drive proxy when you open the page.
+
+### Splashes — saves persist across deploys
+
+The `_city_brand` dict (which controls which brand splash plays in
+which city) was mutated in memory but never written to disk. Every
+Cloud Run redeploy silently reset operator choices back to the
+DEFAULT_CITY_BRAND constants. Now persisted to
+`/data/city_brand.json` next to the other state files and re-loaded
+on boot.
+
+### Users — inline PIN editing + real seed users
+
+- `auth.public_user` includes `pin` in the public payload so the
+  CMS Users page can read it.
+- `PATCH /api/users/<id>` accepts a `pin` field (4 digits or empty
+  to clear).
+- Users page renders a new **PIN** column. Click the masked
+  `••••` to reveal + edit; commits on blur or Enter.
+- Tablet's hardcoded `UserDirectory` seed trimmed to the real
+  three accounts: Ben Timan (9999, super admin), Store Team (1111,
+  in-store user), Chris (no PIN yet, admin). The tablet still uses
+  the hardcoded list as its offline fallback; a follow-up will wire
+  it to fetch from `/api/users` on launch.
+
+### On-tablet preview — light copy refresh
+
+Rail subtitles updated to reflect the current real tablet UI —
+mentions the 4-digit PIN defaults, the multi-select picker
+("Tap several before Add"), and the 10-second auto-return after
+success. The 4-stage preview layout itself wasn't restructured.
+
+---
+
 ## v0.1.55
 
 Hotfix — Drive sync was crashing with a 403.
