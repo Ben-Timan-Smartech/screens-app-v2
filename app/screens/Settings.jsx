@@ -761,6 +761,11 @@ const BrandApiKeyRow = () => {
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState('');
   const [saving, setSaving] = React.useState(false);
+  // v0.1.59: connection-test result. null = not run; otherwise the
+  // payload from POST /api/integrations/brandApiKey/test, plus a
+  // local `at` timestamp so the operator can see how stale it is.
+  const [testResult, setTestResult] = React.useState(null);
+  const [testing, setTesting] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -784,6 +789,10 @@ const BrandApiKeyRow = () => {
   const startEdit = () => {
     setDraft(data?.value || '');
     setEditing(true);
+    // Any prior test result is about the old value — drop it so we
+    // don't leave a stale "Connected" pill hanging next to a new key
+    // the operator hasn't tested yet.
+    setTestResult(null);
   };
   const cancelEdit = () => {
     setEditing(false);
@@ -806,6 +815,8 @@ const BrandApiKeyRow = () => {
       setData({ value: j.value || '', updatedAt: j.updatedAt, updatedBy: j.updatedBy });
       setEditing(false);
       setDraft('');
+      // Result is stale after a save — the operator should re-test.
+      setTestResult(null);
       showToast(j.value ? 'Brand API key saved' : 'Brand API key cleared', 'ok');
     } catch (e) {
       showToast(`Save failed: ${e.message}`, 'err');
@@ -823,7 +834,54 @@ const BrandApiKeyRow = () => {
     }
   };
 
+  // v0.1.59: connection test. The server calls the tm:rw index /me
+  // endpoint with the stored key so the value never reaches the
+  // browser. We abort the request after 12 s in case the upstream
+  // hangs — the server-side urlopen also has its own 8 s timeout.
+  const runTest = async () => {
+    if (testing) return;
+    setTesting(true);
+    setTestResult(null);
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 12000);
+    try {
+      const r = await fetch('/api/integrations/brandApiKey/test', {
+        method: 'POST',
+        signal: ctl.signal,
+      });
+      const j = await r.json().catch(() => ({}));
+      setTestResult({ ...j, at: Date.now() });
+    } catch (e) {
+      setTestResult({
+        ok: false,
+        status: e.name === 'AbortError' ? 'unreachable' : 'unreachable',
+        detail: e.name === 'AbortError' ? 'Timed out after 12 s' : (e.message || 'Network error'),
+        at: Date.now(),
+      });
+    } finally {
+      clearTimeout(timer);
+      setTesting(false);
+    }
+  };
+
   const present = !!data?.value;
+
+  // Map server status → display tone + label.
+  const testTone = (() => {
+    if (!testResult) return null;
+    if (testResult.ok) return 'ok';
+    if (testResult.status === 'no_key') return 'warn';
+    return 'err';
+  })();
+  const testLabel = (() => {
+    if (!testResult) return null;
+    if (testResult.ok) return `Connected${testResult.latencyMs != null ? ` · ${testResult.latencyMs} ms` : ''}`;
+    if (testResult.status === 'unauthorized') return 'Key rejected';
+    if (testResult.status === 'unreachable')  return 'Unreachable';
+    if (testResult.status === 'server_error') return 'Server error';
+    if (testResult.status === 'no_key')       return 'No key set';
+    return 'Failed';
+  })();
 
   return (
     <div style={{ padding: '16px 20px', borderBottom: 'var(--border-faint)' }}>
@@ -882,9 +940,45 @@ const BrandApiKeyRow = () => {
           {present && (
             <Button variant="ghost" size="sm" onClick={copy}>Copy</Button>
           )}
+          {present && (
+            <Button
+              variant="ghost" size="sm"
+              disabled={testing}
+              onClick={runTest}
+              title="Verify the saved key against tm:rw index API">
+              {testing ? 'Testing…' : 'Test connection'}
+            </Button>
+          )}
           <Button variant="secondary" size="sm" onClick={startEdit}>
             {present ? 'Edit' : 'Set key'}
           </Button>
+        </div>
+      )}
+
+      {/* v0.1.59: test-connection result. Renders below the row when
+          present so the status sticks around until the operator
+          re-tests or edits the key. */}
+      {testResult && !editing && (
+        <div style={{
+          marginTop: 10, padding: '8px 12px',
+          background: testTone === 'ok' ? 'var(--ok-bg)'
+                    : testTone === 'warn' ? 'var(--warn-bg)'
+                    : 'var(--err-bg)',
+          color: testTone === 'ok' ? 'var(--ok)'
+               : testTone === 'warn' ? 'var(--warn)'
+               : 'var(--err)',
+          borderRadius: 6, fontSize: 12,
+          display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+        }}>
+          <span style={{ fontWeight: 500 }}>● {testLabel}</span>
+          {testResult.detail && (
+            <span style={{ opacity: 0.85 }}>· {testResult.detail}</span>
+          )}
+          {testResult.identity && Object.keys(testResult.identity).length > 0 && (
+            <span className="tnum" style={{ opacity: 0.85, fontFamily: 'var(--font-mono)' }}>
+              · {Object.entries(testResult.identity).map(([k, v]) => `${k}=${v}`).join(', ')}
+            </span>
+          )}
         </div>
       )}
 
