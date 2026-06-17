@@ -18,6 +18,55 @@ Rules:
 
 ---
 
+## v0.1.49
+
+### Multi-select Add content on the tablet
+
+Brand → Video flow was one-tap-per-video before: pick a video → wait
+on the Success screen → Back → pick another. With four or five
+videos to add at the start of a shift, that's a slow ritual.
+
+The video picker is now tap-to-toggle. Selected cards get a green
+border + ✓ badge; the left-rail subtitle counts what's selected; a
+prominent **Add N videos** pill at the bottom commits the whole batch
+in one append. Single-add still works — pick one card, tap Add.
+
+`StaffOverlay` pushes the full batch via the existing
+`pushPlaylistToServer(..., mode="append")` call site, which already
+got the v0.1.48 optimistic-insert treatment — so all picks appear in
+the playlist within one frame, downloads start immediately, and the
+Success screen reads "Added 3 videos" + the first title with "and 2
+more" suffix.
+
+### Playback watchdog names the offending video
+
+When the watchdog tripped before, log lines just said
+`Position stalled at 12345ms (tick 1/2)`. With a 30-video loop that
+gave you no idea *which* video was causing the kick — you'd have to
+correlate timestamps against /api/state's `playback.itemId` field.
+
+`PlaybackWatchdog` now takes a `currentItemLabel` provider. Every
+stall log, every escalation reason, and the ExoPlayer error listener
+now read e.g.:
+
+```
+Position stalled at 12450ms on 'SONOS Era 300 (sonos-3)' (tick 2/2)
+Watchdog KICK — position stuck on 'SONOS Era 300 (sonos-3)'
+ExoPlayer error on 'SONOS Era 300 (sonos-3)': SOURCE_IO — Connection reset
+```
+
+Plus a per-item kick counter: when the same `mediaId` racks up 3
+watchdog kicks across loops, the watchdog logs a distinctive
+**Repeat-offender video** line so the operator can grep the JSONL
+log (or skim Recent activity in the CMS) and find the bad clip in
+seconds.
+
+No automated removal — a "repeatedly stalling" clip might just be a
+flaky CDN edge that fixes itself — but you now have the breadcrumb
+you need to spot it.
+
+---
+
 ## v0.1.48
 
 Three small but visible staff-flow fixes.

@@ -39,7 +39,16 @@ private sealed class Stage {
     data class Home(val user: UserDirectory.User) : Stage()
     data class Brands(val user: UserDirectory.User) : Stage()
     data class Videos(val user: UserDirectory.User, val brand: String) : Stage()
-    data class Success(val user: UserDirectory.User, val video: VideoItem) : Stage()
+    /** v0.1.49: `count` carries how many videos were added in the
+     *  batch so the success screen can show "Added N videos" instead
+     *  of misrepresenting a multi-pick as a single add. `video` is
+     *  the first item in the batch — kept for the back-arrow target
+     *  + headline copy. */
+    data class Success(
+        val user: UserDirectory.User,
+        val video: VideoItem,
+        val count: Int = 1,
+    ) : Stage()
     data class Admin(val user: UserDirectory.User) : Stage()
     data class Diagnostics(val user: UserDirectory.User) : Stage()
 }
@@ -201,25 +210,31 @@ fun StaffOverlay(
                     videos = videos,
                     onBack = { stage = Stage.Brands(s.user) },
                     onPick = { picked ->
+                        // v0.1.49: `picked` is now a list. Push the
+                        // whole batch in one append; the optimistic
+                        // local update in pushPlaylistToServer adds
+                        // all rows to intendedPlaylist atomically.
+                        if (picked.isEmpty()) return@VideoPickerScreen
                         com.smartech.screens.util.LogBuffer.i(
                             "StaffOverlay",
-                            "Pick → append ${picked.title}",
+                            "Pick → append ${picked.size} video(s): " +
+                                picked.joinToString(", ") { it.title },
                         )
-                        onPickVideo(picked)
-                        // Fire the network call BEFORE the stage change so
-                        // it's queued onto the scope immediately. The scope
-                        // outlives stage changes anyway, but ordering helps
-                        // when debugging logs.
+                        // The host activity's "advance now-playing"
+                        // hook still takes a single video — use the
+                        // first of the batch.
+                        onPickVideo(picked.first())
                         scope.launch {
-                            repository.pushPlaylistToServer(listOf(picked), mode = "append")
+                            repository.pushPlaylistToServer(picked, mode = "append")
                         }
-                        stage = Stage.Success(s.user, picked)
+                        stage = Stage.Success(s.user, picked.first(), picked.size)
                     },
                     onCancel = { visible = false },
                 )
             }
             is Stage.Success -> SuccessScreen(
                 video = s.video,
+                count = s.count,
                 onBack = { stage = Stage.Videos(s.user, s.video.brand ?: "") },
                 onDone = { stage = Stage.Playlist(s.user) },
             )

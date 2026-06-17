@@ -369,19 +369,38 @@ private fun BrandCard(brand: String, onClick: () -> Unit) {
 // ─────────────────────────────────────────────────────────────
 // Video picker
 // ─────────────────────────────────────────────────────────────
+//
+// v0.1.49: tap-to-toggle selection, batch commit on Add. Staff can
+// queue up several videos in one PIN session instead of going through
+// pick → success → back → pick → success → back for each. The
+// `onPick` callback now receives the full set of selected videos in
+// one call; the caller pushes them as a single append.
 @Composable
 fun VideoPickerScreen(
     brand: String,
     videos: List<VideoItem>,
     onBack: () -> Unit,
-    onPick: (VideoItem) -> Unit,
+    onPick: (List<VideoItem>) -> Unit,
     onCancel: () -> Unit,
 ) {
     var query by remember { mutableStateOf(TextFieldValue("")) }
+    // Track selected ids (not the full VideoItem) so the set is
+    // stable across re-filter / re-fetch — same video keeps its tick
+    // even if the underlying list reshuffles.
+    var selectedIds by remember { mutableStateOf(setOf<String>()) }
     val filtered = videos.filter { it.title.contains(query.text, ignoreCase = true) }
+    val selectedCount = selectedIds.size
+    val canCommit = selectedCount > 0
 
     Layout(
-        left = { Rail("$brand videos", "Tap any video and it starts on the screen in front of you.", 2) },
+        left = { Rail(
+            "$brand videos",
+            if (selectedCount == 0)
+                "Tap videos to add them to the playlist. Pick as many as you want, then press Add."
+            else
+                "$selectedCount selected. Tap Add to push them all to the playlist, or tap more to keep building.",
+            2,
+        ) },
         right = {
             Column(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 56.dp)) {
                 SearchBar(query, onQueryChange = { query = it }, placeholder = "Search $brand videos")
@@ -391,13 +410,49 @@ fun VideoPickerScreen(
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
-                    items(filtered) { v -> VideoCard(v) { onPick(v) } }
+                    items(filtered) { v ->
+                        VideoCard(
+                            video = v,
+                            selected = v.id in selectedIds,
+                            onClick = {
+                                selectedIds = if (v.id in selectedIds) selectedIds - v.id
+                                              else selectedIds + v.id
+                            },
+                        )
+                    }
                 }
                 Spacer(Modifier.weight(1f))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     NavPill("← Back", onBack)
                     Spacer(Modifier.weight(1f))
+                    // Count badge so the staff member can see what
+                    // they've queued without scrolling back through
+                    // the grid. Hidden when none selected.
+                    if (selectedCount > 0) {
+                        Text(
+                            "$selectedCount selected",
+                            color = Muted,
+                            fontSize = 14.sp,
+                            modifier = Modifier.padding(end = 16.dp),
+                        )
+                    }
                     NavPill("Cancel", onCancel)
+                    Spacer(Modifier.width(12.dp))
+                    NavPill(
+                        label = if (selectedCount <= 1) "Add video" else "Add $selectedCount videos",
+                        onClick = {
+                            if (!canCommit) return@NavPill
+                            // Preserve the order the staff picked
+                            // them in (selectedIds is a LinkedHashSet
+                            // by construction since Kotlin's `+` on a
+                            // Set keeps insertion order).
+                            val picked = selectedIds.mapNotNull { id ->
+                                videos.firstOrNull { it.id == id }
+                            }
+                            if (picked.isNotEmpty()) onPick(picked)
+                        },
+                        primary = canCommit,
+                    )
                 }
             }
         },
@@ -405,12 +460,17 @@ fun VideoPickerScreen(
 }
 
 @Composable
-private fun VideoCard(video: VideoItem, onClick: () -> Unit) {
+private fun VideoCard(video: VideoItem, selected: Boolean, onClick: () -> Unit) {
+    // Selected = green-tinted border + check overlay so it reads on a
+    // TV across the room. Unselected stays subtle so the grid still
+    // scans cleanly when nothing's been picked yet.
+    val borderColor = if (selected) Ok else BoneLine
+    val borderWidth = if (selected) 3.dp else 1.dp
     Column(
         Modifier
             .clip(RoundedCornerShape(14.dp))
             .background(Bone)
-            .border(1.dp, BoneLine, RoundedCornerShape(14.dp))
+            .border(borderWidth, borderColor, RoundedCornerShape(14.dp))
             .clickable { onClick() }
             .fillMaxWidth()
     ) {
@@ -428,6 +488,20 @@ private fun VideoCard(video: VideoItem, onClick: () -> Unit) {
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.padding(16.dp),
             )
+            if (selected) {
+                // Selection checkmark in the top-right corner.
+                Box(
+                    Modifier
+                        .padding(12.dp)
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Ok)
+                        .align(Alignment.TopEnd),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("✓", color = Bone, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                }
+            }
         }
         Column(Modifier.padding(16.dp)) {
             Text(video.title, fontSize = 16.sp, fontWeight = FontWeight.Medium, color = Ink)
@@ -447,9 +521,16 @@ private fun VideoCard(video: VideoItem, onClick: () -> Unit) {
 @Composable
 fun SuccessScreen(
     video: VideoItem,
+    count: Int = 1,
     onBack: () -> Unit = {},
     onDone: () -> Unit = {},
 ) {
+    val headline = if (count <= 1) "Added to playlist" else "Added $count videos"
+    val sub = when {
+        count <= 1 -> video.title
+        count == 2 -> "${video.title} and 1 more"
+        else       -> "${video.title} and ${count - 1} more"
+    }
     Layout(
         left = { Rail("Added", "Returning to the playlist in 10s. Tap Back to pick another.", 3) },
         right = {
@@ -468,9 +549,9 @@ fun SuccessScreen(
                     Text("✓", color = Ok, fontSize = 40.sp, fontWeight = FontWeight.Medium)
                 }
                 Spacer(Modifier.height(32.dp))
-                Text("Added to playlist", fontSize = 30.sp, fontWeight = FontWeight.Medium, color = Ink)
+                Text(headline, fontSize = 30.sp, fontWeight = FontWeight.Medium, color = Ink)
                 Spacer(Modifier.height(8.dp))
-                Text(video.title, fontSize = 18.sp, color = Muted, textAlign = TextAlign.Center)
+                Text(sub, fontSize = 18.sp, color = Muted, textAlign = TextAlign.Center)
 
                 Spacer(Modifier.height(40.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
