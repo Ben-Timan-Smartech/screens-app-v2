@@ -53,6 +53,33 @@ private val Muted = Color(0xFF6E6B62)
 private val Amber = Color(0xFFE8A33D)
 private val Ok = Color(0xFF3D8C4B)
 
+// v0.1.48: shared pill button used for Back / Cancel on the brand and
+// video pickers. The previous "Muted text + padding" treatment was
+// invisible on a TV across the room — staff couldn't see how to exit
+// the Add-content flow without using the remote's Back key.
+@Composable
+private fun NavPill(
+    label: String,
+    onClick: () -> Unit,
+    primary: Boolean = false,
+) {
+    val bg = if (primary) Ink else BoneSoft
+    val fg = if (primary) Bone else Ink
+    val border = if (primary) Ink else BoneLine
+    Box(
+        Modifier
+            .height(48.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(bg)
+            .border(1.dp, border, RoundedCornerShape(6.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 22.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = fg, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Shared left rail (dark, contextual copy)
 // ─────────────────────────────────────────────────────────────
@@ -305,22 +332,10 @@ fun BrandPickerScreen(
                     }
                 }
                 Spacer(Modifier.weight(1f))
-                Row {
-                    Text(
-                        "Back",
-                        color = Muted,
-                        modifier = Modifier
-                            .clickable { onBack() }
-                            .padding(12.dp),
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    NavPill("← Back", onBack)
                     Spacer(Modifier.weight(1f))
-                    Text(
-                        "Cancel",
-                        color = Muted,
-                        modifier = Modifier
-                            .clickable { onCancel() }
-                            .padding(12.dp),
-                    )
+                    NavPill("Cancel", onCancel)
                 }
             }
         },
@@ -379,18 +394,10 @@ fun VideoPickerScreen(
                     items(filtered) { v -> VideoCard(v) { onPick(v) } }
                 }
                 Spacer(Modifier.weight(1f))
-                Row {
-                    Text(
-                        "Back",
-                        color = Muted,
-                        modifier = Modifier.clickable { onBack() }.padding(12.dp),
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    NavPill("← Back", onBack)
                     Spacer(Modifier.weight(1f))
-                    Text(
-                        "Cancel",
-                        color = Muted,
-                        modifier = Modifier.clickable { onCancel() }.padding(12.dp),
-                    )
+                    NavPill("Cancel", onCancel)
                 }
             }
         },
