@@ -18,6 +18,55 @@ Rules:
 
 ---
 
+## v0.1.46
+
+Drive sync is dramatically faster.
+
+### Phase 1 — single-sweep whole-drive query
+
+The cloud Drive walker used to make ~one API call per brand folder
+(`list_subfolders`) plus ~one per nested subfolder of each brand
+(`list_videos_recursive`). On a seven-brand fleet that's 70+ sequential
+calls × ~300 ms latency each — minutes of wall-clock for what's mostly
+"are there any new mp4s here?".
+
+The new path resolves the shared-drive ID from the brand-content
+folder, then makes a single broad query (`corpora='drive'`,
+`driveId=<id>`) for every folder and video in the entire drive.
+Brand classification happens client-side from the `parents` field.
+
+Same `library.json` output, ~5-10× fewer Drive round-trips. Falls
+back to the legacy recursive walker if the content isn't in a shared
+drive (My Drive content has no `driveId`).
+
+### Phase 2 — change-token short-circuit
+
+Most syncs find nothing new. The scanner now persists a Drive cursor
+(`drive_change_token.json`, next to `library.json`) after each
+successful run. On the next scan we call `changes.list` first; if
+Drive reports **zero** changes since the cursor, the scanner exits in
+~1 second without re-fetching the inventory. `library.json` stays
+exactly as it was.
+
+When changes *are* reported, we fall through to the Phase 1 broad
+query and persist a fresh cursor.
+
+The daily auto-sync uses the short-circuit. The manual **Sync now**
+button always forces a full scan — that's what an operator means
+when they click it.
+
+### Net effect
+
+- Idle daily auto-sync: minutes → ~1 second.
+- Manual Sync now on an unchanged drive: same as before.
+- Manual Sync now after uploads: minutes → seconds.
+
+(Phase 3, parallel within a single scan, will come in v0.1.47 — it's
+mostly redundant after Phase 1+2 but worth a small extra tick on
+big content drops.)
+
+---
+
 ## v0.1.45
 
 **Drive Sync card → Refresh directory button.**

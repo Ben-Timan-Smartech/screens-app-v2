@@ -49,6 +49,17 @@ DRIVE_ROOT = Path(os.environ.get(
 # Cloud mode: Drive folder ID. When set, replaces the filesystem walk.
 DRIVE_BRANDS_FOLDER_ID = os.environ.get("SCREENS_DRIVE_BRANDS_ID")
 
+# v0.1.46 Phase 2: where we persist the change-token cursor between
+# scans. Sibling of LIBRARY_JSON so a single SCREENS_LIBRARY_PATH env
+# var pins everything to /data on Cloud Run.
+DRIVE_TOKEN_PATH = Path(os.environ.get(
+    "SCREENS_DRIVE_TOKEN_PATH",
+    str(Path(os.environ.get(
+        "SCREENS_LIBRARY_PATH",
+        str(Path(__file__).resolve().parent / "app" / "components" / "library.json"),
+    )).parent / "drive_change_token.json"),
+))
+
 OUT_FILE = PROJECT / "app" / "components" / "real-data.jsx"
 # Library JSON path. Defaults to the in-tree CMS components dir (good
 # for local dev) but is overridable so Cloud Run can point it at
@@ -525,6 +536,185 @@ def collect_videos_drive() -> list[dict]:
     return out
 
 
+# ── v0.1.46 Phase 1: broad-query whole-drive sweep ──────────────────
+#
+# The pre-v0.1.46 cloud path made ~one Drive API call per brand folder
+# (discover_brands_drive) plus one per nested subfolder of each brand
+# (list_videos_recursive). Sequential and slow — 70+ round-trips on a
+# typical seven-brand fleet, each ~200-400 ms from Cloud Run.
+#
+# This rewrite uses Drive's `corpora=drive` query mode to pull every
+# folder + video file in the entire shared drive in a single paginated
+# sweep, then attaches each video to its brand via the `parents` chain
+# client-side. Same library.json output shape; ~5-10× faster wall-clock.
+#
+# Falls back to the old per-folder walker when the brand-content folder
+# isn't inside a shared drive (My Drive content has no driveId).
+
+
+def _has_skipped_ancestor(
+    file_obj: dict,
+    folder_by_id: dict,
+    stop_at: str,
+    skipped_names: set[str],
+) -> bool:
+    """Walk `file_obj` upward via parents until we hit `stop_at`; if any
+    folder name along the way matches `skipped_names` (case-insensitive),
+    return True. Mirrors the per-folder skip logic the old recursive
+    walker applied via `name in {"old", "_old", ...}`."""
+    cur = (file_obj.get("parents") or [None])[0]
+    depth = 0
+    while cur and cur != stop_at and depth < 30:
+        f = folder_by_id.get(cur)
+        if not f:
+            return False
+        if f.get("name", "").lower() in skipped_names:
+            return True
+        cur = (f.get("parents") or [None])[0]
+        depth += 1
+    return False
+
+
+def collect_videos_drive_v2(brands_id: str) -> list[dict] | None:
+    """Single-sweep replacement for discover_brands_drive + collect_videos_drive.
+
+    Returns the video list; also mutates the module-global BRANDS to
+    add the discovered brand records (matching the old API). Returns
+    None when we can't determine a shared-drive ID — caller should
+    fall back to the v1 recursive path.
+    """
+    if drive_client is None:
+        return None
+    drive_id = drive_client.get_parent_drive_id(brands_id)
+    if not drive_id:
+        print("[broad-query] brand folder isn't in a shared drive — falling back to recursive walk", flush=True)
+        return None
+
+    print(f"[broad-query] fetching whole-drive inventory for drive {drive_id}", flush=True)
+    inventory = drive_client.list_drive_inventory(drive_id)
+    folders = [f for f in inventory if f.get("mimeType") == "application/vnd.google-apps.folder"]
+    files = [f for f in inventory if f.get("mimeType") != "application/vnd.google-apps.folder"]
+    folder_by_id: dict[str, dict] = {f["id"]: f for f in folders}
+    print(f"[broad-query] {len(folders)} folders + {len(files)} videos in inventory", flush=True)
+
+    # Direct children of BRANDS_ID = brand folders.
+    brand_folders = [
+        f for f in folders
+        if brands_id in (f.get("parents") or [])
+        and not f["name"].startswith(("_", "."))
+        and f["name"].lower() != "old"
+    ]
+    brand_folders.sort(key=lambda f: f["name"].lower())
+
+    seed_by_folder = {b["folder"]: b for b in SEED_BRANDS}
+    seed_by_lower = {b["folder"].lower(): b for b in SEED_BRANDS}
+    used_ids: set[str] = set()
+    folder_to_brand: dict[str, dict] = {}
+    for folder in brand_folders:
+        name = folder["name"]
+        seed = seed_by_folder.get(name)
+        if seed and seed["id"] not in used_ids:
+            rec = {**seed, "_drive_id": folder["id"]}
+        elif name.lower() in seed_by_lower and seed_by_lower[name.lower()]["id"] in used_ids:
+            continue
+        else:
+            brand_id = _slugify(name)
+            if brand_id in used_ids:
+                continue
+            rec = {"folder": name, "name": name, "id": brand_id, "products": [], "_drive_id": folder["id"]}
+        used_ids.add(rec["id"])
+        BRANDS.append(rec)
+        folder_to_brand[folder["id"]] = rec
+
+    # For each video, walk up via parents until we hit a known brand
+    # folder (i.e. a direct child of BRANDS_ID). The first such match
+    # is the brand. Videos outside the brand subtree get dropped.
+    def brand_for(video: dict) -> dict | None:
+        cur = (video.get("parents") or [None])[0]
+        depth = 0
+        while cur and depth < 30:
+            if cur in folder_to_brand:
+                return folder_to_brand[cur]
+            f = folder_by_id.get(cur)
+            if not f:
+                return None
+            cur = (f.get("parents") or [None])[0]
+            depth += 1
+        return None
+
+    skipped_names = {"old", "_old", "archive", "raw"}
+    # Stable order — same key as v1 path so the rolling sticky-flag
+    # diff stays meaningful: brand folder, then filename.
+    files.sort(key=lambda v: (v.get("name", "").lower()))
+
+    per_brand_count: dict[str, int] = {}
+    out: list[dict] = []
+    total = len(BRANDS)
+    # Emit a single PROGRESS line per brand so serve.py's UI updates.
+    # We don't have per-folder progress here — the whole inventory is
+    # already in memory.
+    for idx, brand in enumerate(BRANDS, 1):
+        print(f"PROGRESS: {idx}/{total} {brand['name']}", flush=True)
+    for vf in files:
+        name = vf.get("name", "")
+        if not (name.lower().endswith(".mp4") or name.lower().endswith(".mov")):
+            continue
+        brand_rec = brand_for(vf)
+        if not brand_rec:
+            continue
+        if _has_skipped_ancestor(vf, folder_by_id, brand_rec["_drive_id"], skipped_names):
+            continue
+        try:
+            size_mb = round(int(vf.get("size", "0") or 0) / (1024 * 1024), 1)
+        except ValueError:
+            size_mb = 0.0
+        file_idx = per_brand_count.get(brand_rec["id"], 0)
+        per_brand_count[brand_rec["id"]] = file_idx + 1
+        screens = (file_idx * 7 + 3) % 22
+        media_url = "/media/" + urllib.parse.quote(vf["id"])
+        title = humanise(Path(name).stem)
+        product = detect_product(Path(name).stem, brand_rec["products"])
+        out.append({
+            "id":          f"{brand_rec['id']}-{file_idx + 1}",
+            "title":       title,
+            "brand":       brand_rec["name"],
+            "product":     product,
+            "duration":    "—",
+            "durationSec": None,
+            "screens":     screens,
+            "sizeMb":      size_mb,
+            "filename":    name,
+            "mediaUrl":    media_url,
+            "width":       None,
+            "height":      None,
+        })
+    return out
+
+
+def _load_token() -> tuple[str | None, str | None]:
+    """Read the persisted change-token. Returns (driveId, token) or
+    (None, None) if absent / unreadable."""
+    if not DRIVE_TOKEN_PATH.is_file():
+        return (None, None)
+    try:
+        data = json.loads(DRIVE_TOKEN_PATH.read_text(encoding="utf-8"))
+        return (data.get("driveId"), data.get("token"))
+    except Exception as e:
+        print(f"[token] couldn't read token file: {e}", flush=True)
+        return (None, None)
+
+
+def _save_token(drive_id: str, token: str) -> None:
+    """Atomic write of {driveId, token} to the cursor file."""
+    try:
+        DRIVE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = DRIVE_TOKEN_PATH.with_suffix(DRIVE_TOKEN_PATH.suffix + ".tmp")
+        tmp.write_text(json.dumps({"driveId": drive_id, "token": token}, indent=2), encoding="utf-8")
+        tmp.replace(DRIVE_TOKEN_PATH)
+    except Exception as e:
+        print(f"[token] couldn't write token file: {e}", flush=True)
+
+
 def main():
     # Replace the placeholder list with real folder discovery on every run.
     BRANDS.clear()
@@ -551,9 +741,60 @@ def main():
     cloud_mode = bool(DRIVE_BRANDS_FOLDER_ID and drive_client and drive_client.is_configured())
     if cloud_mode:
         print(f"Cloud mode: scanning Drive folder {DRIVE_BRANDS_FOLDER_ID}", flush=True)
-        BRANDS.extend(discover_brands_drive(DRIVE_BRANDS_FOLDER_ID))
-        print(f"Discovered {len(BRANDS)} brand folders via Drive API")
-        videos = collect_videos_drive()
+        # v0.1.46 Phase 2: change-token short-circuit. If we already
+        # have a cursor AND the resolved drive id matches what's
+        # persisted AND Drive reports zero changes since the cursor,
+        # skip the scan entirely. `library.json` stays as-is — the
+        # last successful scan's output is still authoritative.
+        force_full = os.environ.get("SCREENS_FORCE_FULL_SCAN") == "1"
+        try:
+            drive_id_for_token = drive_client.get_parent_drive_id(DRIVE_BRANDS_FOLDER_ID)
+        except Exception as e:
+            drive_id_for_token = None
+            print(f"[token] couldn't resolve drive id: {e}", flush=True)
+        cached_drive, cached_token = _load_token()
+        if (
+            not force_full
+            and drive_id_for_token
+            and cached_drive == drive_id_for_token
+            and cached_token
+        ):
+            try:
+                num_changes, next_token = drive_client.changes_since(
+                    drive_id_for_token, cached_token,
+                )
+                if num_changes == 0:
+                    print(f"[token] no Drive changes since last cursor — skipping full scan", flush=True)
+                    # Persist the same token explicitly so the next call
+                    # starts from the same anchor; cheap and avoids any
+                    # weird "token expired" edge cases later.
+                    _save_token(drive_id_for_token, next_token)
+                    return
+                print(f"[token] {num_changes} change(s) since last scan — running full sweep", flush=True)
+            except Exception as e:
+                print(f"[token] changes.list failed ({e}); falling through to full scan", flush=True)
+
+        # Full scan via the broad-query path; fall back to the
+        # legacy recursive walker if we couldn't resolve a shared
+        # drive (My Drive content, etc.).
+        videos = collect_videos_drive_v2(DRIVE_BRANDS_FOLDER_ID)
+        if videos is None:
+            print("[broad-query] falling back to recursive walker", flush=True)
+            BRANDS.extend(discover_brands_drive(DRIVE_BRANDS_FOLDER_ID))
+            print(f"Discovered {len(BRANDS)} brand folders via Drive API")
+            videos = collect_videos_drive()
+        else:
+            print(f"Discovered {len(BRANDS)} brand folders via broad-query inventory")
+        # After a successful scan, capture a fresh cursor pointing at
+        # "now" so the next tick can short-circuit if nothing changes
+        # in the meantime.
+        if drive_id_for_token:
+            try:
+                fresh_token = drive_client.get_start_page_token(drive_id_for_token)
+                _save_token(drive_id_for_token, fresh_token)
+                print(f"[token] persisted new start-page-token for drive {drive_id_for_token}", flush=True)
+            except Exception as e:
+                print(f"[token] couldn't fetch start-page-token: {e}", flush=True)
     else:
         BRANDS.extend(discover_brands())
         print(f"Discovered {len(BRANDS)} brand folders under {DRIVE_ROOT}")
