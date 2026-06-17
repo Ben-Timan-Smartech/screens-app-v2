@@ -18,6 +18,30 @@ Rules:
 
 ---
 
+## v0.1.45
+
+**Drive Sync card → Refresh directory button.**
+
+Sits next to **Sync now** on Settings → Drive sync. Hits
+`/api/library` to re-pull the current directory tree the server
+already has on disk, then fires a `library-refresh` event so the
+Content Library page (and anything else listening) drops its cache
+and re-renders.
+
+Crucially it does **not** trigger a new Drive scan — that's still
+what **Sync now** does, and it can take minutes on a full
+seven-brand walk. Refresh directory is sub-second.
+
+Use it when:
+- Someone else just kicked off a sync and you want to see the result
+  without spawning another scan.
+- The Content Library shows stale entries (cache out of step with
+  the server's library.json).
+- You're debugging a sync and want to see the server-side state
+  without re-running the slow Drive walk.
+
+---
+
 ## v0.1.44
 
 Third hotfix in the v0.1.39 cascade. Each release shipped fine

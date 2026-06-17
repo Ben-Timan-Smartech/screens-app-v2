@@ -562,6 +562,10 @@ const formatRelative = (epochSec) => {
 const DriveSyncTab = () => {
   const [info, setInfo] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
+  // v0.1.45: separate "refreshing directory view" state from the
+  // "syncing Drive" state so the buttons reflect the right action.
+  // Pulling library.json is fast (<1 s); a full sync can take minutes.
+  const [refreshingDir, setRefreshingDir] = React.useState(false);
   const refresh = React.useCallback(async () => {
     try {
       const r = await fetch('/api/library/info', { cache: 'no-store' });
@@ -587,6 +591,40 @@ const DriveSyncTab = () => {
     } finally {
       setTimeout(() => setBusy(false), 1500);
       refresh();
+    }
+  };
+
+  // v0.1.45: pull the latest library.json the server has on disk and
+  // refresh every consumer in the CMS. Does NOT trigger a fresh Drive
+  // scan — that's what Sync now is for. Use this when:
+  //   • someone else triggered a sync and you want to see the result
+  //     without paying for another scan
+  //   • the in-memory library cache feels stale (e.g. after a manual
+  //     /data/library.json edit, or right after a sync completes)
+  //   • debugging — confirm the server-side tree without round-tripping
+  //     through the slow Drive walk
+  const refreshDirectory = async () => {
+    if (refreshingDir) return;
+    setRefreshingDir(true);
+    try {
+      // Bypass any browser/CDN cache and bypass useLibrary's module-level
+      // cache by firing 'library-refresh' afterwards.
+      const r = await fetch('/api/library?_ts=' + Date.now(), {
+        cache: 'no-store',
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      const count = Array.isArray(data?.videos) ? data.videos.length : 0;
+      // Re-pull /api/library/info too so the "Last sync" row updates
+      // in case the in-tab state was behind the poll.
+      await refresh();
+      // Tell ContentLibrary + anything else listening to drop its cache.
+      window.dispatchEvent(new CustomEvent('library-refresh'));
+      showToast(`Directory refreshed — ${count} video${count === 1 ? '' : 's'}`, 'ok');
+    } catch (e) {
+      showToast(`Refresh failed: ${e.message}`, 'err');
+    } finally {
+      setRefreshingDir(false);
     }
   };
 
@@ -635,13 +673,26 @@ const DriveSyncTab = () => {
               ? renderProgress(info)
               : `${formatRelative(lastAt)}${count != null ? ` · ${count} videos` : ''}${success === false ? ' · failed' : ''}`
           }>
-          <Button
-            variant="secondary" size="sm"
-            icon={<Icon.sync size={12} />}
-            disabled={busy || running}
-            onClick={sync}>
-            {running ? 'Syncing…' : 'Sync now'}
-          </Button>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            {/* v0.1.45: pulls the current library.json from the server
+                without triggering a fresh Drive walk. Fast (<1 s) vs
+                Sync now (minutes). */}
+            <Button
+              variant="ghost" size="sm"
+              icon={<Icon.refresh size={12} />}
+              disabled={refreshingDir}
+              onClick={refreshDirectory}
+              title="Re-pull the directory tree the server already has, without re-scanning Drive">
+              {refreshingDir ? 'Refreshing…' : 'Refresh directory'}
+            </Button>
+            <Button
+              variant="secondary" size="sm"
+              icon={<Icon.sync size={12} />}
+              disabled={busy || running}
+              onClick={sync}>
+              {running ? 'Syncing…' : 'Sync now'}
+            </Button>
+          </div>
         </SettingsRow>
 
         {running && info?.progressTotal && (
