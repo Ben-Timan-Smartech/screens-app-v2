@@ -445,6 +445,85 @@ def _save_secrets() -> None:
     _atomic_write_json(SECRETS_JSON, dict(_secrets))
 
 
+def _test_brand_api_key() -> dict:
+    """v0.1.59: probe the tm:rw index API with the stored Brand Asset
+    Manager API key. Returns a structured result the CMS renders inline
+    next to the key field:
+
+      ok=true                  status=ok           — /me returned 200
+      ok=false  status=no_key                     — no key set yet
+      ok=false  status=unauthorized               — key rejected (401/403)
+      ok=false  status=unreachable                — couldn't reach server
+      ok=false  status=server_error               — 5xx from upstream
+      ok=false  status=unexpected                 — other non-2xx
+
+    We hit /me, not /health: /health is publicly reachable, so a 200
+    there only proves the network path, not that the key works."""
+    entry = _secrets.get("brandApiKey") or {}
+    key = (entry.get("value") or "").strip()
+    if not key:
+        return {"ok": False, "status": "no_key", "detail": "No key saved yet"}
+
+    started = time.time()
+    url = f"{BRAND_API_BASE}/me"
+    req = urllib.request.Request(url, headers={"X-API-Key": key, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            elapsed_ms = int((time.time() - started) * 1000)
+            try:
+                payload = json.loads(resp.read().decode("utf-8") or "{}")
+            except Exception:
+                payload = {}
+            # Echo a couple of identity-ish fields when present so the
+            # operator sees they're talking to the right tenant. We
+            # don't know the exact shape; pick a few common keys.
+            identity = {
+                k: payload[k] for k in ("name", "email", "tenant", "tenantId", "org", "id")
+                if isinstance(payload.get(k), (str, int))
+            }
+            return {
+                "ok": True, "status": "ok", "latencyMs": elapsed_ms,
+                "detail": "API key accepted by tm:rw index",
+                "identity": identity,
+            }
+    except urllib.error.HTTPError as e:
+        elapsed_ms = int((time.time() - started) * 1000)
+        body_text = ""
+        upstream_msg = None
+        try:
+            body_text = e.read().decode("utf-8", errors="replace")
+            upstream_msg = (json.loads(body_text) or {}).get("error")
+        except Exception:
+            pass
+        if e.code in (401, 403):
+            return {
+                "ok": False, "status": "unauthorized", "latencyMs": elapsed_ms,
+                "httpStatus": e.code,
+                "detail": upstream_msg or "API key rejected by tm:rw index",
+            }
+        if 500 <= e.code < 600:
+            return {
+                "ok": False, "status": "server_error", "latencyMs": elapsed_ms,
+                "httpStatus": e.code,
+                "detail": upstream_msg or f"Upstream {e.code} — tm:rw index reported an error",
+            }
+        return {
+            "ok": False, "status": "unexpected", "latencyMs": elapsed_ms,
+            "httpStatus": e.code,
+            "detail": upstream_msg or f"Unexpected HTTP {e.code}",
+        }
+    except urllib.error.URLError as e:
+        return {
+            "ok": False, "status": "unreachable",
+            "detail": f"Couldn't reach {BRAND_API_BASE}: {e.reason}",
+        }
+    except Exception as e:
+        return {
+            "ok": False, "status": "unreachable",
+            "detail": f"Network error: {e!s}",
+        }
+
+
 def _load_state_from_disk() -> None:
     """One-shot loader, called once on module import. Best-effort —
     a missing or corrupt file just means we start with empty state,
@@ -859,6 +938,15 @@ _secrets: dict = {}
 _INTEGRATION_SECRETS: dict[str, str] = {
     "brandApiKey": "Brand Asset Manager API key",
 }
+
+# v0.1.59: tm:rw index API — Brand Asset Manager backend. Override with
+# SCREENS_BRAND_API_BASE for staging. The /me endpoint is the canonical
+# "is this key valid" check (the publicly-reachable /health probe only
+# tells us the server is up, not whether we can authenticate).
+BRAND_API_BASE = os.environ.get(
+    "SCREENS_BRAND_API_BASE",
+    "https://tmrw-index-api-6dgw63xeaa-nw.a.run.app",
+).rstrip("/")
 
 # ── Library sync (scan-videos.py runner) ────────────────────────────
 # The CMS doesn't keep its own copy of any video — `/media/...` streams
@@ -2084,6 +2172,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _serve_api_post(self) -> None:
         path = self.path.split("?", 1)[0]
         body = self._read_json()
+
+        # v0.1.59: connection test for an integration secret. Calls the
+        # remote API server-side so the key never leaves the CMS server
+        # (it isn't even read into the request body — we just hit the
+        # stored value). Owner-only, same as the read/write endpoints.
+        # Currently only "brandApiKey" is wired; the route stays a
+        # regex so adding more integrations later is a small add.
+        m_test = re.match(r"^/api/integrations/([a-zA-Z0-9_-]+)/test$", path)
+        if m_test:
+            user = self._current_user()
+            if user is None:
+                self._send_json({"error": "unauthenticated"}, status=401); return
+            if user.get("role") != "owner":
+                self._send_json({"error": "owner_only"}, status=403); return
+            name = m_test.group(1)
+            if name not in _INTEGRATION_SECRETS:
+                self._send_json({"error": "unknown_secret"}, status=404); return
+            if name == "brandApiKey":
+                result = _test_brand_api_key()
+                self._send_json(result)
+            else:
+                self._send_json({"ok": False, "status": "not_implemented",
+                                 "detail": "No test handler for this secret"}, status=501)
+            return
 
         # ── Auth: login ────────────────────────────────────────
         # body: { credential: "<google-jwt>" }. Returns the public user

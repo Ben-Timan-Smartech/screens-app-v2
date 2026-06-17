@@ -18,6 +18,36 @@ Rules:
 
 ---
 
+## v0.1.59
+
+Test connection button for the Brand Asset Manager API key.
+
+### What's new
+
+Settings → Integrations now has a **Test connection** button next to
+the Brand API key. Clicking it asks the CMS server to hit the tm:rw
+index API with the stored key — the value never reaches the browser —
+and shows the result inline:
+
+- **● Connected · N ms** when `/me` returns 200, with any identity
+  fields the API echoes (name, tenant, etc.).
+- **● Key rejected** when the API returns 401/403 — usually means the
+  key was pasted wrong, isn't activated, or belongs to a different
+  environment.
+- **● Unreachable** for network errors / timeouts (8 s server-side,
+  12 s client-side as a backstop).
+- **● Server error** for 5xx responses from the tm:rw index server.
+
+Editing or saving a new key clears the previous result so a stale
+"Connected" pill can't sit next to a key you haven't tested yet.
+
+### Configuration
+
+The endpoint is hardcoded to the production tm:rw index API. Override
+with `SCREENS_BRAND_API_BASE` if you need to point at staging.
+
+---
+
 ## v0.1.58
 
 Owner-only Brand Asset Manager API key in Settings → Integrations.
