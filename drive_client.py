@@ -205,6 +205,130 @@ def list_files_in(folder_id: str) -> list[dict]:
     return out
 
 
+# ── Whole-drive broad query (v0.1.46 Phase 1) ──────────────────────
+#
+# The recursive `list_subfolders` + `list_videos_recursive` pair above is
+# correct but slow: every folder costs its own paginated `files.list`
+# call (~200-400 ms latency from Cloud Run to Drive), and we walked them
+# sequentially across all seven+ brand subtrees. A typical sync was 70+
+# round-trips.
+#
+# When the brand content lives on a shared drive (Smartech's case), we
+# can fetch the entire inventory in O(filecount / 1000) calls using
+# `corpora='drive'` + `driveId=<shared-drive-id>`. Two queries:
+# `is_shared_drive_root` resolves the drive ID from the brand-content
+# folder ID; `list_drive_inventory` then sweeps the whole drive.
+#
+# Callers reconstruct ancestry client-side via the `parents` field on
+# each item. Folders that fall outside the brand-content subtree are
+# filtered out by scan-videos.py.
+
+def get_parent_drive_id(file_id: str) -> Optional[str]:
+    """Return the shared-drive ID that `file_id` lives in, or None if
+    it's in My Drive / no drive. Used to find the parent shared-drive
+    of the brand-content folder so we can scope a broad query."""
+    svc = _get_service()
+    meta = svc.files().get(
+        fileId=file_id,
+        fields="driveId",
+        supportsAllDrives=True,
+    ).execute()
+    return meta.get("driveId")
+
+
+def list_drive_inventory(drive_id: str) -> list[dict]:
+    """Every folder + video file in a shared drive, in one paginated
+    sweep. Returns a list of `{id, name, mimeType, parents, size,
+    modifiedTime}` records.
+
+    Page size is 1000 — Drive's max for `files.list`. A drive with 5k
+    items is ~5 calls / ~1 s, vs ~70+ calls for the per-folder walk.
+    """
+    svc = _get_service()
+    out: list[dict] = []
+    page_token: Optional[str] = None
+    while True:
+        resp = svc.files().list(
+            corpora="drive",
+            driveId=drive_id,
+            q=(
+                "trashed=false and "
+                "(mimeType='application/vnd.google-apps.folder' or "
+                "mimeType contains 'video/')"
+            ),
+            fields="nextPageToken, files(id,name,mimeType,parents,size,modifiedTime)",
+            pageSize=1000,
+            pageToken=page_token,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        out.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return out
+
+
+# ── Change-token short-circuit (v0.1.46 Phase 2) ───────────────────
+#
+# Drive's `changes.list` API returns a delta stream since a cursor. We
+# don't try to apply deltas precisely (would need to re-classify each
+# changed file into a brand, handle moves/renames/deletes correctly —
+# all error-prone). We use the cursor for one thing only: detecting "is
+# anything new since last sync?" If yes, run the full broad-query scan.
+# If no, exit early without touching library.json.
+#
+# Most days nothing has changed in the brand content folder, so most
+# Sync now / auto-sync ticks become a single API round-trip and an
+# early-out. The wall-clock drops from minutes to ~1 second.
+
+def get_start_page_token(drive_id: str) -> str:
+    """Return a fresh cursor pointing at "now". Subsequent
+    `changes_since(...)` calls will return everything that happened
+    after this point. Used right after a full scan to seed the
+    incremental cursor."""
+    svc = _get_service()
+    resp = svc.changes().getStartPageToken(
+        driveId=drive_id,
+        supportsAllDrives=True,
+    ).execute()
+    return resp.get("startPageToken", "")
+
+
+def changes_since(drive_id: str, page_token: str) -> tuple[int, str]:
+    """Walk all change pages since `page_token` and return
+    `(num_changes, next_token)`.
+
+    We don't return the change details — only the count is used (to
+    decide whether to skip a full re-scan). `next_token` is the cursor
+    to persist for the next call.
+    """
+    svc = _get_service()
+    total = 0
+    token = page_token
+    while True:
+        resp = svc.changes().list(
+            pageToken=token,
+            driveId=drive_id,
+            includeRemoved=True,
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            spaces="drive",
+            # The `includeCorpusRemovals` flag fires events for files
+            # the service account loses visibility on (folder ACL
+            # change, etc.) — we want those too.
+            includeCorpusRemovals=True,
+            fields="nextPageToken, newStartPageToken, changes(fileId,removed)",
+            pageSize=1000,
+        ).execute()
+        total += len(resp.get("changes", []) or [])
+        if resp.get("nextPageToken"):
+            token = resp["nextPageToken"]
+            continue
+        # Drive returns newStartPageToken on the final page.
+        return (total, resp.get("newStartPageToken", token))
+
+
 # ── Streaming ────────────────────────────────────────────────────────
 
 def get_metadata(file_id: str) -> dict:

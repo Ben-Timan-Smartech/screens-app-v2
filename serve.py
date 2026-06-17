@@ -841,9 +841,16 @@ _sync_state: dict = {
 _PROGRESS_RE = re.compile(r"^PROGRESS:\s+(\d+)/(\d+)\s+(.*)$")
 
 
-def run_library_scan() -> dict:
+def run_library_scan(force_full: bool = False) -> dict:
     """Synchronously re-run scan-videos.py. Streams progress lines into
-    _sync_state so the Drive Sync UI can render a live count."""
+    _sync_state so the Drive Sync UI can render a live count.
+
+    v0.1.46: pass `force_full=True` from manual "Sync now" requests so
+    the change-token short-circuit in scan-videos.py is bypassed.
+    Auto-sync (daily timer + initial-on-empty) defaults to False — if
+    Drive reports zero changes since the last cursor, the scan exits
+    in ~1 s without re-walking the inventory.
+    """
     with _SYNC_LOCK:
         if _sync_state["running"]:
             print("[sync] run_library_scan: already running — skip", file=sys.stderr, flush=True)
@@ -855,7 +862,10 @@ def run_library_scan() -> dict:
     tail: list[str] = []        # last few lines for error reporting
     try:
         scan_script = PROJECT / "scan-videos.py"
-        print(f"[sync] launching {scan_script}", file=sys.stderr, flush=True)
+        print(f"[sync] launching {scan_script} (force_full={force_full})", file=sys.stderr, flush=True)
+        env = os.environ.copy()
+        if force_full:
+            env["SCREENS_FORCE_FULL_SCAN"] = "1"
         proc = subprocess.Popen(
             [sys.executable, "-u", str(scan_script)],   # -u = unbuffered stdout
             cwd=str(PROJECT),
@@ -865,6 +875,7 @@ def run_library_scan() -> dict:
             bufsize=1,                                  # line-buffered
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
         print(f"[sync] scan-videos.py subprocess started (pid={proc.pid})", file=sys.stderr, flush=True)
         assert proc.stdout is not None
@@ -2448,7 +2459,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             # Run on a background thread so the HTTP request doesn't hold up
             # the response. The UI polls /api/library/info to see when it's done.
-            threading.Thread(target=run_library_scan, daemon=True).start()
+            # v0.1.46: manual triggers always force a full scan — the
+            # short-circuit is for the daily auto-sync, not for an
+            # operator who just clicked Sync now expecting fresh data.
+            threading.Thread(
+                target=run_library_scan, kwargs={"force_full": True}, daemon=True,
+            ).start()
             _log_activity(
                 kind="sync",
                 text="Drive sync started",
