@@ -18,6 +18,58 @@ Rules:
 
 ---
 
+## v0.1.53
+
+Two fixes that hit the same source — silently-truncated downloads.
+
+### Premature-EOF detection on every download
+
+The "video isn't playing" report came back as ExoPlayer
+`SOURCE_IO — Read position out of range`. That means a cached MP4
+got truncated: the file's atoms reference offsets past the actual
+EOF, so ExoPlayer crashes mid-playback.
+
+The root cause is in the v0.1.39 resumable-download code (and the
+v0.1.51 Updater clone). OkHttp's input-stream `read()` returns
+`-1` cleanly when a stalled connection cuts mid-body — no
+exception, no caller signal. The retry loop catches IOException;
+clean EOF wasn't one. We rolled the (truncated) `.part` straight
+into the final `.mp4`. ExoPlayer then walked the MP4 box tree and
+tried to read past where the bytes actually ended.
+
+`VideoCache.streamBodyToPart` and `Updater.streamBodyToPart` now
+record bytes-read-from-body and compare against
+`Response.body.contentLength()` after the loop. If short, throw
+`IOException("Premature EOF: got N of M body bytes")`. The outer
+retry loop catches that, issues a fresh `Range: bytes=<existing>-`
+request, and fills the missing tail. The `.part` is never renamed
+into place unless the full body was received.
+
+Only fires when the server gave us a `Content-Length` — chunked
+transfers can't be verified this way, but the modern Drive-stream
+proxy + GitHub release CDN both set Content-Length.
+
+**For an already-corrupt cached video on a tablet right now:** the
+fix doesn't auto-heal it — the bad file sits on disk and we never
+re-download. Push **Clear cache** from the CMS for that screen and
+the next playlist fetch re-downloads from scratch with the new
+guard in place.
+
+### Add-content commit button was offscreen on long video lists
+
+v0.1.49's multi-select picker added a "Cancel" + "Add N videos"
+pair to the bottom row. The grid above wasn't height-bounded, so
+on brands with 20+ videos it pushed the row off the bottom of the
+viewport. You could tick a video (it got the green border + ✓) but
+no Add button was visible to commit.
+
+`LazyVerticalGrid` in both `VideoPickerScreen` and `BrandPickerScreen`
+now uses `Modifier.weight(1f)` so it claims exactly the height
+left over for it, scrolling internally when the list is long.
+The footer Row stays anchored at the bottom regardless.
+
+---
+
 ## v0.1.52
 
 Auto-updates only run overnight.

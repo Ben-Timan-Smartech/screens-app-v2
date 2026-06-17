@@ -354,6 +354,15 @@ class Updater(
         versionName: String,
         append: Boolean,
     ) {
+        // v0.1.53: same premature-EOF guard as VideoCache. OkHttp's
+        // input stream returns -1 cleanly when a midstream socket
+        // close happens, with no exception — so without this check
+        // we'd rename a truncated .part into .apk and the installer
+        // would fail with a confusing "package parse" error. Catching
+        // it here pushes the caller's retry loop, which will resume
+        // via Range for the missing tail.
+        val expectedBodyBytes = body.contentLength()
+        var bytesFromBody = 0L
         FileOutputStream(partial, append).use { out ->
             val buf = ByteArray(64 * 1024)
             var got = startingBytes
@@ -363,9 +372,15 @@ class Updater(
                     if (read == -1) break
                     out.write(buf, 0, read)
                     got += read
+                    bytesFromBody += read
                     _state.value = State.Downloading(versionName, got, total)
                 }
             }
+        }
+        if (expectedBodyBytes > 0 && bytesFromBody < expectedBodyBytes) {
+            throw java.io.IOException(
+                "Premature EOF on APK: got $bytesFromBody of $expectedBodyBytes body bytes"
+            )
         }
     }
 

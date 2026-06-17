@@ -322,16 +322,19 @@ fun BrandPickerScreen(
             Column(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 56.dp)) {
                 SearchBar(query, onQueryChange = { query = it }, placeholder = "Search brands")
                 Spacer(Modifier.height(28.dp))
+                // v0.1.53: bound the grid so the bottom row stays
+                // on-screen if the brand list grows past one screen.
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(4),
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
                     items(filtered) { brand ->
                         BrandCard(brand) { onPickBrand(brand) }
                     }
                 }
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(16.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     NavPill("← Back", onBack)
                     Spacer(Modifier.weight(1f))
@@ -405,10 +408,17 @@ fun VideoPickerScreen(
             Column(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 56.dp)) {
                 SearchBar(query, onQueryChange = { query = it }, placeholder = "Search $brand videos")
                 Spacer(Modifier.height(28.dp))
+                // v0.1.53: bound the grid with weight(1f) so the Row
+                // below it stays on-screen even when there are 30+
+                // videos in the brand. Pre-v0.1.53 the grid had no
+                // height constraint, so a long list pushed the Add
+                // button off the bottom — selection ticked fine but
+                // the commit button was offscreen.
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(3),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
                     items(filtered) { v ->
                         VideoCard(
@@ -421,7 +431,7 @@ fun VideoPickerScreen(
                         )
                     }
                 }
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(16.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     NavPill("← Back", onBack)
                     Spacer(Modifier.weight(1f))
