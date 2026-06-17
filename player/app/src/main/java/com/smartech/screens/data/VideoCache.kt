@@ -187,9 +187,20 @@ class VideoCache(
         append: Boolean,
     ) {
         val body = response.body ?: throw IOException("Empty body")
+        // Bytes the SERVER says are in *this body* — for a 206 that's
+        // the remaining range, for a 200 the whole file. Used after
+        // the read loop to detect premature EOF: a stalled/cut
+        // connection often manifests as a clean `input.read() == -1`
+        // before the body's actually been delivered, with no exception
+        // thrown. Without this check we'd silently rename a truncated
+        // .part into .mp4 and hand it to ExoPlayer, which then fails
+        // with SOURCE_IO ("Read position out of range") when it walks
+        // the MP4 atoms and they reference offsets past the real EOF.
+        val expectedBodyBytes = body.contentLength()
         // Initial tick so the UI shows "starting…" before the first chunk
         // lands on slow connections.
         onProgress?.invoke(startingBytes, total)
+        var bytesFromBody = 0L
         FileOutputStream(partial, append).use { out ->
             val buffer = ByteArray(64 * 1024)
             var accumulated = startingBytes
@@ -199,9 +210,20 @@ class VideoCache(
                     if (read == -1) break
                     out.write(buffer, 0, read)
                     accumulated += read
+                    bytesFromBody += read
                     onProgress?.invoke(accumulated, total)
                 }
             }
+        }
+        // Premature EOF check. Only fires when the server actually
+        // told us how big the body should be (chunked transfers have
+        // contentLength() == -1 — no check possible there). Throwing
+        // here pushes the caller's retry loop, which will issue a
+        // Range request for the missing tail.
+        if (expectedBodyBytes > 0 && bytesFromBody < expectedBodyBytes) {
+            throw IOException(
+                "Premature EOF for ${partial.name}: got $bytesFromBody of $expectedBodyBytes body bytes"
+            )
         }
     }
 
