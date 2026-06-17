@@ -108,7 +108,7 @@ const ScreenRow = ({ s, selected, onToggle, onOpen }) => {
         {s.orient === 'portrait' ? <Icon.device size={11} /> : <Icon.deviceLand size={11} />}
         <span className="tnum">{s.tier}</span>
       </div>
-      <span className="tnum" style={{ fontSize: 11, color: 'var(--ink-3)', width: 70, textAlign: 'right' }}>{s.brand || '—'}</span>
+      <span className="tnum scr-mobile-hide" style={{ fontSize: 11, color: 'var(--ink-3)', width: 70, textAlign: 'right' }}>{s.brand || '—'}</span>
       <Icon.chevR size={13} />
     </button>
   );
@@ -133,6 +133,11 @@ const ScreensStoreView = ({ storeId }) => {
     setViewMode(m);
     try { localStorage.setItem('screens.viewMode', m); } catch {}
   };
+  // v0.1.57: read viewport so the in-store grid + stats strip
+  // collapse on mobile (≤640 px). Previously the grid hard-coded
+  // 4 columns, which produced 80-px-wide tiles on a phone.
+  const vp = useViewport();
+  const isMobile = vp.tier === 'mobile';
 
   return (
     <AppShell current="screens">
@@ -147,9 +152,9 @@ const ScreensStoreView = ({ storeId }) => {
           </>
         }
       />
-      <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 40px' }}>
+      <div style={{ flex: 1, overflow: 'auto', padding: isMobile ? '14px 12px 32px' : '20px 24px 40px' }}>
         {/* Store stats strip */}
-        <div style={{ display: 'flex', gap: 10, marginBottom: 18 }}>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 18, flexWrap: 'wrap' }}>
           <div style={{ padding: '10px 14px', border: 'var(--border)', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
             <StatusDot status="online" />
             <span className="tnum" style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{store.online}</span>
@@ -208,14 +213,29 @@ const ScreensStoreView = ({ storeId }) => {
             ))}
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+          <div style={{
+            display: 'grid',
+            // v0.1.57: was hard-coded 4-col which produced ~80px
+            // tiles on a phone. auto-fill with a 150px minimum gives
+            // 2 columns at 380 px, 4 columns at desktop.
+            gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
+            gap: 12,
+          }}>
             {screens.map(s => <ScreenCard key={s.id} s={s} selected={selected.has(s.id)} onToggle={() => toggle(s.id)} onOpen={() => navigate(`/screens/${store.id}/${s.id}`)} />)}
           </div>
         )}
 
         {selected.size > 0 && (
           <div style={{
-            position: 'fixed', bottom: 24, left: 'calc(var(--sidebar-w) + 50%)', transform: 'translateX(-50%)',
+            // v0.1.57: sidebar collapses to a drawer at ≤1024 px,
+            // so the selection bar is centred on the full viewport
+            // there. Above the tablet breakpoint the original offset
+            // still applies so the bar doesn't sit on top of the
+            // sidebar.
+            position: 'fixed', bottom: 24,
+            left: vp.isCompact ? '50%' : 'calc(var(--sidebar-w) + 50%)',
+            transform: 'translateX(-50%)',
+            maxWidth: 'calc(100% - 24px)',
             background: 'var(--ink-0)', color: 'var(--on-accent)',
             borderRadius: 10, padding: '8px 8px 8px 16px',
             display: 'flex', alignItems: 'center', gap: 12,
@@ -258,6 +278,8 @@ const StoresIndex = () => {
   if (regionCount > 0) {
     subtitleParts.push(`${regionCount} region${regionCount === 1 ? '' : 's'}`);
   }
+  const vp = useViewport();
+  const isMobile = vp.tier === 'mobile';
   return (
     <AppShell current="screens">
       <PageHeader
@@ -265,7 +287,7 @@ const StoresIndex = () => {
         subtitle={subtitleParts.join(' · ')}
         actions={<Button variant="primary" size="sm" icon={<Icon.plus size={13} />}>Add store</Button>}
       />
-      <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 40px' }}>
+      <div style={{ flex: 1, overflow: 'auto', padding: isMobile ? '14px 12px 32px' : '20px 24px 40px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18, flexWrap: 'wrap' }}>
           <Input placeholder="Search stores or cities…" leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 180, maxWidth: 300 }} />
           <span style={{ flex: 1 }} className="scr-mobile-hide" />

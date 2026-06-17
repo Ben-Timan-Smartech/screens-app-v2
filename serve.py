@@ -2586,15 +2586,41 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     cmd = body.get("command")
                     if cmd not in ("reboot", "clearCache", "unregister", "update", "refresh"):
                         self.send_error(400, "Unknown command"); return
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+
+                    # v0.1.57: unregister is now a server-side delete,
+                    # not a queued command. The previous behaviour
+                    # ("queued for next reconnect") was confusing —
+                    # if the tablet was offline forever, the screen
+                    # row hung around on the CMS list indefinitely.
+                    # Now: the screen disappears from /api/screens
+                    # immediately. If the tablet is online, its next
+                    # /api/state poll returns "unknown screen" and
+                    # it falls back to onboarding; if it's offline,
+                    # the row just stays gone.
+                    if cmd == "unregister":
+                        _per_screen.pop(device_id, None)
+                        _screens.pop(device_id, None)
+                        _save_per_screen()
+                        _save_screens()
+                        print(f"[command] {device_id} -> unregister (deleted)", file=sys.stderr)
+                        _log_activity(
+                            kind="command",
+                            text=f"Unregistered {screen_name}",
+                            icon="close",
+                            tone="err",
+                            target=device_id,
+                        )
+                        self._send_json({"ok": True, "deleted": True})
+                        return
+
                     state = _ensure_screen_state(device_id)
                     state["pendingCommands"].append({"command": cmd, "at": time.time()})
                     _save_per_screen()
                     print(f"[command] {device_id} -> {cmd}", file=sys.stderr)
-                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     label = {
                         "reboot":     "Rebooted",
                         "clearCache": "Cleared cache on",
-                        "unregister": "Unregistered",
                         "update":     "Triggered update on",
                         "refresh":    "Forced refresh on",
                     }[cmd]
@@ -2604,11 +2630,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         icon={
                             "reboot":     "schedule",
                             "clearCache": "trash",
-                            "unregister": "close",
                             "update":     "download",
                             "refresh":    "refresh",
                         }[cmd],
-                        tone="err" if cmd == "unregister" else None,
                         target=device_id,
                     )
                     self._send_json({"ok": True, "queued": cmd})

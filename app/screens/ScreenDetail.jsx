@@ -178,7 +178,66 @@ const playlistsMatch = (a, b) => {
 // The server tracks the group label as a string — clients never
 // need to type it. The UI invents sensible labels when a group
 // needs to be created.
-const SyncGroupCard = ({ screen, allScreens, onSetGroup, onSetGroupForDevice, onRequestJoinWithDifferentContent, onCalibrate, canEdit, isLive }) => {
+// v0.1.57: collapsed summary pill that opens the full picker in a
+// modal. Pre-v0.1.57 the full member-grid + buttons sat permanently
+// on ScreenDetail, eating ~250 px even when the screen wasn't in a
+// group. Most operators just want the status at a glance.
+const SyncGroupSummary = ({ screen, allScreens, canEdit, isLive, onOpen }) => {
+  const groupId = screen.syncGroup || null;
+  const memberCount = React.useMemo(
+    () => (allScreens || []).filter((s) => s.syncGroup && s.syncGroup === groupId).length,
+    [allScreens, groupId],
+  );
+  return (
+    <Card padding={14}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 2 }}>Sync group</div>
+          {groupId ? (
+            <div style={{ fontSize: 11, color: 'var(--ok)' }}>
+              ● Syncing with {memberCount - 1 > 0
+                ? `${memberCount - 1} other screen${memberCount - 1 === 1 ? '' : 's'}`
+                : 'no one yet'}
+            </div>
+          ) : (
+            <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>● Independent playback</div>
+          )}
+        </div>
+        <Button variant="secondary" size="sm" onClick={onOpen}>
+          {groupId ? 'Manage' : 'Set up'}
+        </Button>
+      </div>
+    </Card>
+  );
+};
+
+const SyncGroupModal = ({ open, onClose, ...props }) => {
+  if (!open) return null;
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, zIndex: 40,
+      background: 'rgba(9,9,11,0.5)', backdropFilter: 'blur(2px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: 'min(560px, 92%)', maxHeight: '85%',
+        background: 'var(--ink-10)', border: 'var(--border)', borderRadius: 14,
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        boxShadow: '0 24px 64px rgba(9,9,11,0.24)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', borderBottom: 'var(--border)' }}>
+          <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>Sync group</div>
+          <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} />
+        </div>
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <SyncGroupCardBody {...props} onAfterAction={onClose} />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const SyncGroupCardBody = ({ screen, allScreens, onSetGroup, onSetGroupForDevice, onRequestJoinWithDifferentContent, onCalibrate, canEdit, isLive, onAfterAction }) => {
   const groupId = screen.syncGroup || null;
   // Members = every screen in this group (including the current one).
   // Other screens = all other registered screens, sorted by name.
@@ -224,8 +283,11 @@ const SyncGroupCard = ({ screen, allScreens, onSetGroup, onSetGroupForDevice, on
     onSetGroupForDevice(other.deviceId, effectiveGroup);
   };
 
+  // v0.1.57: rendered inside SyncGroupModal which already provides
+  // its own framing. The outer Card wrapper is gone — content sits
+  // directly against the modal padding.
   return (
-    <Card padding={16}>
+    <div style={{ padding: 16 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
         <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Sync group</div>
         {groupId ? (
@@ -321,7 +383,7 @@ const SyncGroupCard = ({ screen, allScreens, onSetGroup, onSetGroupForDevice, on
           </Button>
         )}
       </div>
-    </Card>
+    </div>
   );
 };
 
@@ -595,13 +657,26 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
       showToast('No registered tablet for this slot yet', 'err');
       return;
     }
-    const note = isLive
+    // v0.1.57: unregister is now a server-side delete. The confirm
+    // copy + success toast are tailored to that — there's no "queued"
+    // step to wait through.
+    const isUnregister = command === 'unregister';
+    const note = isUnregister
+      ? `Unregister ${liveScreen?.name || 'this screen'}?\n\nThis removes it from the CMS immediately. ` +
+        `If the tablet is still online it'll fall back to onboarding on its next poll.`
+      : isLive
       ? `${label} the live tablet?`
       : `${label}? Screen is offline — command will run when it reconnects.`;
     if (!confirm(note)) return;
     setBusy(command);
     try {
       await sendScreenCommand(targetDeviceId, command);
+      if (isUnregister) {
+        showToast(`Removed ${liveScreen?.name || 'screen'} from the CMS`, 'ok');
+        // Navigate back to the store view — this screen is gone.
+        setTimeout(() => navigate(`/screens/${storeId}`), 600);
+        return;
+      }
       showToast(
         isLive
           ? `${label} queued — tablet picks it up within 3 s`
@@ -813,6 +888,12 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   const [syncOpen, setSyncOpen] = React.useState(false);
   const [addOpen, setAddOpen] = React.useState(false);
   const [previewVideo, setPreviewVideo] = React.useState(null);
+  // v0.1.57: sync group modal — opens when the summary pill is tapped.
+  const [syncModalOpen, setSyncModalOpen] = React.useState(false);
+  // v0.1.57: Danger-zone actions are hidden behind a toggle so the
+  // page fits one viewport. Update / Reboot / Clear cache / Unregister
+  // are needed rarely; the four-button stack was always-on previously.
+  const [dangerOpen, setDangerOpen] = React.useState(false);
   // Set when the user ticks a sync-group candidate that has different
   // content from this screen. The modal asks whether to push this
   // screen's playlist to the candidate before joining; null = closed.
@@ -1095,11 +1176,23 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               );
             })()}
 
-            {/* Sync group picker — own card because it can list every
-                other registered screen. Keeps the Display card from
-                getting absurdly tall when there are many screens. */}
+            {/* v0.1.57: sync group now collapses to a small summary
+                pill. Tap Manage / Set up to open the full picker in a
+                modal — keeps the page short for the common case where
+                the operator just wants to glance at sync status. */}
             {hasHistory && (
-              <SyncGroupCard
+              <SyncGroupSummary
+                screen={lastKnown}
+                allScreens={live.screens || []}
+                canEdit={canEdit}
+                isLive={isLive}
+                onOpen={() => setSyncModalOpen(true)}
+              />
+            )}
+            {hasHistory && (
+              <SyncGroupModal
+                open={syncModalOpen}
+                onClose={() => setSyncModalOpen(false)}
                 screen={lastKnown}
                 allScreens={live.screens || []}
                 onSetGroup={handleSetSyncGroup}
@@ -1123,52 +1216,63 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               />
             )}
 
-            {/* Schedule lands in v0.1.7 (time-windowed playlists +
-                blackout periods). Showing the slot so admins know
-                it's coming; "Edit" button intentionally absent until
-                the feature is real. */}
-            <Card padding={16}>
-              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-                <div style={{ flex: 1, fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Schedule</div>
-                <span style={{
-                  fontSize: 10, fontWeight: 500,
-                  color: 'var(--ink-3)',
-                  background: 'var(--ink-8)',
-                  padding: '2px 8px', borderRadius: 999,
-                  textTransform: 'uppercase', letterSpacing: 0.6,
-                }}>Coming soon</span>
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>
-                Time-of-day playlists + blackout windows are in the v0.1.7 release.
-              </div>
-            </Card>
+            {/* v0.1.57: Schedule "Coming soon" card removed — the
+                Schedules sidebar is already hidden, no need to tease
+                the feature on every screen detail page.
 
-            <Card padding={16} style={{ borderColor: 'rgba(185, 28, 28, 0.15)' }}>
-              <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 10 }}>Danger zone</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <Button variant="secondary" size="sm" icon={<Icon.download size={12} />} disabled={!canEdit || busy === 'update'}
-                  onClick={() => handleCommand('update', 'Triggered update on')}
-                  style={{ justifyContent: 'flex-start' }}>
-                  {busy === 'update' ? 'Updating…' : 'Update player APK'}
-                </Button>
-                <Button variant="secondary" size="sm" icon={<Icon.refresh size={12} />} disabled={!canEdit || busy === 'reboot'}
-                  onClick={() => handleCommand('reboot', 'Reboot')}
-                  style={{ justifyContent: 'flex-start' }}>
-                  {busy === 'reboot' ? 'Rebooting…' : 'Reboot screen'}
-                </Button>
-                <Button variant="secondary" size="sm" icon={<Icon.trash size={12} />} disabled={!canEdit || busy === 'clearCache'}
-                  onClick={() => handleCommand('clearCache', 'Clear cache on')}
-                  style={{ justifyContent: 'flex-start' }}>
-                  {busy === 'clearCache' ? 'Clearing…' : 'Clear cache'}
-                </Button>
-                <Button variant="danger" size="sm" icon={<Icon.close size={12} />} disabled={!canEdit || busy === 'unregister'}
-                  onClick={() => handleCommand('unregister', 'Unregister')}
-                  style={{ justifyContent: 'flex-start' }}>
-                  {busy === 'unregister' ? 'Unregistering…' : 'Unregister device'}
-                </Button>
+                Danger zone collapsed behind a toggle. Update / Reboot /
+                Clear cache / Unregister are rare ops; surfacing the
+                4-button stack permanently pushed the page off one
+                viewport on common laptop heights. */}
+            <Card padding={14} style={{ borderColor: 'rgba(185, 28, 28, 0.15)' }}>
+              <div
+                onClick={() => setDangerOpen((v) => !v)}
+                style={{
+                  display: 'flex', alignItems: 'center', cursor: 'pointer',
+                  padding: 2, marginBottom: dangerOpen ? 10 : 0,
+                }}
+              >
+                <div style={{ flex: 1, fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>More actions</div>
+                <span style={{ fontSize: 10, color: 'var(--ink-4)', marginRight: 6 }}>
+                  {dangerOpen ? 'Hide' : 'Update · Reboot · Clear cache · Unregister'}
+                </span>
+                <span style={{
+                  display: 'inline-flex',
+                  color: 'var(--ink-3)',
+                  transform: dangerOpen ? 'rotate(180deg)' : 'none',
+                  transition: 'transform 120ms ease',
+                }}>
+                  <Icon.chevD size={14} />
+                </span>
               </div>
-              {!canEdit && <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 10 }}>Available once the screen registers.</div>}
-              {canEdit && !isLive && <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 10 }}>Commands queue and run when the tablet reconnects.</div>}
+              {dangerOpen && (
+                <>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <Button variant="secondary" size="sm" icon={<Icon.download size={12} />} disabled={!canEdit || busy === 'update'}
+                      onClick={() => handleCommand('update', 'Triggered update on')}
+                      style={{ justifyContent: 'flex-start' }}>
+                      {busy === 'update' ? 'Updating…' : 'Update player APK'}
+                    </Button>
+                    <Button variant="secondary" size="sm" icon={<Icon.refresh size={12} />} disabled={!canEdit || busy === 'reboot'}
+                      onClick={() => handleCommand('reboot', 'Reboot')}
+                      style={{ justifyContent: 'flex-start' }}>
+                      {busy === 'reboot' ? 'Rebooting…' : 'Reboot screen'}
+                    </Button>
+                    <Button variant="secondary" size="sm" icon={<Icon.trash size={12} />} disabled={!canEdit || busy === 'clearCache'}
+                      onClick={() => handleCommand('clearCache', 'Clear cache on')}
+                      style={{ justifyContent: 'flex-start' }}>
+                      {busy === 'clearCache' ? 'Clearing…' : 'Clear cache'}
+                    </Button>
+                    <Button variant="danger" size="sm" icon={<Icon.close size={12} />} disabled={!canEdit || busy === 'unregister'}
+                      onClick={() => handleCommand('unregister', 'Unregister')}
+                      style={{ justifyContent: 'flex-start' }}>
+                      {busy === 'unregister' ? 'Unregistering…' : 'Unregister device'}
+                    </Button>
+                  </div>
+                  {!canEdit && <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 10 }}>Available once the screen registers.</div>}
+                  {canEdit && !isLive && <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 10 }}>Commands queue and run when the tablet reconnects.</div>}
+                </>
+              )}
             </Card>
           </div>
         </div>

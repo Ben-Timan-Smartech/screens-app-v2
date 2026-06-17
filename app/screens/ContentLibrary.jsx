@@ -185,6 +185,11 @@ const AddContentModal = ({ targetDeviceId, targetName, onClose }) => {
   const [busy, setBusy] = React.useState(false);
   const [query, setQuery] = React.useState('');
   const [brandQuery, setBrandQuery] = React.useState('');
+  // v0.1.57: on mobile the 220 px brand rail eats most of the viewport.
+  // Collapse it to a horizontal chip strip above the video grid, and
+  // pick brands from a select dropdown instead of the side-rail list.
+  const vp = useViewport();
+  const isMobile = vp.tier === 'mobile';
 
   const isAll = activeBrand === 'all';
   const brand = isAll ? null : MOCK_BRANDS.find(b => b.id === activeBrand);
@@ -242,33 +247,54 @@ const AddContentModal = ({ targetDeviceId, targetName, onClose }) => {
           <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={() => onClose(false)} />
         </div>
 
-        {/* Body — split: brand rail | grid */}
-        <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-          <div style={{ width: 220, borderRight: 'var(--border)', padding: '14px 10px', background: 'var(--ink-9)', overflow: 'auto', flexShrink: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '2px 10px 6px' }}>Brands</div>
-            <div style={{ padding: '0 4px 8px' }}>
-              <Input
-                placeholder="Filter brands…"
-                value={brandQuery}
-                onChange={(e) => setBrandQuery(e.target.value)}
-                leadingIcon={<Icon.search size={12} />}
-                size="sm"
-              />
+        {/* Body — split: brand rail | grid. On mobile the rail
+            collapses to a Brand <select> at the top of the grid
+            area. */}
+        <div style={{ flex: 1, display: 'flex', minHeight: 0, flexDirection: isMobile ? 'column' : 'row' }}>
+          {!isMobile && (
+            <div style={{ width: 220, borderRight: 'var(--border)', padding: '14px 10px', background: 'var(--ink-9)', overflow: 'auto', flexShrink: 0 }}>
+              <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '2px 10px 6px' }}>Brands</div>
+              <div style={{ padding: '0 4px 8px' }}>
+                <Input
+                  placeholder="Filter brands…"
+                  value={brandQuery}
+                  onChange={(e) => setBrandQuery(e.target.value)}
+                  leadingIcon={<Icon.search size={12} />}
+                  size="sm"
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                {!brandQuery && (
+                  <BrandNavRow brand={{ id: 'all', name: 'All', videos: MOCK_VIDEOS.length }} active={isAll} onClick={() => setActiveBrand('all')} />
+                )}
+                {MOCK_BRANDS
+                  .filter(b => !brandQuery || b.name.toLowerCase().includes(brandQuery.toLowerCase()))
+                  .map(b => <BrandNavRow key={b.id} brand={b} active={b.id === activeBrand} onClick={() => setActiveBrand(b.id)} />)}
+              </div>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-              {!brandQuery && (
-                <BrandNavRow brand={{ id: 'all', name: 'All', videos: MOCK_VIDEOS.length }} active={isAll} onClick={() => setActiveBrand('all')} />
-              )}
-              {MOCK_BRANDS
-                .filter(b => !brandQuery || b.name.toLowerCase().includes(brandQuery.toLowerCase()))
-                .map(b => <BrandNavRow key={b.id} brand={b} active={b.id === activeBrand} onClick={() => setActiveBrand(b.id)} />)}
-            </div>
-          </div>
+          )}
 
-          <div style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: '16px 18px 24px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-              <Input placeholder={isAll ? 'Search all videos…' : `Search ${brand?.name || ''} videos…`} leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, maxWidth: 280 }} value={query} onChange={(e) => setQuery(e.target.value)} />
-              <span style={{ flex: 1 }} />
+          <div style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: isMobile ? '12px 14px 24px' : '16px 18px 24px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+              {isMobile && (
+                <select
+                  value={activeBrand}
+                  onChange={(e) => setActiveBrand(e.target.value)}
+                  style={{
+                    flex: '0 0 auto', minHeight: 32, padding: '4px 10px',
+                    border: 'var(--border)', borderRadius: 6,
+                    background: 'var(--ink-10)', color: 'var(--ink-1)',
+                    fontSize: 12, maxWidth: '100%',
+                  }}
+                >
+                  <option value="all">All brands ({MOCK_VIDEOS.length})</option>
+                  {MOCK_BRANDS.map(b => (
+                    <option key={b.id} value={b.id}>{b.name} ({b.videos})</option>
+                  ))}
+                </select>
+              )}
+              <Input placeholder={isAll ? 'Search videos…' : `Search ${brand?.name || ''}…`} leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 140, maxWidth: 280 }} value={query} onChange={(e) => setQuery(e.target.value)} />
+              {!isMobile && <span style={{ flex: 1 }} />}
               <span style={{ fontSize: 12, color: 'var(--ink-4)' }}>{visibleVideos.length} video{visibleVideos.length === 1 ? '' : 's'}</span>
             </div>
             {visibleVideos.length === 0 ? (
@@ -292,14 +318,17 @@ const AddContentModal = ({ targetDeviceId, targetName, onClose }) => {
           </div>
         </div>
 
-        {/* Footer */}
-        <div style={{ padding: '14px 20px', borderTop: 'var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ flex: 1, fontSize: 12, color: 'var(--ink-4)' }}>
+        {/* Footer — v0.1.57: drop the target name from the primary
+            button on mobile (it can easily exceed the viewport width
+            for screens like "Toronto Yorkville #2"); selection count
+            is enough. */}
+        <div style={{ padding: isMobile ? '12px 14px' : '14px 20px', borderTop: 'var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ flex: 1, fontSize: 12, color: 'var(--ink-4)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             <span className="tnum" style={{ color: 'var(--ink-1)', fontWeight: 500 }}>{selected.size}</span> selected
           </div>
           <Button variant="secondary" size="sm" onClick={() => onClose(false)}>Cancel</Button>
           <Button variant="primary" size="sm" disabled={selected.size === 0 || busy} onClick={confirm} icon={<Icon.arrowR size={12} />}>
-            {busy ? 'Adding…' : `Add ${selected.size} to ${targetName}`}
+            {busy ? 'Adding…' : isMobile ? `Add${selected.size ? ` (${selected.size})` : ''}` : `Add ${selected.size} to ${targetName}`}
           </Button>
         </div>
 
