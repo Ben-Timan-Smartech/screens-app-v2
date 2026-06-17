@@ -295,16 +295,17 @@ def get_start_page_token(drive_id: str) -> str:
     return resp.get("startPageToken", "")
 
 
-def changes_since(drive_id: str, page_token: str) -> tuple[int, str]:
+def changes_since(drive_id: str, page_token: str) -> tuple[list[dict], str]:
     """Walk all change pages since `page_token` and return
-    `(num_changes, next_token)`.
+    `(changes, next_token)`.
 
-    We don't return the change details — only the count is used (to
-    decide whether to skip a full re-scan). `next_token` is the cursor
-    to persist for the next call.
+    Each change is `{fileId, removed}`. `removed=True` means the file
+    is gone (deleted, trashed, or lost ACL visibility — the loss
+    cases are gated by `includeCorpusRemovals=True`). `next_token` is
+    the cursor to persist for the next call.
     """
     svc = _get_service()
-    total = 0
+    changes: list[dict] = []
     token = page_token
     while True:
         resp = svc.changes().list(
@@ -314,19 +315,59 @@ def changes_since(drive_id: str, page_token: str) -> tuple[int, str]:
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
             spaces="drive",
-            # The `includeCorpusRemovals` flag fires events for files
-            # the service account loses visibility on (folder ACL
-            # change, etc.) — we want those too.
             includeCorpusRemovals=True,
             fields="nextPageToken, newStartPageToken, changes(fileId,removed)",
             pageSize=1000,
         ).execute()
-        total += len(resp.get("changes", []) or [])
+        for c in resp.get("changes", []) or []:
+            fid = c.get("fileId")
+            if not fid:
+                continue
+            changes.append({"fileId": fid, "removed": bool(c.get("removed"))})
         if resp.get("nextPageToken"):
             token = resp["nextPageToken"]
             continue
-        # Drive returns newStartPageToken on the final page.
-        return (total, resp.get("newStartPageToken", token))
+        return (changes, resp.get("newStartPageToken", token))
+
+
+def fetch_files_metadata(file_ids: list[str], max_workers: int = 8) -> dict[str, dict | None]:
+    """Concurrent `files.get` for a list of file IDs.
+
+    Returns `{file_id: metadata-or-None}`. `None` means the file is
+    inaccessible (deleted, ACL change, transient API error). Used by
+    the v0.1.47 incremental-apply path to fetch metadata for just the
+    handful of files that `changes.list` flagged, instead of re-running
+    the whole broad-query inventory.
+
+    The fields match what `list_drive_inventory` returns so callers
+    can drop these straight into the cached inventory snapshot.
+    """
+    svc = _get_service()
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(fid: str) -> tuple[str, dict | None]:
+        try:
+            meta = svc.files().get(
+                fileId=fid,
+                fields="id,name,mimeType,parents,size,modifiedTime,trashed",
+                supportsAllDrives=True,
+            ).execute()
+            if meta.get("trashed"):
+                # Treat trashed-but-not-removed identically to removed
+                # from our caller's perspective — drop from cache.
+                return (fid, None)
+            return (fid, meta)
+        except Exception:
+            # 404, 403 (permission), 5xx — caller treats as None.
+            return (fid, None)
+
+    out: dict[str, dict | None] = {}
+    if not file_ids:
+        return out
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for fid, meta in pool.map(_one, file_ids):
+            out[fid] = meta
+    return out
 
 
 # ── Streaming ────────────────────────────────────────────────────────
