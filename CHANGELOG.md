@@ -18,6 +18,31 @@ Rules:
 
 ---
 
+## v0.1.43
+
+Second hotfix after v0.1.42 — release builds were still failing.
+
+After fixing the deprecated `kotlinOptions` DSL in v0.1.42, the next
+build still hit:
+
+```
+ERROR: AAPT: Cannot filter assets for multiple densities using SDK
+build tools 21 or later. Consider using apk splits instead.
+```
+
+Same v0.1.41 mistake: the `resourceConfigurations` list had multiple
+density tokens (`en`, `xhdpi`, `xxhdpi`, plus per-flavor `xxxhdpi` /
+`mdpi` / `hdpi`). AAPT2 only allows multi-density filtering when
+you're using APK splits, which we don't.
+
+Dropped the density tokens. Kept the locale filter (`"en"` only) —
+that's where the real APK-size win was anyway: stripping the
+localised string bundles AndroidX libs pull in. The legacy build
+still gets the other v0.1.41 wins (vector drawable support library,
+Kotlin null-check stripping via the v0.1.42 compilerOptions DSL).
+
+---
+
 ## v0.1.42
 
 Hotfix — release builds were failing in CI from v0.1.39 onward.
