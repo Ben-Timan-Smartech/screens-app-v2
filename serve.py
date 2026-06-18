@@ -445,6 +445,85 @@ def _save_secrets() -> None:
     _atomic_write_json(SECRETS_JSON, dict(_secrets))
 
 
+# v0.1.63: brand logo map from the tm:rw index /brands feed. Cached
+# in-memory with a TTL and refreshed lazily on /api/library reads, so
+# we don't add a tm:rw round-trip to every poll. Keyed by lowercased
+# brand name. tm:rw carries casing-duplicate brand rows (e.g. "Anker"
+# with no logo + "ANKER" with one); we keep the row that actually has
+# a logoUrl, breaking ties on higher liveCount.
+_BRAND_LOGO_CACHE: dict = {"fetchedAt": 0.0, "map": {}, "hash": "0"}
+_BRAND_LOGO_TTL = 6 * 60 * 60   # 6 hours
+
+
+def _brand_logo_map() -> dict:
+    """Return {brandNameLower: logoUrl}. Best-effort: a missing key,
+    network error, or unexpected shape leaves the previous map in place
+    (or an empty one) so the library still serves — brands just render
+    their generated letter mark instead of a logo."""
+    now = time.time()
+    cached = _BRAND_LOGO_CACHE["map"]
+    if cached and (now - _BRAND_LOGO_CACHE["fetchedAt"]) < _BRAND_LOGO_TTL:
+        return cached
+    entry = _secrets.get("brandApiKey") or {}
+    key = (entry.get("value") or "").strip()
+    if not key:
+        _BRAND_LOGO_CACHE["fetchedAt"] = now   # don't retry every poll
+        return cached
+    req = urllib.request.Request(
+        f"{BRAND_API_BASE}/brands",
+        headers={"X-API-Key": key, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode("utf-8") or "[]")
+    except Exception as e:
+        print(f"[brandlogos] /brands fetch failed: {e}", file=sys.stderr)
+        _BRAND_LOGO_CACHE["fetchedAt"] = now
+        return cached
+    best: dict[str, dict] = {}
+    for r in rows if isinstance(rows, list) else []:
+        name = (r.get("name") or "").strip()
+        if not name:
+            continue
+        logo = r.get("logoUrl") or None
+        live = r.get("liveCount") or 0
+        k = name.lower()
+        cur = best.get(k)
+        if cur is None:
+            best[k] = {"logoUrl": logo, "live": live}
+            continue
+        cur_has, cand_has = bool(cur["logoUrl"]), bool(logo)
+        if (cand_has and not cur_has) or (cand_has == cur_has and live > cur["live"]):
+            best[k] = {"logoUrl": logo, "live": live}
+    new_map = {k: v["logoUrl"] for k, v in best.items() if v["logoUrl"]}
+    import hashlib
+    new_hash = hashlib.sha1(
+        json.dumps(new_map, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8]
+    _BRAND_LOGO_CACHE.update({"map": new_map, "fetchedAt": now, "hash": new_hash})
+    print(f"[brandlogos] {len(new_map)} brand logo(s) from tm:rw", file=sys.stderr)
+    return new_map
+
+
+def _library_with_logos() -> tuple[dict, str]:
+    """Library payload with each brand record enriched with its tm:rw
+    logoUrl (case-insensitive name match). Returns (data, etag). Never
+    mutates the shared library cache — builds a fresh dict for the
+    response. ETag folds in the logo-map hash so a logo refresh
+    invalidates client caches without waiting for a Drive re-sync."""
+    data = _load_library()
+    logos = _brand_logo_map()
+    brands = data.get("brands")
+    if logos and isinstance(brands, list):
+        enriched = []
+        for b in brands:
+            url = logos.get((b.get("name") or "").lower())
+            enriched.append({**b, "logoUrl": url} if url else b)
+        data = {**data, "brands": enriched}
+    etag = f'"lib-{int(_LIBRARY_CACHE.get("mtime") or 0)}-{_BRAND_LOGO_CACHE["hash"]}"'
+    return data, etag
+
+
 def _test_brand_api_key() -> dict:
     """v0.1.59: probe the tm:rw index API with the stored Brand Asset
     Manager API key. Returns a structured result the CMS renders inline
@@ -2149,8 +2228,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # when nothing's changed. ETag keyed on the library file's
             # mtime — Drive Sync bumps that on every scan, which is
             # exactly when the response actually changes.
-            data = _load_library()
-            etag = f'"lib-{int(_LIBRARY_CACHE.get("mtime") or 0)}"'
+            # v0.1.63: brands enriched with tm:rw logoUrl; the ETag
+            # folds in the logo-map hash so a logo refresh also
+            # invalidates client caches.
+            data, etag = _library_with_logos()
             if self.headers.get("If-None-Match") == etag:
                 self.send_response(304)
                 self.send_header("ETag", etag)

@@ -32,6 +32,11 @@ class RemoteLibrary(
         val name: String,
         val videos: Int = 0,
         val products: List<String> = emptyList(),
+        // v0.1.63: tm:rw brand logo, merged server-side into /api/library.
+        // Carried through now so it's available when the tablet brand grid
+        // gains logo rendering (Phase 2 content-library rework). Null when
+        // tm:rw has no logo for the brand or no API key is configured.
+        val logoUrl: String? = null,
     )
 
     @Serializable

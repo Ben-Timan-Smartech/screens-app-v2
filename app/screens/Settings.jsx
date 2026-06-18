@@ -1093,7 +1093,7 @@ const Settings = () => {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
                 {MOCK_BRANDS.map((b) => (
                   <div key={b.id} style={{ padding: 16, border: 'var(--border)', borderRadius: 10, display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <BrandMark brand={b.name} size={36} radius={8} />
+                    <BrandMark brand={b.name} size={36} radius={8} logoUrl={b.logoUrl} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{b.name}</div>
                       <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>{b.products.length} products · {b.videos} videos</div>
