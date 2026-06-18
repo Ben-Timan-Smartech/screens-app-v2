@@ -227,7 +227,12 @@ fun OnboardingScreen(
                     val storeName = LocationTaxonomy.storeById(storeId)?.name
                     Text(
                         if (ready)
-                            "Ready: ${region}/${city}/${storeName ?: storeId}/${concept}" +
+                            // v0.1.62: concept is optional for Test / Events
+                            // stores and any single-concept retail city, so
+                            // drop it from the breadcrumb when null rather
+                            // than printing the literal "null".
+                            "Ready: ${region}/${city}/${storeName ?: storeId}" +
+                                (concept?.let { "/${it}" } ?: "") +
                                 (floor?.let { "/${it}" } ?: "") +
                                 (table?.let { "/${it}" } ?: "") +
                                 "/${screenCode}"
@@ -248,7 +253,8 @@ fun OnboardingScreen(
                                 scope.launch {
                                     LogBuffer.i(
                                         "Onboarding",
-                                        "Registering as ${region}/${city}/${storeId}/${concept}" +
+                                        "Registering as ${region}/${city}/${storeId}" +
+                                            (concept?.let { "/$it" } ?: "") +
                                             (floor?.let { "/$it" } ?: "") +
                                             (table?.let { "/$it" } ?: "") +
                                             "/${screenCode}",
