@@ -16,10 +16,18 @@ const MOCK_BRANDS = [
 // derived dynamically from the live registry, so the static numbers here
 // are placeholders.
 const MOCK_STORES = [
-  { id: 'tmrw-times-square',   name: 'tm:rw Times Square',         city: 'New York', country: 'US', region: 'NYC', total: 0, online: 0, warn: 0, offline: 0 },
-  { id: 'smartech-selfridges', name: 'Smartech \u00b7 Selfridges LDN', city: 'London',   country: 'UK', region: 'UK/EU', total: 0, online: 0, warn: 0, offline: 0 },
-  { id: 'smartech-kadewe',     name: 'Smartech \u00b7 KaDeWe',          city: 'Berlin',   country: 'DE', region: 'EU',  total: 0, online: 0, warn: 0, offline: 0 },
-  { id: 'tmrw-rinascente',     name: 'tm:rw \u00b7 La Rinascente',      city: 'Rome',     country: 'IT', region: 'EU',  total: 0, online: 0, warn: 0, offline: 0 },
+  { id: 'tmrw-times-square',   name: 'tm:rw Times Square',         city: 'New York', country: 'US',  region: 'NYC',     total: 0, online: 0, warn: 0, offline: 0 },
+  { id: 'smartech-selfridges', name: 'Smartech \u00b7 Selfridges LDN', city: 'London',   country: 'UK',  region: 'UK/EU',   total: 0, online: 0, warn: 0, offline: 0 },
+  { id: 'smartech-kadewe',     name: 'Smartech \u00b7 KaDeWe',          city: 'Berlin',   country: 'DE',  region: 'EU',      total: 0, online: 0, warn: 0, offline: 0 },
+  { id: 'tmrw-rinascente',     name: 'tm:rw \u00b7 La Rinascente',      city: 'Rome',     country: 'IT',  region: 'EU',      total: 0, online: 0, warn: 0, offline: 0 },
+  // v0.1.62: ad-hoc stores. Mirrored from LOCATION_TAXONOMY.stores
+  // (and from the tablet's LocationTaxonomy.builtIn) \u2014 every screen
+  // registered with storeId='events' / 'test' needs a matching entry
+  // here, or the Stores index won't list it and ScreenDetail falls
+  // back to the wrong store header. Region 'Global' so they sort
+  // beneath the four real-retail rows.
+  { id: 'events',              name: 'Events',                     city: 'Global',   country: '\u2014', region: 'Global', total: 0, online: 0, warn: 0, offline: 0 },
+  { id: 'test',                name: 'Test',                       city: 'Global',   country: '\u2014', region: 'Global', total: 0, online: 0, warn: 0, offline: 0 },
 ];
 
 const MOCK_VIDEOS = [

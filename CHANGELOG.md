@@ -18,6 +18,26 @@ Rules:
 
 ---
 
+## v0.1.62
+
+Fix screens registered under Test / Events stores.
+
+- **CMS:** `MOCK_STORES` (drives the Stores index + per-store views)
+  was missing `events` and `test`, even though the cascade dropdowns
+  in `LOCATION_TAXONOMY.stores` and the tablet's `LocationTaxonomy`
+  already knew about them. Tablets registered with `storeId: "test"`
+  succeeded on the server but had nowhere to land on the CMS — the
+  Stores index didn't list a Test store, so the screen looked like
+  it had failed to register. Added both with city/region "Global".
+- **Tablet onboarding:** the "Ready: …" breadcrumb printed the
+  literal "null" when no concept was picked. Concept isn't required
+  outside multi-concept cities (NYC / LDN), so Test / Events / BER /
+  ROM all hit this. Now the concept segment drops out when null, the
+  same way floor and table already do. The matching log line was
+  fixed too.
+
+---
+
 ## v0.1.61
 
 Hotfix: Brand API key connection test now uses a real endpoint.
