@@ -450,22 +450,26 @@ def _test_brand_api_key() -> dict:
     Manager API key. Returns a structured result the CMS renders inline
     next to the key field:
 
-      ok=true                  status=ok           — /me returned 200
+      ok=true                  status=ok           — /counts returned 200
       ok=false  status=no_key                     — no key set yet
       ok=false  status=unauthorized               — key rejected (401/403)
       ok=false  status=unreachable                — couldn't reach server
       ok=false  status=server_error               — 5xx from upstream
       ok=false  status=unexpected                 — other non-2xx
 
-    We hit /me, not /health: /health is publicly reachable, so a 200
-    there only proves the network path, not that the key works."""
+    v0.1.61: switched ping from /me (doesn't exist on the tm:rw index
+    API — returns 404 for valid keys) to /counts. It's lightweight,
+    auth-required, and returns the brand / product / asset roll-up
+    which we echo back so the operator sees they're talking to the
+    right catalogue. /health stays unused: it's publicly reachable
+    so a 200 there only proves the network, not the key."""
     entry = _secrets.get("brandApiKey") or {}
     key = (entry.get("value") or "").strip()
     if not key:
         return {"ok": False, "status": "no_key", "detail": "No key saved yet"}
 
     started = time.time()
-    url = f"{BRAND_API_BASE}/me"
+    url = f"{BRAND_API_BASE}/counts"
     req = urllib.request.Request(url, headers={"X-API-Key": key, "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -474,13 +478,17 @@ def _test_brand_api_key() -> dict:
                 payload = json.loads(resp.read().decode("utf-8") or "{}")
             except Exception:
                 payload = {}
-            # Echo a couple of identity-ish fields when present so the
-            # operator sees they're talking to the right tenant. We
-            # don't know the exact shape; pick a few common keys.
-            identity = {
-                k: payload[k] for k in ("name", "email", "tenant", "tenantId", "org", "id")
-                if isinstance(payload.get(k), (str, int))
-            }
+            # Echo top-level scalar fields so the operator sees the
+            # catalogue shape (brand count, product count, etc.).
+            # Cap at 6 entries so a chatty endpoint can't bloat the
+            # response card.
+            identity = {}
+            if isinstance(payload, dict):
+                for k, v in payload.items():
+                    if len(identity) >= 6:
+                        break
+                    if isinstance(v, (str, int, float)) and not isinstance(v, bool):
+                        identity[k] = v
             return {
                 "ok": True, "status": "ok", "latencyMs": elapsed_ms,
                 "detail": "API key accepted by tm:rw index",
