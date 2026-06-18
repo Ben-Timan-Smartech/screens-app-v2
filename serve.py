@@ -610,6 +610,60 @@ def _log_activity(
 POLL_MODES = ("fast", "normal", "slow")
 DEFAULT_POLL_MODE = "normal"
 
+# v0.1.60: presence rules scale with how often a screen is expected
+# to call in. The old code used a fixed 15-second cut-off, which
+# marked SLOW-mode tablets (5-minute interval) offline the moment
+# they hung up the last poll — they hadn't gone anywhere, they
+# just weren't due back for another 4 minutes. Now we read the
+# screen's pollMode and derive both thresholds from it:
+#
+#   live   — currently in active contact (just polled, next one is
+#            imminent). Within ~1.25 × poll interval, with a 5 s
+#            grace floor for network jitter on FAST mode.
+#   online — recently in contact, expected to check back in soon.
+#            Within ~2.5 × poll interval. A screen that misses one
+#            poll cycle still counts as online; missing two flips
+#            it to offline.
+POLL_INTERVAL_SEC: dict[str, int] = {
+    "fast":   10,
+    "normal": 60,
+    "slow":   300,
+}
+LIVE_MULTIPLIER   = 1.25   # one poll cycle + 25 % jitter
+ONLINE_MULTIPLIER = 2.5    # two cycles + half — survives one missed beat
+
+
+def _poll_interval_sec(poll_mode: str | None) -> int:
+    return POLL_INTERVAL_SEC.get(poll_mode or DEFAULT_POLL_MODE,
+                                 POLL_INTERVAL_SEC[DEFAULT_POLL_MODE])
+
+
+def _live_threshold_sec(poll_mode: str | None) -> float:
+    """Hb-age cutoff under which a screen counts as actively connected
+    right now. Adds a 5 s floor so FAST-mode jitter (10 s ✕ 1.25 = 12.5)
+    leaves room for the actual round-trip."""
+    return max(15.0, _poll_interval_sec(poll_mode) * LIVE_MULTIPLIER)
+
+
+def _online_threshold_sec(poll_mode: str | None) -> float:
+    """Hb-age cutoff under which a screen is still considered online.
+    Tolerates one fully-missed poll cycle so a single dropped request
+    doesn't briefly mark the fleet red on the dashboard."""
+    return max(30.0, _poll_interval_sec(poll_mode) * ONLINE_MULTIPLIER)
+
+
+def _presence(last_heartbeat: float | None, poll_mode: str | None,
+              now: float | None = None) -> tuple[bool, bool]:
+    """Return (live, online) for one screen given its last heartbeat
+    timestamp and its pollMode. Both False when last_heartbeat is
+    falsy — a screen with no heartbeat at all is offline by definition,
+    regardless of pollMode."""
+    if not last_heartbeat:
+        return (False, False)
+    age = (now if now is not None else time.time()) - last_heartbeat
+    return (age < _live_threshold_sec(poll_mode),
+            age < _online_threshold_sec(poll_mode))
+
 def _ensure_screen_state(device_id: str) -> dict:
     """Lazily create a per-screen state record. Caller must hold _STATE_LOCK."""
     s = _per_screen.get(device_id)
@@ -1826,10 +1880,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                 continue
                             meta = _screens.get(d) or {}
                             last_hb = meta.get("lastHeartbeat") or 0
+                            # v0.1.60: each member's online window scales
+                            # with its own pollMode — a SLOW member that
+                            # last polled 4 min ago is still considered
+                            # online while a FAST member that gap is not.
+                            _, mem_online = _presence(last_hb, st.get("pollMode"), now_ts)
                             group_members.append({
                                 "deviceId":   d,
                                 "name":       meta.get("name") or d,
-                                "online":     (now_ts - last_hb) < 15,
+                                "online":     mem_online,
                                 "screenCode": (meta.get("location") or {}).get("screenCode"),
                                 "storeId":    (meta.get("location") or {}).get("storeId"),
                                 "isSelf":     d == screen_id,
@@ -1840,8 +1899,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # fleet so the tablet's "Join a group" picker has
                     # something to render without typing. Cheap: O(N)
                     # over _per_screen, which is at most a few hundred
-                    # screens. Online count uses the same 15 s window
-                    # the member list uses, so the UI reads consistently.
+                    # screens.
+                    # v0.1.60: online cut-off scales per-member with
+                    # pollMode rather than a fixed 15 s — see _presence.
                     available_groups: dict[str, dict] = {}
                     now_ts2 = time.time()
                     for d, st in _per_screen.items():
@@ -1854,7 +1914,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             "id": gid, "memberCount": 0, "onlineCount": 0,
                         })
                         bucket["memberCount"] += 1
-                        if (now_ts2 - last_hb2) < 15:
+                        _, ag_online = _presence(last_hb2, st.get("pollMode"), now_ts2)
+                        if ag_online:
                             bucket["onlineCount"] += 1
                     available_sync_groups = sorted(
                         available_groups.values(), key=lambda g: g["id"],
@@ -1939,16 +2000,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 for device_id, s in _screens.items():
                     state = _per_screen.get(device_id, {})
                     last = s.get("lastHeartbeat") or 0
+                    # v0.1.60: presence is per-screen-pollMode now —
+                    # a SLOW (5 min) tablet doesn't go offline just
+                    # because it hasn't polled in 16 s. `live` and
+                    # `online` are both exposed so the CMS can show
+                    # "● Live" vs "● Online" vs "● Offline" if it
+                    # wants the distinction; `online` keeps its
+                    # existing semantics ("status pill should be
+                    # green") so old consumers keep working.
+                    pm = state.get("pollMode", DEFAULT_POLL_MODE)
+                    live_flag, online_flag = _presence(last, pm, now)
                     record = {
                         **s,
-                        "online":                (now - last) < 15,
+                        "online":                online_flag,
+                        "live":                  live_flag,
+                        "pollIntervalSec":       _poll_interval_sec(pm),
+                        "onlineThresholdSec":    int(_online_threshold_sec(pm)),
+                        "liveThresholdSec":      int(_live_threshold_sec(pm)),
                         "secondsSinceHeartbeat": round(now - last, 1) if last else None,
                         "currentRevision":       state.get("revision", 0),
                         "currentItems":          state.get("items", []),
                         "mixSplash":             state.get("mixSplash", True),
                         "audioOn":               state.get("audioOn", False),
-                        "pollMode":              state.get("pollMode", DEFAULT_POLL_MODE),
-                        "lowDataMode":           state.get("pollMode", DEFAULT_POLL_MODE) == "slow",
+                        "pollMode":              pm,
+                        "lowDataMode":           pm == "slow",
                         "syncGroup":             state.get("syncGroup"),
                         # The override the CMS most recently chose (or
                         # null for auto). The heartbeat carries the

@@ -18,6 +18,47 @@ Rules:
 
 ---
 
+## v0.1.60
+
+Online / Live status now scales with each screen's poll rate.
+
+### What changed
+
+The old rule "online if last heartbeat was within 15 seconds" was
+right for the default 60-second poll mode and wrong for everything
+else. A tablet in **slow** mode (5-minute poll, used on shaky wifi
+and on the legacy build by default) was marked **offline** every
+time it finished a poll cycle, even though it was working fine.
+
+Two thresholds now derive from each screen's own pollMode:
+
+| Mode   | Poll interval | Live (currently polling) | Online (still reachable) |
+|--------|---------------|--------------------------|--------------------------|
+| Fast   | 10 s          | ≤ 15 s                   | ≤ 30 s                   |
+| Normal | 60 s          | ≤ 75 s                   | ≤ 150 s                  |
+| Slow   | 300 s         | ≤ 6 min 15 s             | ≤ 12 min 30 s            |
+
+- **Live** = the tablet just checked in; the next poll is imminent.
+  Commands sent now will land on the next cycle without queueing.
+- **Online** = still reachable; missing one poll is tolerated.
+- **Offline** = past the online threshold.
+
+### Where you see it
+
+- Screens list and Dashboard stay green for slow-poll tablets that
+  are operating normally.
+- Screen detail shows three states in the "Now playing" header:
+  *Now playing* / *Connected, idle* / *Online* / *Offline*. The dot
+  pulses only while the screen is **live**.
+- Sync group member dots use the per-member rule too, so a slow
+  group member doesn't briefly flash offline between polls.
+
+The `/api/screens` payload now includes `live`, `pollIntervalSec`,
+`onlineThresholdSec`, and `liveThresholdSec` per screen so future UI
+can show the same nuance without re-deriving it client-side.
+
+---
+
 ## v0.1.59
 
 Test connection button for the Brand Asset Manager API key.
