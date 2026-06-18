@@ -959,9 +959,34 @@ const brandPalettes = {
   Ember: { bg: '#7c2d12', fg: '#fff7ed' },
   Acme: { bg: '#064e3b', fg: '#d1fae5' },
 };
-const BrandMark = ({ brand = 'DVX', size = 24, radius = 2 }) => {
+// v0.1.63: `logoUrl` (from the tm:rw index /brands feed, merged into
+// each brand record server-side) renders the real brand logo when
+// present. On a missing/null URL — or if the image fails to load —
+// we fall back to the generated letter mark so the list never shows
+// a broken-image glyph. White card behind the logo because most
+// brand marks are dark-on-transparent.
+const BrandMark = ({ brand = 'DVX', size = 24, radius = 2, logoUrl = null }) => {
   const p = brandPalettes[brand] || { bg: 'var(--ink-1)', fg: 'var(--ink-10)' };
   const letter = brand[0];
+  const [broken, setBroken] = React.useState(false);
+  if (logoUrl && !broken) {
+    return (
+      <span style={{
+        width: size, height: size, borderRadius: radius,
+        background: '#fff', flexShrink: 0,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        overflow: 'hidden', border: '1px solid var(--ink-8)',
+      }}>
+        <img
+          src={logoUrl}
+          alt={brand}
+          loading="lazy"
+          onError={() => setBroken(true)}
+          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+        />
+      </span>
+    );
+  }
   return (
     <span style={{
       width: size, height: size, borderRadius: radius,

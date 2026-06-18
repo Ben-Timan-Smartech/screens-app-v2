@@ -18,6 +18,32 @@ Rules:
 
 ---
 
+## v0.1.63
+
+Brand logos from the tm:rw index, in the CMS.
+
+The brand list now shows real brand logos instead of generated letter
+marks. The server pulls the `logoUrl` for each brand from the tm:rw
+index `/brands` feed (using the Brand Asset Manager API key from
+Settings → Integrations), caches it for 6 hours, and merges it into
+the content library. You'll see logos in the Content Library brand
+rail, Settings → Brands, and the on-tablet preview.
+
+Details:
+- Brands with no tm:rw logo (or if no API key is configured) keep the
+  generated letter mark — nothing breaks without a key.
+- tm:rw has duplicate brand rows by casing ("Anker" vs "ANKER"); the
+  server keeps the row that actually has a logo, preferring the one
+  with more live products.
+- A broken logo URL falls back to the letter mark rather than showing
+  a broken-image glyph.
+
+The player APK now receives `logoUrl` per brand too, but rendering
+logos on the tablet brand grid ships with the next release alongside
+the product selector / orphan-video work.
+
+---
+
 ## v0.1.62
 
 Fix screens registered under Test / Events stores.

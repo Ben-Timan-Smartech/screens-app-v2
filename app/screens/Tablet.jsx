@@ -193,7 +193,7 @@ const TabletBrandPicker = ({ onBack, onPick }) => {
                   display: 'flex', flexDirection: 'column', gap: 18, alignItems: 'flex-start',
                   minHeight: 190, fontFamily: 'inherit',
                 }}>
-                  <BrandMark brand={b.name} size={72} radius={14} />
+                  <BrandMark brand={b.name} size={72} radius={14} logoUrl={b.logoUrl} />
                   <div style={{ textAlign: 'left' }}>
                     <div style={{ fontSize: 20, fontWeight: 500, color: 'var(--ink-1)', letterSpacing: -0.3 }}>{b.name}</div>
                     <div style={{ fontSize: 13, color: 'var(--ink-4)', marginTop: 4 }} className="tnum">{b.videos} videos</div>

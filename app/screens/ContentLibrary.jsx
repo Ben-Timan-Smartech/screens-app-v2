@@ -647,7 +647,7 @@ const BrandNavRow = ({ brand, active, onClick }) => (
     background: active ? 'var(--ink-8)' : 'transparent',
     textAlign: 'left',
   }}>
-    <BrandMark brand={brand.name} size={18} />
+    <BrandMark brand={brand.name} size={18} logoUrl={brand.logoUrl} />
     <span style={{ flex: 1, fontSize: 13, fontWeight: active ? 500 : 400, color: active ? 'var(--ink-1)' : 'var(--ink-2)' }}>{brand.name}</span>
     <span className="tnum" style={{ fontSize: 11, color: 'var(--ink-4)' }}>{brand.videos}</span>
   </button>
