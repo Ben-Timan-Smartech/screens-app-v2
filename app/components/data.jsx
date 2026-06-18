@@ -74,6 +74,11 @@ const liveScreenToRow = (ls) => {
     playing:    currentItem?.title || null,
     brand:      currentItem?.brand || null,
     status:     ls.online ? 'online' : 'offline',
+    // v0.1.60: server now emits a stricter `live` flag — true when the
+    // tablet is currently polling actively (within ~1.25× its poll
+    // interval). Used by ScreenDetail to decide whether commands run
+    // now vs queue. Falls back to `online` for old servers.
+    live:       ls.live != null ? !!ls.live : !!ls.online,
     lastSeen:   ls.secondsSinceHeartbeat != null
                   ? (ls.secondsSinceHeartbeat < 60
                       ? `${Math.round(ls.secondsSinceHeartbeat)}s`

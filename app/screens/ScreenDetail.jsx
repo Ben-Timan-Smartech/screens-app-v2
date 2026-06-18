@@ -599,8 +599,13 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   const live = useLiveScreens();
   // The screenId in the URL is the tablet's deviceId. Look it up directly.
   const lastKnown = (live.screens || []).find((s) => s.deviceId === screenId) || null;
-  const liveScreen = lastKnown?.online ? lastKnown : null;
-  const isLive = !!liveScreen;
+  // v0.1.60: split "online" (recently heartbeated — status pill stays
+  // green) from "live" (currently polling — commands will land on the
+  // next cycle without a long queue). Old servers don't emit `live`;
+  // fall back to `online` so this code keeps working pre-upgrade.
+  const isOnline = !!lastKnown?.online;
+  const isLive = lastKnown?.live != null ? !!lastKnown.live : isOnline;
+  const liveScreen = isOnline ? lastKnown : null;
   const hasHistory = !!lastKnown;
 
   const store = MOCK_STORES.find(s => s.id === storeId) || MOCK_STORES[0];
@@ -985,8 +990,19 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
             {/* Now playing preview */}
             <div style={{ marginBottom: 22 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                <StatusDot status={isLive ? 'online' : 'offline'} pulse={isLive} />
-                <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-2)' }}>{isLive && current ? 'Now playing' : isLive ? 'Connected, idle' : 'Offline'}</span>
+                {/* v0.1.60: three states. Live = polling actively right
+                    now; Online = recently heartbeated, expected back
+                    soon; Offline = past the online threshold. The dot
+                    pulses only while live so the page reads "active"
+                    at a glance. */}
+                <StatusDot status={isOnline ? 'online' : 'offline'} pulse={isLive} />
+                <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-2)' }}>
+                  {isLive && current ? 'Now playing'
+                   : isLive            ? 'Connected, idle'
+                   : isOnline && current ? 'Last seen playing'
+                   : isOnline           ? 'Online'
+                   : 'Offline'}
+                </span>
                 <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>· last seen {statusValues.lastSeen}</span>
               </div>
               {current ? (
