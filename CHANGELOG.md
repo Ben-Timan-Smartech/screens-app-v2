@@ -18,6 +18,21 @@ Rules:
 
 ---
 
+## v0.1.61
+
+Hotfix: Brand API key connection test now uses a real endpoint.
+
+v0.1.59 pinged `/me`, which doesn't exist on the tm:rw index API —
+valid keys got past auth and then hit the router's 404. (The probe
+that informed the original code returned 403 because the test key
+was invalid; auth fired first and masked the router 404.) The test
+now hits `/counts`, which is auth-required and returns the catalogue
+roll-up. The success pill now shows the live brand / product / asset
+counts so you can see you're talking to the right catalogue at a
+glance.
+
+---
+
 ## v0.1.60
 
 Online / Live status now scales with each screen's poll rate.
