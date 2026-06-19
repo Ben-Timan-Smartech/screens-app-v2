@@ -391,9 +391,14 @@ data class PickerVideo(
     val active: Boolean,
     val assigned: Boolean,   // false → "orphan" (in Drive, unknown to tm:rw)
     val pending: Boolean,    // assigned but no streamable file yet → not pushable
+    val scope: String?,      // "brand" → Brand global; else grouped by product
 )
 
 private const val ORPHANS = "__orphans__"
+private const val BRAND_GLOBAL = "__brand_global__"
+
+private fun PickerVideo.isBrandGlobal() = assigned && scope == "brand"
+private fun PickerVideo.isProduct() = assigned && scope != "brand" && productLine != null
 
 @Composable
 private fun FilterPill(label: String, count: Int, selected: Boolean, tone: Color = Ink, onClick: () -> Unit) {
@@ -429,11 +434,12 @@ fun VideoPickerScreen(
     // v0.1.67: product-line filter. null = all, a productLine, or ORPHANS.
     var filter by remember { mutableStateOf<String?>(null) }
 
-    // Product lines come from the tm:rw asset-manager tags the server
-    // merges into the library. Orphans = videos in the Drive folder the
-    // asset manager doesn't recognise.
+    // Sections from the tm:rw asset-manager tags: brand-global (scope
+    // "brand"), products (scope family/product, grouped by line), and
+    // orphans (in the Drive folder, unknown to the asset manager).
+    val brandGlobalCount = videos.count { it.isBrandGlobal() }
     val productLines = remember(videos) {
-        videos.filter { it.assigned && it.productLine != null }
+        videos.filter { it.isProduct() }
             .groupBy { it.productLine!! }
             .map { (name, vs) -> name to vs.size }
             .sortedBy { it.first.lowercase() }
@@ -442,8 +448,9 @@ fun VideoPickerScreen(
 
     val byFilter = when (filter) {
         null -> videos
+        BRAND_GLOBAL -> videos.filter { it.isBrandGlobal() }
         ORPHANS -> videos.filter { !it.assigned }
-        else -> videos.filter { it.assigned && it.productLine == filter }
+        else -> videos.filter { it.isProduct() && it.productLine == filter }
     }
     val filtered = byFilter.filter { it.item.title.contains(query.text, ignoreCase = true) }
     val selectedCount = selectedIds.size
@@ -461,15 +468,18 @@ fun VideoPickerScreen(
         right = {
             Column(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 56.dp)) {
                 SearchBar(query, onQueryChange = { query = it }, placeholder = "Search $brand videos")
-                // Product-line filter pills — only when tm:rw has product
-                // data (or orphans) for this brand; otherwise just videos.
-                if (productLines.isNotEmpty() || orphanCount > 0) {
+                // Filter pills: All · Brand global · <product lines> ·
+                // Orphans. Only shown when tm:rw has section data.
+                if (brandGlobalCount > 0 || productLines.isNotEmpty() || orphanCount > 0) {
                     Spacer(Modifier.height(16.dp))
                     Row(
                         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         FilterPill("All", videos.size, filter == null) { filter = null }
+                        if (brandGlobalCount > 0) {
+                            FilterPill("Brand global", brandGlobalCount, filter == BRAND_GLOBAL) { filter = BRAND_GLOBAL }
+                        }
                         productLines.forEach { (name, n) ->
                             FilterPill(name, n, filter == name) { filter = name }
                         }

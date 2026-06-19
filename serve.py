@@ -582,6 +582,10 @@ def _tmrw_videos_map() -> dict:
             "active": bool(r.get("active")),
             "orientation": (r.get("orientation") or "").strip() or None,
             "resolution": (r.get("resolution") or "").strip() or None,
+            # v0.1.69: scope drives the Content Library sectioning —
+            # "brand" → Brand Global Videos; "family"/"product" → grouped
+            # under their product. Normalised to lowercase.
+            "scope": (r.get("scope") or "").strip().lower() or None,
         }
     import hashlib
     new_hash = hashlib.sha1(
@@ -632,7 +636,8 @@ def _library_with_logos() -> tuple[dict, str]:
             row = bucket["videos"].get(fnkey) if bucket else None
             if row:
                 matched.setdefault(bkey, set()).add(fnkey)
-                nv = {**v, "tmrwAssigned": True, "tmrwActive": row["active"]}
+                nv = {**v, "tmrwAssigned": True, "tmrwActive": row["active"],
+                      "tmrwScope": row.get("scope")}
                 if row.get("productName"):
                     nv["productLine"] = row["productName"]
                 new_videos.append(nv)
@@ -666,6 +671,7 @@ def _library_with_logos() -> tuple[dict, str]:
                     "screens": 0,
                     "tmrwAssigned": True,
                     "tmrwActive": row["active"],
+                    "tmrwScope": row.get("scope"),
                     "pendingSync": True,
                     "source": "tmrw",
                 })

@@ -64,6 +64,9 @@ class RemoteLibrary(
         val tmrwActive: Boolean = false,
         val tmrwAssigned: Boolean = true,
         val pendingSync: Boolean = false,
+        // v0.1.69: "brand" → Brand global videos; "family"/"product" →
+        // grouped under their product; null on orphan/fallback.
+        val tmrwScope: String? = null,
     )
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }

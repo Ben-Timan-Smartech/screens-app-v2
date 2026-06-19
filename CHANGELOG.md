@@ -18,6 +18,27 @@ Rules:
 
 ---
 
+## v0.1.69
+
+Brand content sectioned into Brand global / Products / Orphans / All (CMS + tablet).
+
+When you open a brand's content, the video set is now grouped exactly
+how the asset manager scopes it:
+
+- **All** — flat list of everything in the brand's set.
+- **Brand global videos** — brand-scope videos that apply to the whole
+  brand.
+- **Products** — a section per product line, each showing that
+  product's own + family-scope videos.
+- **Orphans** — files in `Screens/Brand Content/{brand}` that aren't
+  matched (by filename) to any assigned video in the asset manager.
+
+Same structure in the CMS Content Library rail and the on-tablet "Add
+content" picker. Driven by a new `scope` tag the server reads from the
+tm:rw `/videos` feed and merges into each video.
+
+---
+
 ## v0.1.68
 
 CMS: refresh a single brand folder.
