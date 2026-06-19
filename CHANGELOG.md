@@ -18,6 +18,24 @@ Rules:
 
 ---
 
+## v0.1.68
+
+CMS: refresh a single brand folder.
+
+Settings → Drive sync now has a **Refresh one folder** control — pick a
+brand and re-scan just its folder instead of the whole Drive tree. It
+merges the result into the library (every other brand untouched), so an
+operator who dropped a new file into one brand gets it live in seconds
+rather than waiting on a full sync.
+
+- New endpoint `POST /api/library/refresh-folder { brand }`.
+- `scan-videos.py` gains a `SCREENS_SCAN_ONLY_BRAND` scoped mode that
+  re-scans one brand and merges into `library.json` (skips the
+  change-token / full-tree logic). Works in both cloud + local modes.
+- Also refreshes the tm:rw video cache for that brand at the same time.
+
+---
+
 ## v0.1.67
 
 Tablet content picker: product lines + orphan / pending videos.

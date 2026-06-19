@@ -906,6 +906,76 @@ def _save_token(drive_id: str, token: str) -> None:
         print(f"[token] couldn't write token file: {e}", flush=True)
 
 
+def _scan_single_brand(only_brand: str, cloud_mode: bool, sticky_flags: dict) -> None:
+    """v0.1.68: re-scan ONE brand folder and merge it into the existing
+    library.json, leaving every other brand untouched. Backs the CMS
+    'Refresh this folder' action so an operator who dropped a file into a
+    single brand doesn't pay for (or wait on) a full-tree scan.
+
+    Writes library.json only — NOT real-data.jsx. The JSX seed derives
+    its brand list from the global BRANDS, which is scoped to one brand
+    here, so emitting it would drop every other brand. library.json is
+    what both clients actually poll at runtime (/api/library); the JSX
+    seed refreshes on the next full Sync now."""
+    prev_videos: list[dict] = []
+    prev_brands: list[dict] = []
+    if LIBRARY_JSON.is_file():
+        try:
+            prev = json.loads(LIBRARY_JSON.read_text(encoding="utf-8"))
+            prev_videos = prev.get("videos") or []
+            prev_brands = prev.get("brands") or []
+        except Exception as e:
+            print(f"[folder] couldn't read existing library.json: {e}", flush=True)
+
+    all_brands = discover_brands_drive(DRIVE_BRANDS_FOLDER_ID) if cloud_mode else discover_brands()
+    key = only_brand.strip().lower()
+    target = next(
+        (b for b in all_brands if b["name"].lower() == key or b["id"].lower() == key),
+        None,
+    )
+    if target is None:
+        print(f"[folder] brand '{only_brand}' not found among {len(all_brands)} folder(s) — nothing to do", flush=True)
+        return
+
+    BRANDS.clear()
+    BRANDS.append(target)
+    new_videos = collect_videos_drive() if cloud_mode else collect_videos()
+    print(f"[folder] re-scanned '{target['name']}': {len(new_videos)} video(s)", flush=True)
+
+    # Re-apply per-video sticky flags (defaultUnmute, etc.).
+    if sticky_flags:
+        for v in new_videos:
+            kept = sticky_flags.get(v.get("id"))
+            if kept:
+                for k, val in kept.items():
+                    v[k] = val
+
+    # Merge: drop this brand's old videos, keep everyone else's.
+    other_videos = [v for v in prev_videos if v.get("brand") != target["name"]]
+    merged_videos = other_videos + new_videos
+
+    # Brand records: keep others, refresh this one's count (drop if empty).
+    other_brands = [
+        b for b in prev_brands
+        if (b.get("name") or "").lower() != target["name"].lower()
+    ]
+    if new_videos:
+        other_brands.append({
+            "id": target["id"],
+            "name": target["name"],
+            "videos": len(new_videos),
+            "products": target.get("products", []),
+        })
+    merged_brands = sorted(other_brands, key=lambda b: (b.get("name") or "").lower())
+
+    library = {"brands": merged_brands, "videos": merged_videos}
+    LIBRARY_JSON.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LIBRARY_JSON.with_suffix(LIBRARY_JSON.suffix + ".tmp")
+    tmp.write_text(json.dumps(library, indent=2), encoding="utf-8")
+    tmp.replace(LIBRARY_JSON)
+    print(f"[folder] merged '{target['name']}' — library now {len(merged_videos)} video(s) across {len(merged_brands)} brand(s)", flush=True)
+
+
 def main():
     # Replace the placeholder list with real folder discovery on every run.
     BRANDS.clear()
@@ -930,6 +1000,16 @@ def main():
             print(f"Couldn't read previous library.json for sticky flags: {e}", flush=True)
 
     cloud_mode = bool(DRIVE_BRANDS_FOLDER_ID and drive_client and drive_client.is_configured())
+
+    # v0.1.68: single-folder refresh. When SCREENS_SCAN_ONLY_BRAND is set
+    # (CMS "Refresh this folder"), re-scan just that brand and merge —
+    # skip the full-tree walk + change-token logic entirely.
+    only_brand = (os.environ.get("SCREENS_SCAN_ONLY_BRAND") or "").strip()
+    if only_brand:
+        print(f"Single-folder refresh: '{only_brand}' (cloud={cloud_mode})", flush=True)
+        _scan_single_brand(only_brand, cloud_mode, sticky_flags)
+        return
+
     if cloud_mode:
         print(f"Cloud mode: scanning Drive folder {DRIVE_BRANDS_FOLDER_ID}", flush=True)
         # v0.1.46 Phase 2: change-token short-circuit. If we already

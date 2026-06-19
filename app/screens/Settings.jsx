@@ -566,6 +566,10 @@ const DriveSyncTab = () => {
   // "syncing Drive" state so the buttons reflect the right action.
   // Pulling library.json is fast (<1 s); a full sync can take minutes.
   const [refreshingDir, setRefreshingDir] = React.useState(false);
+  // v0.1.68: per-folder refresh — pick one brand and re-scan just its
+  // folder instead of the whole tree.
+  const [folderBrand, setFolderBrand] = React.useState('');
+  const [folderBusy, setFolderBusy] = React.useState(false);
   const refresh = React.useCallback(async () => {
     try {
       const r = await fetch('/api/library/info', { cache: 'no-store' });
@@ -590,6 +594,27 @@ const DriveSyncTab = () => {
       showToast(`Sync failed: ${e.message}`, 'err');
     } finally {
       setTimeout(() => setBusy(false), 1500);
+      refresh();
+    }
+  };
+
+  // v0.1.68: re-scan a single brand folder + merge. Faster than a full
+  // sync when only one brand's content changed.
+  const refreshFolder = async () => {
+    if (!folderBrand || folderBusy || info?.running) return;
+    setFolderBusy(true);
+    try {
+      const r = await fetch('/api/library/refresh-folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: folderBrand }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      showToast(`Refreshing '${folderBrand}' folder…`, 'info');
+    } catch (e) {
+      showToast(`Folder refresh failed: ${e.message}`, 'err');
+    } finally {
+      setTimeout(() => setFolderBusy(false), 1500);
       refresh();
     }
   };
@@ -707,6 +732,34 @@ const DriveSyncTab = () => {
             </div>
           </div>
         )}
+        {/* v0.1.68: refresh a single brand folder. Faster than a full
+            sync when only one brand's content changed. */}
+        <SettingsRow
+          label="Refresh one folder"
+          sub="Re-scan a single brand's folder and merge it in — skips the full-tree walk.">
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <select
+              value={folderBrand}
+              onChange={(e) => setFolderBrand(e.target.value)}
+              style={{
+                height: 28, padding: '0 10px', border: 'var(--border-strong)', borderRadius: 2,
+                fontSize: 12, fontFamily: 'inherit', color: 'var(--ink-1)', background: 'var(--ink-10)',
+                cursor: 'pointer', minWidth: 160,
+              }}>
+              <option value="">Pick a brand…</option>
+              {(window.MOCK_BRANDS || []).map(b => (
+                <option key={b.id} value={b.name}>{b.name}</option>
+              ))}
+            </select>
+            <Button
+              variant="secondary" size="sm"
+              icon={<Icon.sync size={12} />}
+              disabled={!folderBrand || folderBusy || running}
+              onClick={refreshFolder}>
+              {folderBusy ? 'Refreshing…' : 'Refresh folder'}
+            </Button>
+          </div>
+        </SettingsRow>
         <SettingsRow
           label="Auto-sync"
           sub={cloud

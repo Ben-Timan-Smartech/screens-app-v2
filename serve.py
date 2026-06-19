@@ -1290,7 +1290,7 @@ _sync_state: dict = {
 _PROGRESS_RE = re.compile(r"^PROGRESS:\s+(\d+)/(\d+)\s+(.*)$")
 
 
-def run_library_scan(force_full: bool = False) -> dict:
+def run_library_scan(force_full: bool = False, only_brand: str | None = None) -> dict:
     """Synchronously re-run scan-videos.py. Streams progress lines into
     _sync_state so the Drive Sync UI can render a live count.
 
@@ -1299,6 +1299,9 @@ def run_library_scan(force_full: bool = False) -> dict:
     Auto-sync (daily timer + initial-on-empty) defaults to False — if
     Drive reports zero changes since the last cursor, the scan exits
     in ~1 s without re-walking the inventory.
+
+    v0.1.68: pass `only_brand` to re-scan just one brand folder and
+    merge it into the existing library (CMS "Refresh this folder").
     """
     with _SYNC_LOCK:
         if _sync_state["running"]:
@@ -1311,10 +1314,12 @@ def run_library_scan(force_full: bool = False) -> dict:
     tail: list[str] = []        # last few lines for error reporting
     try:
         scan_script = PROJECT / "scan-videos.py"
-        print(f"[sync] launching {scan_script} (force_full={force_full})", file=sys.stderr, flush=True)
+        print(f"[sync] launching {scan_script} (force_full={force_full}, only_brand={only_brand!r})", file=sys.stderr, flush=True)
         env = os.environ.copy()
         if force_full:
             env["SCREENS_FORCE_FULL_SCAN"] = "1"
+        if only_brand:
+            env["SCREENS_SCAN_ONLY_BRAND"] = only_brand
         proc = subprocess.Popen(
             [sys.executable, "-u", str(scan_script)],   # -u = unbuffered stdout
             cwd=str(PROJECT),
@@ -2993,6 +2998,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 icon="sync",
             )
             self._send_json({"ok": True, "queued": True})
+            return
+
+        # v0.1.68: refresh a single brand folder. Body: { brand }.
+        # Re-scans just that folder and merges into library.json,
+        # skipping the full-tree walk — fast when one brand changed.
+        if path == "/api/library/refresh-folder":
+            if self._require_perm("library.sync") is None:
+                return
+            brand = (body.get("brand") or "").strip()
+            if not brand:
+                self._send_json({"error": "missing_brand"}, status=400); return
+            _reset_tmrw_caches()   # the brand's tm:rw videos may have changed too
+            threading.Thread(
+                target=run_library_scan,
+                kwargs={"force_full": True, "only_brand": brand},
+                daemon=True,
+            ).start()
+            _log_activity(
+                kind="sync",
+                text=f"Refreshing folder '{brand}'",
+                icon="sync",
+            )
+            self._send_json({"ok": True, "queued": True, "brand": brand})
             return
 
         # ── Custom stores (v0.1.38) ──────────────────────────────
