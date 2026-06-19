@@ -218,6 +218,12 @@ dependencies {
     implementation("androidx.media3:media3-datasource-okhttp:$media3")
     implementation("androidx.media3:media3-common:$media3")
 
+    // Coil — async image loading for tm:rw brand logos in the tablet
+    // brand picker (v0.1.72). Uses the app's OkHttp under the hood; 2.6.0
+    // matches Compose BOM 2024.04 + Kotlin 2.0 and supports minSdk 21
+    // (so the legacy flavor's minSdk 23 is covered).
+    implementation("io.coil-kt:coil-compose:2.6.0")
+
     // Networking — Retrofit over OkHttp with kotlinx.serialization
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")

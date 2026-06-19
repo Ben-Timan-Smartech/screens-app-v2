@@ -18,6 +18,31 @@ Rules:
 
 ---
 
+## v0.1.72
+
+A smoother, smarter tablet updater — and brand logos in the picker.
+
+**Updates no longer download twice.** If a tablet already pulled the new
+APK but the install didn't finish (e.g. the permission prompt got in the
+way), tapping Update again now **reuses the downloaded file** instead of
+re-downloading the whole thing.
+
+**The install permission is asked up front.** Before downloading, the
+tablet checks whether "Install unknown apps" is allowed for Screens — if
+not, it opens that setting straightaway with a clear message, so you grant
+it once and the update goes through on the next tap (no wasted download).
+
+**The update dialog now shows more:** which version you're on vs the one
+being installed, a live **download speed and time-remaining** readout, and
+a "You're on the latest version" confirmation when you check and there's
+nothing new.
+
+**Tablet brand picker shows real logos.** The brand grid now renders each
+brand's logo (from the asset manager), falling back to the lettered tile
+when a logo isn't available — matching the CMS.
+
+---
+
 ## v0.1.71
 
 A cleaner columned list for picking videos — in the CMS **and** on the tablet.
