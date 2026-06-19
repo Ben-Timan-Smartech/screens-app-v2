@@ -333,6 +333,54 @@ class PlayerRepository(
     }
 
     /**
+     * v0.1.74: ship the ENTIRE current log buffer (all levels) on demand,
+     * in response to the CMS "Request logs" (sendLogs) command. The
+     * heartbeat shipper only sends W+ since a cursor; this uploads the
+     * full recent buffer so an operator can pull a screen's latest logs
+     * without waiting for a warning to occur. Reuses POST /api/logs, so
+     * the entries land in the same per-device stream the CMS already
+     * reads back via GET /api/logs?deviceId=.
+     */
+    suspend fun shipFullLogSnapshot() {
+        val base = store.liveServerUrl.first()?.trimEnd('/') ?: run {
+            LogBuffer.w(TAG, "shipFullLogSnapshot skipped — no liveServerUrl set"); return
+        }
+        val deviceId = store.ensureDeviceId()
+        val entries = LogBuffer.snapshot()
+        if (entries.isEmpty()) return
+        val entriesJson = entries.joinToString(",") { e ->
+            buildString {
+                append("{")
+                append("\"time\":${e.time},")
+                append("\"level\":${q(e.level.name)},")
+                append("\"tag\":${q(e.tag)},")
+                append("\"message\":${q(e.message)}")
+                if (e.cause != null) append(",\"cause\":${q(e.cause)}")
+                append("}")
+            }
+        }
+        val body = buildString {
+            append("{")
+            append("\"deviceId\":${q(deviceId)},")
+            append("\"appVersion\":${q(com.smartech.screens.BuildConfig.VERSION_NAME)},")
+            append("\"entries\":[$entriesJson]")
+            append("}")
+        }
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/logs")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (r.isSuccessful) LogBuffer.i(TAG, "Shipped ${entries.size} log entries on request")
+                    else LogBuffer.w(TAG, "Log snapshot POST HTTP ${r.code}")
+                }
+            }.onFailure { LogBuffer.w(TAG, "Log snapshot ship failed: ${it.message}") }
+        }
+    }
+
+    /**
      * v0.1.21: ship any crash reports the CrashReporter spooled to
      * disk on the previous run. Runs once on launch, after the
      * server URL is known. Each report is POSTed to /api/crashes;
@@ -1591,6 +1639,12 @@ class PlayerRepository(
                 // missed gets re-applied on the very next tick.
                 LogBuffer.i(TAG, "Refresh command — kicking next poll")
                 refreshNow()
+            }
+            "sendLogs" -> {
+                // CMS "Request logs" — upload the full current log buffer
+                // so the operator can read this screen's latest logs.
+                LogBuffer.i(TAG, "Send-logs command — uploading current log buffer")
+                shipFullLogSnapshot()
             }
             else -> LogBuffer.w(TAG, "Unknown command: $command")
         }

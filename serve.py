@@ -3226,7 +3226,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with _STATE_LOCK:
                 if action == "command":
                     cmd = body.get("command")
-                    if cmd not in ("reboot", "clearCache", "unregister", "update", "refresh"):
+                    if cmd not in ("reboot", "clearCache", "unregister", "update", "refresh", "sendLogs"):
                         self.send_error(400, "Unknown command"); return
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
 
@@ -3265,6 +3265,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "clearCache": "Cleared cache on",
                         "update":     "Triggered update on",
                         "refresh":    "Forced refresh on",
+                        "sendLogs":   "Requested logs from",
                     }[cmd]
                     _log_activity(
                         kind="command",
@@ -3274,6 +3275,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             "clearCache": "trash",
                             "update":     "download",
                             "refresh":    "refresh",
+                            "sendLogs":   "list",
                         }[cmd],
                         target=device_id,
                     )

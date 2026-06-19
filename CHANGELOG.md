@@ -18,6 +18,23 @@ Rules:
 
 ---
 
+## v0.1.74
+
+Pull a screen's latest logs on demand, right from the CMS.
+
+Open a screen, find the **Device logs** card, and hit **View logs** — you'll
+see the recent log entries the screen has sent. Tap **Request latest** and
+the screen uploads its full current log buffer (all levels, not just
+warnings), which appears in the viewer a few seconds later. Filter by level
+(Errors / Warnings / Info / Debug) to zero in on a problem. Handy for
+troubleshooting a misbehaving screen without being on-site or plugging in
+a cable.
+
+(Screens need to be on v0.1.74 for "Request latest" to pull a fresh buffer;
+the viewer shows already-collected logs from any version.)
+
+---
+
 ## v0.1.73
 
 Screens now self-heal a corrupted video instead of looping an error on it.

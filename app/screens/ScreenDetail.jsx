@@ -594,6 +594,146 @@ const formatSecondsAgo = (s) => {
   return `${Math.round(s / 3600)} hr ago`;
 };
 
+// v0.1.74: device-logs viewer. Shows the per-device log stream the server
+// already stores (GET /api/logs?deviceId=) and lets the operator request
+// the screen's latest FULL buffer on demand (the `sendLogs` command),
+// polling a few times so the freshly-uploaded entries appear by themselves.
+const LOG_LEVEL_TONE = {
+  E: { fg: '#EF4444', bg: 'rgba(239,68,68,0.12)' },
+  W: { fg: 'var(--warn)', bg: 'var(--warn-bg)' },
+  I: { fg: 'var(--ink-3)', bg: 'var(--ink-8)' },
+  D: { fg: 'var(--ink-4)', bg: 'var(--ink-9)' },
+};
+
+const LogsModal = ({ deviceId, screenName, isLive, canEdit, onClose }) => {
+  const [entries, setEntries] = React.useState(null);   // null = loading
+  const [err, setErr] = React.useState(null);
+  const [requesting, setRequesting] = React.useState(false);
+  const [level, setLevel] = React.useState('all');
+  const pollRef = React.useRef(null);
+
+  const load = React.useCallback(async () => {
+    try {
+      const res = await fetch(`/api/logs?deviceId=${encodeURIComponent(deviceId)}&limit=400`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setEntries(data.entries || []);
+      setErr(null);
+    } catch (e) { setErr(e.message); setEntries([]); }
+  }, [deviceId]);
+
+  React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [onClose]);
+
+  const requestFresh = async () => {
+    if (requesting) return;
+    setRequesting(true);
+    try {
+      await sendScreenCommand(deviceId, 'sendLogs');
+      showToast(
+        isLive
+          ? 'Requested — the screen uploads its logs within a few seconds'
+          : 'Requested — logs upload when the screen reconnects',
+        'ok',
+      );
+      // Poll a handful of times so the freshly-uploaded buffer shows up
+      // without the operator hitting Refresh.
+      if (pollRef.current) clearInterval(pollRef.current);
+      let tries = 0;
+      pollRef.current = setInterval(async () => {
+        tries++;
+        await load();
+        if (tries >= 8) { clearInterval(pollRef.current); pollRef.current = null; }
+      }, 2500);
+    } catch (e) {
+      showToast(`Request failed: ${e.message}`, 'err');
+    } finally {
+      setRequesting(false);
+    }
+  };
+
+  const fmtTime = (ms) => {
+    if (!ms) return '—';
+    try {
+      return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch { return '—'; }
+  };
+
+  const shown = (entries || []).filter((e) => level === 'all' || (e.level || '').toUpperCase() === level);
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, zIndex: 40,
+      background: 'rgba(9,9,11,0.5)', backdropFilter: 'blur(2px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: 'min(820px, 94%)', height: 'min(640px, 88%)',
+        background: 'var(--ink-10)', border: 'var(--border)', borderRadius: 14,
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        boxShadow: '0 24px 64px rgba(9,9,11,0.24)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 16px', borderBottom: 'var(--border)' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>Device logs</div>
+            <div style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{screenName || deviceId}</div>
+          </div>
+          <Button variant="secondary" size="sm" icon={<Icon.refresh size={12} />} onClick={load}>Refresh</Button>
+          <Button variant="primary" size="sm" icon={<Icon.download size={12} />} disabled={!canEdit || requesting} onClick={requestFresh}
+            title="Tells the screen to upload its current full log buffer now">
+            {requesting ? 'Requesting…' : 'Request latest'}
+          </Button>
+          <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} />
+        </div>
+        <div style={{ display: 'flex', gap: 6, padding: '8px 16px', borderBottom: 'var(--border-faint)', alignItems: 'center' }}>
+          {['all', 'E', 'W', 'I', 'D'].map((l) => (
+            <button key={l} onClick={() => setLevel(l)} style={{
+              fontSize: 11, padding: '3px 9px', borderRadius: 999,
+              border: level === l ? 'none' : 'var(--border)',
+              background: level === l ? 'var(--ink-0)' : 'transparent',
+              color: level === l ? 'var(--on-accent)' : 'var(--ink-3)', cursor: 'pointer',
+            }}>{l === 'all' ? 'All' : l}</button>
+          ))}
+          <span style={{ flex: 1 }} />
+          <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>{shown.length} {shown.length === 1 ? 'entry' : 'entries'}</span>
+        </div>
+        <div style={{ flex: 1, overflow: 'auto', padding: '2px 0', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>
+          {entries === null ? (
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--ink-4)' }}>Loading…</div>
+          ) : err ? (
+            <div style={{ padding: 24, textAlign: 'center', color: '#EF4444' }}>Couldn't load logs: {err}</div>
+          ) : shown.length === 0 ? (
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--ink-4)', lineHeight: 1.5 }}>
+              No logs stored for this screen yet.
+              {canEdit && <><br />Tap <span style={{ color: 'var(--ink-2)' }}>Request latest</span> to pull its current buffer.</>}
+            </div>
+          ) : shown.map((e, i) => {
+            const lv = (e.level || 'I').toUpperCase();
+            const tone = LOG_LEVEL_TONE[lv] || LOG_LEVEL_TONE.I;
+            return (
+              <div key={i} style={{ display: 'flex', gap: 8, padding: '4px 16px', borderBottom: 'var(--border-faint)', alignItems: 'baseline' }}>
+                <span className="tnum" style={{ color: 'var(--ink-4)', flexShrink: 0 }}>{fmtTime(e.time)}</span>
+                <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 600, color: tone.fg, background: tone.bg, padding: '0 5px', borderRadius: 3 }}>{lv}</span>
+                <span style={{ flexShrink: 0, color: 'var(--ink-3)' }}>{e.tag}</span>
+                <span style={{ color: 'var(--ink-1)', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
+                  {e.message}{e.cause ? ` — ${e.cause}` : ''}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   const vp = useViewport();
   const live = useLiveScreens();
@@ -899,6 +1039,8 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   // page fits one viewport. Update / Reboot / Clear cache / Unregister
   // are needed rarely; the four-button stack was always-on previously.
   const [dangerOpen, setDangerOpen] = React.useState(false);
+  // v0.1.74: device-logs viewer modal.
+  const [logsOpen, setLogsOpen] = React.useState(false);
   // Set when the user ticks a sync-group candidate that has different
   // content from this screen. The modal asks whether to push this
   // screen's playlist to the candidate before joining; null = closed.
@@ -1232,6 +1374,24 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               />
             )}
 
+            {/* v0.1.74: device logs — request the tablet's latest log
+                buffer on demand + read what it's already shipped. */}
+            <Card padding={14}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Device logs</div>
+                  <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>
+                    Read recent logs, or pull this screen's latest buffer for troubleshooting.
+                  </div>
+                </div>
+                <Button variant="secondary" size="sm" icon={<Icon.list size={12} />}
+                  disabled={!targetDeviceId}
+                  onClick={() => setLogsOpen(true)}>
+                  View logs
+                </Button>
+              </div>
+            </Card>
+
             {/* v0.1.57: Schedule "Coming soon" card removed — the
                 Schedules sidebar is already hidden, no need to tease
                 the feature on every screen detail page.
@@ -1293,6 +1453,15 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
           </div>
         </div>
       </div>
+      {logsOpen && (
+        <LogsModal
+          deviceId={targetDeviceId}
+          screenName={liveScreen?.name || lastKnown?.name}
+          isLive={isLive}
+          canEdit={canEdit}
+          onClose={() => setLogsOpen(false)}
+        />
+      )}
     </AppShell>
   );
 };
