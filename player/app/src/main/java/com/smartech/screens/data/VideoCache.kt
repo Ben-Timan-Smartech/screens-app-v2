@@ -61,6 +61,21 @@ class VideoCache(
     fun has(videoId: String): Boolean = file(videoId).exists() && file(videoId).length() > 0
 
     /**
+     * v0.1.73: purge a cached video (completed + any partial) so the next
+     * [ensure] re-downloads a clean copy. Used by [PlaybackWatchdog] when
+     * ExoPlayer reports a corrupt/truncated source file
+     * (ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE / container-malformed) —
+     * the bytes on disk are bad, and prepare() would just re-read them.
+     */
+    fun invalidate(videoId: String) {
+        val mp4 = file(videoId)
+        val part = File(root, "$videoId.mp4.part")
+        val deleted = mp4.delete()
+        part.delete()
+        LogBuffer.i(TAG, "Invalidated cached video $videoId (mp4 removed=$deleted)")
+    }
+
+    /**
      * Ensure a video is present locally. If already cached, returns immediately.
      * If [onProgress] is supplied, emits `(bytesDownloaded, totalBytesOrNull)`
      * as bytes arrive. `total` may be null if the server didn't send a

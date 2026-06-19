@@ -148,6 +148,9 @@ class MainActivity : ComponentActivity() {
             onKick = { repo.refreshPlaylist() },
             onRestart = { repo.scheduleSelfRestart() },
             isOnSplash = { controller.isOnSplash() },
+            // v0.1.73: a corrupt/truncated cached video → purge it and
+            // re-download a clean copy instead of looping on the bad file.
+            onBadSource = { mediaId -> repo.invalidateCachedVideo(mediaId) },
             // v0.1.49: feed the operator-readable label of the
             // currently-playing item into every watchdog log line.
             // ExoPlayer is single-threaded — currentMediaItem must

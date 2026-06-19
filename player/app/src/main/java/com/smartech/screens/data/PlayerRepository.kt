@@ -153,6 +153,26 @@ class PlayerRepository(
         }
     }
 
+    /**
+     * v0.1.73: drop a corrupt cached video and re-pull a clean copy.
+     * Called by the watchdog when ExoPlayer reports a bad source file
+     * (truncated/corrupt MP4 → ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE).
+     * Purges the bytes, immediately re-publishes WITHOUT the video so the
+     * player stops hammering the bad file (publish() drops anything not
+     * in the cache), then re-downloads it on the live loop — once it
+     * lands clean it rejoins the rotation on the next refresh.
+     */
+    fun invalidateCachedVideo(videoId: String) {
+        liveScope.launch {
+            cache.invalidate(videoId)
+            _downloadFailures.update { it - videoId }
+            // Re-publish current playlist sans the now-missing file.
+            lastPlaylist?.let { publish(it) }
+            runCatching { refreshPlaylist() }
+                .onFailure { LogBuffer.w(TAG, "Re-pull after invalidate($videoId) failed: ${it.message}") }
+        }
+    }
+
     private fun publish(playlist: PlaylistResponse) {
         val local = playlist.items
             .mapNotNull { v -> if (cache.has(v.id)) LocalVideo(v, cache.file(v.id)) else null }
