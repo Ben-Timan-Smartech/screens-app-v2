@@ -207,6 +207,7 @@ fun StaffOverlay(
                                 active = rv.tmrwActive,
                                 assigned = rv.tmrwAssigned,
                                 pending = rv.pendingSync || rv.mediaUrl.isNullOrBlank(),
+                                scope = rv.tmrwScope,
                             )
                         }
                 } else {
@@ -217,6 +218,7 @@ fun StaffOverlay(
                             PickerVideo(
                                 item = it, productLine = it.product,
                                 active = true, assigned = true, pending = false,
+                                scope = null,
                             )
                         }
                         ?: emptyList()

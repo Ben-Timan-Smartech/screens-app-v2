@@ -1026,17 +1026,26 @@ const ContentLibrary = () => {
     : MOCK_VIDEOS.filter(v => v.brand === brand?.name);
   const totalCount = MOCK_VIDEOS.length;
 
-  // v0.1.64: product lines for the current brand, derived from the
-  // tm:rw assigned-video tags the server merges into each record
-  // (productLine + tmrwActive). A video is an "orphan" when tm:rw
-  // doesn't recognise it (tmrwAssigned === false). Only meaningful
-  // inside a single brand — the rail hides products in "All brands".
+  // v0.1.69: the brand's video set is sectioned by the tm:rw tags the
+  // server merges into each record (tmrwScope / productLine / tmrwActive
+  // / tmrwAssigned):
+  //   • Brand global — scope "brand": apply to the whole brand.
+  //   • Products      — scope "family"/"product", grouped by productLine.
+  //   • Orphans       — in Screens/Brand Content/{brand} but unknown to
+  //                     the asset manager (tmrwAssigned === false).
+  //   • All           — the flat set.
+  // Only meaningful inside one brand; the rail hides sections in "All
+  // brands".
   const ORPHAN = '__orphans__';
+  const BRAND_GLOBAL = '__brand_global__';
+  const isBrandGlobal = (v) => v.tmrwAssigned !== false && v.tmrwScope === 'brand';
+  const isProductVid = (v) => v.tmrwAssigned !== false && v.tmrwScope !== 'brand' && !!v.productLine;
+  const brandGlobalCount = isAll ? 0 : brandVideos.filter(isBrandGlobal).length;
   const productLines = React.useMemo(() => {
     if (isAll) return [];
     const byLine = new Map();
     for (const v of brandVideos) {
-      if (v.tmrwAssigned === false || !v.productLine) continue;
+      if (!isProductVid(v)) continue;
       const cur = byLine.get(v.productLine) || { name: v.productLine, count: 0, active: 0 };
       cur.count += 1;
       if (v.tmrwActive) cur.active += 1;
@@ -1054,25 +1063,23 @@ const ContentLibrary = () => {
   const visibleVideos = React.useMemo(() => {
     if (isAll || !activeProduct) return brandVideos;
     if (activeProduct === ORPHAN) return brandVideos.filter(v => v.tmrwAssigned === false);
-    return brandVideos.filter(v => v.tmrwAssigned !== false && v.productLine === activeProduct);
+    if (activeProduct === BRAND_GLOBAL) return brandVideos.filter(isBrandGlobal);
+    return brandVideos.filter(v => isProductVid(v) && v.productLine === activeProduct);
   }, [brandVideos, isAll, activeProduct]);
 
-  // Picking a product line filters to it AND auto-selects its active
-  // videos (the operator's most common next step is to push them).
-  // Picking Orphans or All just filters. Clears prior selection so the
-  // tick state reflects the line you're looking at.
+  // Picking a product (or Brand global) filters to it AND auto-selects
+  // its active, pushable videos. Picking Orphans / All just filters.
   const pickProduct = (line) => {
     setActiveProduct(line);
     setBrandsOpenMobile(false);
     if (line && line !== ORPHAN) {
+      const match = line === BRAND_GLOBAL
+        ? isBrandGlobal
+        : (v) => isProductVid(v) && v.productLine === line;
       const next = new Set();
       for (const v of brandVideos) {
-        // Auto-select active videos for the line — but skip pendingSync
-        // ones (assigned in tm:rw but not yet in the Drive folder, so
-        // there's no streamable file to push).
-        if (v.tmrwAssigned !== false && v.productLine === line && v.tmrwActive && !v.pendingSync) {
-          next.add(v.id);
-        }
+        // Skip pendingSync — assigned in tm:rw but no streamable file yet.
+        if (match(v) && v.tmrwActive && !v.pendingSync) next.add(v.id);
       }
       setSelected(next);
     }
@@ -1174,17 +1181,28 @@ const ContentLibrary = () => {
           </div>
           {brand && (
             <>
-              {/* v0.1.64: product lines come from tm:rw assigned-video
-                  tags, not the old hardcoded brand.products list.
-                  Clicking a line filters + auto-selects its active
-                  videos. Orphans = Drive videos tm:rw doesn't know. */}
-              <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '2px 10px 8px' }}>Products · {brand.name}</div>
+              {/* v0.1.69: brand content sectioned as Brand global /
+                  Products (per product line) / Orphans / All — all
+                  derived from the tm:rw asset-manager tags the server
+                  merges into each video. */}
+              <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '2px 10px 8px' }}>{brand.name}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                 <ProductNavRow
-                  label="All products" count={brandVideos.length}
+                  label="All" count={brandVideos.length}
                   active={activeProduct === null}
                   onClick={() => { setActiveProduct(null); setBrandsOpenMobile(false); }}
                 />
+                {brandGlobalCount > 0 && (
+                  <ProductNavRow
+                    label="Brand global videos" count={brandGlobalCount}
+                    title="Brand-scope videos — apply to the whole brand"
+                    active={activeProduct === BRAND_GLOBAL}
+                    onClick={() => pickProduct(BRAND_GLOBAL)}
+                  />
+                )}
+                {productLines.length > 0 && (
+                  <div style={{ fontSize: 10, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '10px 10px 4px' }}>Products</div>
+                )}
                 {productLines.map(p => (
                   <ProductNavRow
                     key={p.name} label={p.name} count={p.count}
@@ -1196,7 +1214,7 @@ const ContentLibrary = () => {
                 {orphanCount > 0 && (
                   <ProductNavRow
                     label="Orphans" count={orphanCount} tone="warn"
-                    title="In the Drive folder but not registered in the asset manager"
+                    title="Files in Screens/Brand Content that aren't matched to any assigned video"
                     active={activeProduct === ORPHAN}
                     onClick={() => pickProduct(ORPHAN)}
                   />
