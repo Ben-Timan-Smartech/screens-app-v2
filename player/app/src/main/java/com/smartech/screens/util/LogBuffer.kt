@@ -95,6 +95,14 @@ object LogBuffer {
         return newest to out
     }
 
+    /** v0.1.74: full current buffer in chronological order (oldest first).
+     *  Used by the CMS "Request logs" command to upload everything the
+     *  tablet currently holds — all levels, not just the W+ the heartbeat
+     *  shipper sends — so an operator can pull a screen's latest logs on
+     *  demand. */
+    @Synchronized
+    fun snapshot(): List<Entry> = deque.toList()
+
     @Synchronized
     fun clear() {
         deque.clear()
