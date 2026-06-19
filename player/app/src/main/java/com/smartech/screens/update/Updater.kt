@@ -72,14 +72,28 @@ class Updater(
         .build()
     sealed class State {
         data object Idle : State()
-        data object Checking : State()
-        data class UpToDate(val versionName: String) : State()
+        // v0.1.72: `manual` marks a user-triggered check (CMS command /
+        // staff button) so the overlay can show "Checking…" / "You're on
+        // the latest" feedback. Background ticks leave it false and paint
+        // nothing, avoiding flicker over the player.
+        data class Checking(val manual: Boolean = false) : State()
+        data class UpToDate(val versionName: String, val manual: Boolean = false) : State()
         data class Downloading(
             val versionName: String,
             val bytes: Long,
             val totalBytes: Long?,
+            // v0.1.72: rolling throughput (bytes/sec) for the progress
+            // dialog's speed + ETA readout. Null until the first chunk.
+            val bytesPerSec: Long? = null,
         ) : State() {
             val fraction: Float? get() = totalBytes?.let { if (it > 0) (bytes.toFloat() / it).coerceIn(0f, 1f) else null }
+            /** Seconds remaining at the current rate, or null if unknown. */
+            val etaSeconds: Long? get() {
+                val total = totalBytes ?: return null
+                val rate = bytesPerSec ?: return null
+                if (rate <= 0L) return null
+                return (total - bytes).coerceAtLeast(0L) / rate
+            }
         }
         data class Installing(val versionName: String) : State()
         data class Failed(val message: String) : State()
@@ -165,7 +179,7 @@ class Updater(
      */
     suspend fun checkAndUpdate(surfaceFailures: Boolean = true) {
         try {
-            _state.value = State.Checking
+            _state.value = State.Checking(manual = surfaceFailures)
             val base = backendBaseUrlProvider()
             if (base.isNullOrBlank()) {
                 LogBuffer.w(TAG, "No backend URL — can't check for updates")
@@ -181,7 +195,7 @@ class Updater(
             val currentCode = BuildConfig.VERSION_CODE
             if (latest.versionCode <= currentCode) {
                 LogBuffer.i(TAG, "Up to date: server v${latest.versionName} (code ${latest.versionCode}) vs local ${BuildConfig.VERSION_NAME} (code $currentCode)")
-                _state.value = State.UpToDate(BuildConfig.VERSION_NAME)
+                _state.value = State.UpToDate(BuildConfig.VERSION_NAME, manual = surfaceFailures)
                 return
             }
             // v0.1.40: pick the APK that matches this build's flavor.
@@ -208,6 +222,19 @@ class Updater(
                     "Release ${latest.versionName} has no APK URL"
                 if (surfaceFailures) _state.value = State.Failed(msg)
                 else _state.value = State.Idle
+                return
+            }
+            // v0.1.72: gate on the install permission BEFORE downloading.
+            // Pulling 4 MB only to dead-end at the "install unknown apps"
+            // wall — then re-pulling on the retry — was the "downloads
+            // twice" bug. Prompt now; the operator enables it and re-runs.
+            if (!canInstallPackages()) {
+                LogBuffer.w(TAG, "Install-unknown-apps not granted — prompting before download")
+                openInstallSettings()
+                _state.value = State.Failed(
+                    "Allow \"Install unknown apps\" for Screens (Settings just opened), " +
+                        "then tap Update again."
+                )
                 return
             }
             LogBuffer.i(TAG, "Update available: ${latest.versionName} (code ${latest.versionCode}) flavor=${BuildConfig.FLAVOR} — downloading")
@@ -287,6 +314,17 @@ class Updater(
         dir.listFiles()?.forEach { f ->
             if (f.name.endsWith(".apk") && f.name != target.name) f.delete()
             else if (f.name.endsWith(".apk.part") && f.name != partial.name) f.delete()
+        }
+
+        // v0.1.72: if the completed APK for this exact version is already
+        // on disk, reuse it instead of re-downloading. The premature-EOF
+        // guard below only ever renames a *complete* .part into .apk, so a
+        // present target is whole. This is what stops the "downloads twice"
+        // behaviour when the first attempt downloaded fine but the install
+        // didn't complete (permission wall / dismissed prompt).
+        if (target.exists() && target.length() > 0L) {
+            LogBuffer.i(TAG, "Reusing cached ${target.name} (${target.length()} bytes) — skipping download")
+            return@withContext target
         }
 
         val maxAttempts = 6
@@ -371,6 +409,10 @@ class Updater(
         // via Range for the missing tail.
         val expectedBodyBytes = body.contentLength()
         var bytesFromBody = 0L
+        // v0.1.72: rolling throughput for the progress dialog. Averaged
+        // since this attempt's first byte — smooth enough for a 4 MB file,
+        // and resets cleanly when a resumed attempt starts a fresh stream.
+        val startedAtMs = System.currentTimeMillis()
         FileOutputStream(partial, append).use { out ->
             val buf = ByteArray(64 * 1024)
             var got = startingBytes
@@ -381,7 +423,9 @@ class Updater(
                     out.write(buf, 0, read)
                     got += read
                     bytesFromBody += read
-                    _state.value = State.Downloading(versionName, got, total)
+                    val elapsed = System.currentTimeMillis() - startedAtMs
+                    val rate = if (elapsed > 250) bytesFromBody * 1000L / elapsed else null
+                    _state.value = State.Downloading(versionName, got, total, rate)
                 }
             }
         }
@@ -392,29 +436,41 @@ class Updater(
         }
     }
 
+    /** v0.1.72: true when this app can launch a package install. On
+     *  Android 8+ that needs the per-app "install unknown apps" grant;
+     *  pre-8 it's a global setting we can't check, so we assume true and
+     *  let the system installer prompt. */
+    private fun canInstallPackages(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+            appContext.packageManager.canRequestPackageInstalls()
+
+    /** Open the per-app "install unknown apps" settings page so the
+     *  operator can grant it. No-op pre-Android 8. */
+    private fun openInstallSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val intent = Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+            data = Uri.parse("package:${appContext.packageName}")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            appContext.startActivity(intent)
+        } catch (e: Exception) {
+            LogBuffer.w(TAG, "Couldn't open install-sources settings: ${e.message}")
+        }
+    }
+
     private fun launchInstaller(apk: File) {
         // FileProvider authority must match the entry in AndroidManifest.xml.
         val authority = "${appContext.packageName}.fileprovider"
         val uri: Uri = FileProvider.getUriForFile(appContext, authority, apk)
 
-        // On Android 8+ apps need REQUEST_INSTALL_PACKAGES and the user
-        // (or a device admin) has to grant install-from-unknown-sources
-        // for this app once. If it's not granted, send them to that
-        // settings page so they can flip it on.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            !appContext.packageManager.canRequestPackageInstalls()
-        ) {
+        // Safety net — checkAndUpdate already gates on this before the
+        // download, but the background path or a revoked grant could still
+        // reach here without permission. Send the operator to settings.
+        if (!canInstallPackages()) {
             LogBuffer.w(TAG, "REQUEST_INSTALL_PACKAGES not granted — opening settings")
-            val settingsIntent = Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-                data = Uri.parse("package:${appContext.packageName}")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            try {
-                appContext.startActivity(settingsIntent)
-            } catch (e: Exception) {
-                LogBuffer.w(TAG, "Couldn't open install-sources settings: ${e.message}")
-            }
-            _state.value = State.Failed("Allow installs from this app, then trigger the update again.")
+            openInstallSettings()
+            _state.value = State.Failed("Allow \"Install unknown apps\" for Screens, then trigger the update again.")
             return
         }
 

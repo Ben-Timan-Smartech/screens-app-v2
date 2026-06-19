@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
+import coil.compose.SubcomposeAsyncImage
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -36,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
@@ -316,11 +318,14 @@ fun BrandPickerScreen(
     // already alphabetical (sorted in scan-videos.py), so we display them
     // as-is rather than re-sorting on every recomposition.
     val library = remoteLibrary?.state?.collectAsState()?.value
-    val brandsFromServer = library?.brands?.map { it.name } ?: emptyList()
-    val brands = if (brandsFromServer.isNotEmpty()) brandsFromServer
-                 else listOf("Anker", "Bang & Olufsen", "DVX", "Ember", "Foreo", "Motorola", "SONOS")
+    // v0.1.72: carry the tm:rw logoUrl alongside the name so the cards can
+    // render real brand logos (with a letter fallback). Fallback set has
+    // no logos → letters.
+    val brandsFromServer = library?.brands?.map { it.name to it.logoUrl } ?: emptyList()
+    val brands: List<Pair<String, String?>> = if (brandsFromServer.isNotEmpty()) brandsFromServer
+                 else listOf("Anker", "Bang & Olufsen", "DVX", "Ember", "Foreo", "Motorola", "SONOS").map { it to null }
     var query by remember { mutableStateOf(TextFieldValue("")) }
-    val filtered = brands.filter { it.contains(query.text, ignoreCase = true) }
+    val filtered = brands.filter { it.first.contains(query.text, ignoreCase = true) }
 
     Layout(
         left = { Rail("Which brand?", "Search or tap a brand. Tap back to re-enter PIN.", 1) },
@@ -336,8 +341,8 @@ fun BrandPickerScreen(
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
-                    items(filtered) { brand ->
-                        BrandCard(brand) { onPickBrand(brand) }
+                    items(filtered) { (name, logoUrl) ->
+                        BrandCard(name, logoUrl) { onPickBrand(name) }
                     }
                 }
                 Spacer(Modifier.height(16.dp))
@@ -352,7 +357,7 @@ fun BrandPickerScreen(
 }
 
 @Composable
-private fun BrandCard(brand: String, onClick: () -> Unit) {
+private fun BrandCard(brand: String, logoUrl: String?, onClick: () -> Unit) {
     Column(
         Modifier
             .clip(RoundedCornerShape(18.dp))
@@ -361,17 +366,41 @@ private fun BrandCard(brand: String, onClick: () -> Unit) {
             .clickable { onClick() }
             .padding(22.dp)
     ) {
-        Box(
-            Modifier
-                .size(72.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(BoneSoft),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(brand.first().toString(), fontSize = 32.sp, fontWeight = FontWeight.Medium, color = Ink)
-        }
+        BrandLogo(brand, logoUrl)
         Spacer(Modifier.height(18.dp))
         Text(brand, fontSize = 20.sp, fontWeight = FontWeight.Medium, color = Ink)
+    }
+}
+
+// v0.1.72: 72dp brand mark. Renders the tm:rw logo when present, with a
+// first-letter tile as the loading/error/empty fallback so a missing or
+// slow logo never leaves a blank square on the picker.
+@Composable
+private fun BrandLogo(brand: String, logoUrl: String?) {
+    val fallback: @Composable () -> Unit = {
+        Box(Modifier.fillMaxSize().background(BoneSoft), contentAlignment = Alignment.Center) {
+            Text(
+                brand.firstOrNull()?.toString() ?: "?",
+                fontSize = 32.sp, fontWeight = FontWeight.Medium, color = Ink,
+            )
+        }
+    }
+    Box(
+        Modifier.size(72.dp).clip(RoundedCornerShape(14.dp)).background(BoneSoft),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (logoUrl.isNullOrBlank()) {
+            fallback()
+        } else {
+            SubcomposeAsyncImage(
+                model = logoUrl,
+                contentDescription = brand,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+                loading = { fallback() },
+                error = { fallback() },
+            )
+        }
     }
 }
 
