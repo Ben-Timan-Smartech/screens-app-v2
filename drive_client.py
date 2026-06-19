@@ -418,8 +418,14 @@ def stream_file(
     file_id: str,
     range_header: Optional[str] = None,
     chunk_size: int = 1 << 20,
-) -> Iterator[tuple[int, int, int, bytes]]:
-    """Yield (status, start, end, chunk) for a file download.
+) -> Iterator[tuple[int, int, int, Optional[int], bytes]]:
+    """Yield (status, start, end, total, chunk) for a file download.
+
+    `start`/`end` are the FULL inclusive byte range being returned (parsed
+    once from Drive's Content-Range / Content-Length and constant for the
+    whole stream — NOT per-chunk), and `total` is the exact resource size
+    in bytes when Drive reports it (else None). The caller uses these from
+    the first chunk to emit a correct Content-Range / Content-Length.
 
     The original implementation called the google-api-python-client
     HTTP wrapper (`svc._http.request()`), which under the hood uses
@@ -459,25 +465,34 @@ def stream_file(
     resp = urllib.request.urlopen(req, timeout=30)
     try:
         status = int(resp.status)
+        # Resolve the FULL range + exact total once from the response
+        # headers; these stay constant for the whole stream.
+        total: Optional[int] = None
         cr = resp.headers.get("Content-Range")
         if cr and "bytes " in cr:
+            # Format: "bytes <start>-<end>/<total|*>"
             try:
-                spec = cr.split(" ", 1)[1].split("/", 1)[0]
-                start_s, end_s = spec.split("-", 1)
+                spec = cr.split(" ", 1)[1]
+                rng, _, tot = spec.partition("/")
+                start_s, _, end_s = rng.partition("-")
                 start, end = int(start_s), int(end_s)
+                if tot and tot != "*":
+                    total = int(tot)
             except Exception:
-                start, end = 0, 0
+                start, end = 0, -1
         else:
             start = 0
             cl = resp.headers.get("Content-Length")
-            end = (int(cl) - 1) if cl else 0
+            if cl:
+                total = int(cl)
+                end = total - 1
+            else:
+                end = -1  # unknown (chunked / no length from Drive)
 
-        offset = start
         while True:
             chunk = resp.read(chunk_size)
             if not chunk:
                 break
-            yield status, offset, offset + len(chunk) - 1, chunk
-            offset += len(chunk)
+            yield status, start, end, total, chunk
     finally:
         resp.close()

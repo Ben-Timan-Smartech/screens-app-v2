@@ -1717,7 +1717,7 @@ def _hydrate_splashes_from_drive() -> Path | None:
             # through a different streaming path.
             try:
                 with open(local_path, "wb") as out:
-                    for status, _, _, chunk in drive_client.stream_file(f["id"]):
+                    for status, _, _, _, chunk in drive_client.stream_file(f["id"]):
                         if status >= 400:
                             raise RuntimeError(f"HTTP {status}")
                         out.write(chunk)
@@ -3912,36 +3912,52 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         # GET: stream the body. Headers go out on the first chunk so we
-        # can echo the actual status (206 vs 200) Drive returned. For
-        # full-file responses we deliberately OMIT Content-Length and
-        # close the connection at end-of-body — the cached `sizeMb`
-        # from library.json is rounded to 1 decimal MB, so claiming an
-        # exact byte count there causes OkHttp on the player to
-        # premature-EOF the stream and fail the cache write. Range
-        # responses get the precise length back from drive_client.
+        # echo the actual status (206 vs 200) + the EXACT byte range/total
+        # that drive_client parsed from Drive's own response headers.
+        #
+        # v0.1.74: declare an exact Content-Length whenever the body fits
+        # Cloud Run's buffered-response ceiling (~32 MB). The exact length
+        # is what lets the tablet's download-integrity guard
+        # (VideoCache premature-EOF check) catch a truncated download and
+        # re-pull the tail instead of caching a broken MP4. We use the
+        # *real* size from Drive — NOT the rounded library `sizeMb`, which
+        # is what historically forced us to omit the length (a rounded
+        # count made OkHttp premature-EOF a perfectly good stream). Bodies
+        # above the ceiling still stream with Connection: close + no
+        # length (Cloud Run can't buffer a >32 MB declared response); the
+        # v0.1.73 self-heal covers a rare truncation there.
+        CLOUD_RUN_BUFFER_LIMIT = 32 * 1024 * 1024
         headers_sent = False
         attempt = 0
         while True:
             attempt += 1
             try:
-                for status, start, end, chunk in drive_client.stream_file(
+                for status, start, end, total, chunk in drive_client.stream_file(
                     file_id, range_header=range_header
                 ):
                     if not headers_sent:
                         if status == 206:
                             self.send_response(206)
-                            self.send_header("Content-Range", f"bytes {start}-{end}/*")
-                            self.send_header("Content-Length", str(end - start + 1))
+                            total_s = str(total) if total else "*"
+                            self.send_header("Content-Range", f"bytes {start}-{end}/{total_s}")
+                            body_len = (end - start + 1) if end >= start else None
+                            if body_len and body_len <= CLOUD_RUN_BUFFER_LIMIT:
+                                self.send_header("Content-Length", str(body_len))
+                            else:
+                                self.send_header("Connection", "close")
+                                self.close_connection = True
                         else:
                             self.send_response(200)
-                            # No Content-Length: actual byte count is
-                            # only knowable as we stream. Connection:close
-                            # tells HTTP/1.1 clients to read until EOF;
-                            # the close_connection flag makes the Python
-                            # HTTP server actually drop the socket after
-                            # this response instead of trying to reuse.
-                            self.send_header("Connection", "close")
-                            self.close_connection = True
+                            if total and total <= CLOUD_RUN_BUFFER_LIMIT:
+                                self.send_header("Content-Length", str(total))
+                            else:
+                                # Length unknown or too big to buffer:
+                                # stream to EOF. Connection:close tells
+                                # HTTP/1.1 clients to read until the socket
+                                # drops; close_connection makes the Python
+                                # server actually drop it afterwards.
+                                self.send_header("Connection", "close")
+                                self.close_connection = True
                         self.send_header("Content-Type", ctype)
                         self.send_header("Accept-Ranges", "bytes")
                         self.send_header("Cache-Control", "public, max-age=3600")
