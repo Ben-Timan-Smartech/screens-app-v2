@@ -18,6 +18,30 @@ Rules:
 
 ---
 
+## v0.1.67
+
+Tablet content picker: product lines + orphan / pending videos.
+
+The on-tablet "Add content" video picker now matches the CMS Content
+Library's tm:rw view:
+
+- **Product-line filter pills** above the video grid — tap a line to
+  narrow to it, or "All". Driven by the asset-manager tags the server
+  merges into the library.
+- **Orphans pill** for videos that are in the Drive folder but not
+  registered in the asset manager (badged "Orphan" on the card).
+- **Pending videos** — registered in the asset manager but not yet in
+  the Drive folder — show dimmed with a "Pending" badge and can't be
+  selected, since there's no playable file to push yet. Brands that
+  only exist in the asset manager (e.g. a brand-wide video) now appear
+  in the tablet brand list too.
+
+Brand logos on the tablet brand grid are coming in a follow-up (they
+need an image-loading library; keeping it out of this build to stay
+safe).
+
+---
+
 ## v0.1.66
 
 Tablet: refresh the content library on demand + on every launch.

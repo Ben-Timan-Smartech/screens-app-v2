@@ -45,12 +45,25 @@ class RemoteLibrary(
         val title: String,
         val brand: String? = null,
         val product: String? = null,
-        val mediaUrl: String,
+        // mediaUrl is null for tm:rw "pending" videos (assigned in the
+        // asset manager but not yet in the Drive folder) — they can't be
+        // pushed until the file lands, so the picker shows them disabled.
+        val mediaUrl: String? = null,
         val sizeMb: Double? = null,
         val filename: String? = null,
         val durationSec: Double? = null,
         val width: Int? = null,
         val height: Int? = null,
+        // v0.1.67: tm:rw asset-manager tags (server merges these into
+        // /api/library). productLine groups videos in the picker;
+        // tmrwActive = registered + live; tmrwAssigned = the asset
+        // manager knows this file (else it's an "orphan" in the Drive
+        // folder); pendingSync = assigned but no streamable file yet.
+        // Defaults keep fallback/legacy payloads behaving normally.
+        val productLine: String? = null,
+        val tmrwActive: Boolean = false,
+        val tmrwAssigned: Boolean = true,
+        val pendingSync: Boolean = false,
     )
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
@@ -68,10 +81,17 @@ class RemoteLibrary(
                 val raw = r.body?.string() ?: ""
                 val lib = json.decodeFromString<Library>(raw)
                 // Mirror absolute URLs so tablets can fetch directly.
+                // v0.1.67: mediaUrl is now nullable (tm:rw "pending"
+                // videos have none) — leave those null rather than
+                // fabricating a URL.
                 val items = lib.videos.map { v ->
-                    val url = if (v.mediaUrl.startsWith("http")) v.mediaUrl
-                              else if (v.mediaUrl.startsWith("/")) base + v.mediaUrl
-                              else "$base/${v.mediaUrl}"
+                    val m = v.mediaUrl
+                    val url = when {
+                        m.isNullOrBlank() -> null
+                        m.startsWith("http") -> m
+                        m.startsWith("/") -> base + m
+                        else -> "$base/$m"
+                    }
                     v.copy(mediaUrl = url)
                 }
                 _state.value = lib.copy(videos = items)

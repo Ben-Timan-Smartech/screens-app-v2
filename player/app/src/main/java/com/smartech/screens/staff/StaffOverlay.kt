@@ -188,21 +188,37 @@ fun StaffOverlay(
                 // playlist. Falls back to the playlist when the library is
                 // unreachable / empty.
                 val library = repository.remoteLibrary.state.value
+                // v0.1.67: build PickerVideos carrying the tm:rw tags so
+                // the picker can group by product line + flag orphan /
+                // pending videos. Falls back to the current playlist
+                // (no tm:rw data) when the library is unreachable.
                 val videos = if (library.videos.isNotEmpty()) {
                     library.videos
                         .filter { it.brand == s.brand }
-                        .map {
-                            VideoItem(
-                                id = it.id, title = it.title,
-                                brand = it.brand, product = it.product,
-                                url = it.mediaUrl,
-                                durationSec = it.durationSec?.toInt(),
+                        .map { rv ->
+                            PickerVideo(
+                                item = VideoItem(
+                                    id = rv.id, title = rv.title,
+                                    brand = rv.brand, product = rv.product,
+                                    url = rv.mediaUrl ?: "",
+                                    durationSec = rv.durationSec?.toInt(),
+                                ),
+                                productLine = rv.productLine,
+                                active = rv.tmrwActive,
+                                assigned = rv.tmrwAssigned,
+                                pending = rv.pendingSync || rv.mediaUrl.isNullOrBlank(),
                             )
                         }
                 } else {
                     (repository.state.value as? PlayerRepository.State.Playing)
                         ?.items?.map { it.item }
                         ?.filter { it.brand == s.brand || it.brand == null }
+                        ?.map {
+                            PickerVideo(
+                                item = it, productLine = it.product,
+                                active = true, assigned = true, pending = false,
+                            )
+                        }
                         ?: emptyList()
                 }
                 VideoPickerScreen(
