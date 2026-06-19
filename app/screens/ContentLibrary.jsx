@@ -375,9 +375,17 @@ const VideoListRow = ({ v, selected, onToggle, onPreview, divider }) => {
         <Thumbnail title={v.title} brand={v.brand} aspect="16/9" size="sm" />
       </div>
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.title}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.title}</span>
+          {/* v0.1.64: tm:rw status. Orphan = not registered in the asset
+              manager. Active videos carry their product line; we only
+              flag the exceptions so a healthy list isn't noisy. */}
+          {v.tmrwAssigned === false && (
+            <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 500, color: 'var(--warn)', background: 'var(--warn-bg)', padding: '1px 5px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4 }}>Orphan</span>
+          )}
+        </div>
         <div style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {v.brand}{v.product ? ` · ${v.product}` : ''}
+          {v.brand}{(v.productLine || v.product) ? ` · ${v.productLine || v.product}` : ''}
         </div>
       </div>
       <div className="tnum" style={{ fontSize: 12, color: 'var(--ink-3)' }}>
@@ -653,6 +661,26 @@ const BrandNavRow = ({ brand, active, onClick }) => (
   </button>
 );
 
+// v0.1.64: product-line row in the brand's Products rail. Shows the
+// line name, total count, and (when some are active in tm:rw) a small
+// "N active" hint. `tone="warn"` styles the Orphans entry.
+const ProductNavRow = ({ label, count, activeCount = 0, active, onClick, tone, title }) => (
+  <button onClick={onClick} title={title} style={{
+    display: 'flex', alignItems: 'center', gap: 8,
+    width: '100%', padding: '6px 10px', borderRadius: 6,
+    background: active ? 'var(--ink-8)' : 'transparent',
+    textAlign: 'left', fontSize: 12,
+    fontWeight: active ? 500 : 400,
+    color: tone === 'warn' ? 'var(--warn)' : active ? 'var(--ink-1)' : 'var(--ink-3)',
+  }}>
+    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+    {activeCount > 0 && (
+      <span className="tnum" style={{ fontSize: 10, color: 'var(--ok)' }}>{activeCount} active</span>
+    )}
+    <span className="tnum" style={{ color: 'var(--ink-4)' }}>{count}</span>
+  </button>
+);
+
 // Upload panel — slide-over on the right when open. v0.1.20: real
 // upload, replacing the v0.1.6 "Coming soon" placeholder. Posts
 // multipart/form-data to /api/library/upload, streams progress via
@@ -922,6 +950,12 @@ const UploadPanel = ({ open, onClose }) => {
 const ContentLibrary = () => {
   // 'all' = show every brand. Otherwise, brand id (e.g. 'sonos').
   const [activeBrand, setActiveBrand] = React.useState('all');
+  // v0.1.64: product-line filter within a brand. null = all products;
+  // a productLine string filters to that line; '__orphans__' shows
+  // only videos tm:rw doesn't recognise as assigned. Driven by the
+  // Products rail. Picking a real product line also auto-selects its
+  // active videos (see pickProduct).
+  const [activeProduct, setActiveProduct] = React.useState(null);
   const [selected, setSelected] = React.useState(new Set());
   const [uploadOpen, setUploadOpen] = React.useState(false);
   // v0.1.27: command palette can fire `open-upload-panel` to pop
@@ -977,10 +1011,59 @@ const ContentLibrary = () => {
 
   const isAll = activeBrand === 'all';
   const brand = isAll ? null : MOCK_BRANDS.find(b => b.id === activeBrand);
-  const visibleVideos = isAll
+  // Videos for the current brand (or all). Product filtering applies on
+  // top of this.
+  const brandVideos = isAll
     ? MOCK_VIDEOS
     : MOCK_VIDEOS.filter(v => v.brand === brand?.name);
   const totalCount = MOCK_VIDEOS.length;
+
+  // v0.1.64: product lines for the current brand, derived from the
+  // tm:rw assigned-video tags the server merges into each record
+  // (productLine + tmrwActive). A video is an "orphan" when tm:rw
+  // doesn't recognise it (tmrwAssigned === false). Only meaningful
+  // inside a single brand — the rail hides products in "All brands".
+  const ORPHAN = '__orphans__';
+  const productLines = React.useMemo(() => {
+    if (isAll) return [];
+    const byLine = new Map();
+    for (const v of brandVideos) {
+      if (v.tmrwAssigned === false || !v.productLine) continue;
+      const cur = byLine.get(v.productLine) || { name: v.productLine, count: 0, active: 0 };
+      cur.count += 1;
+      if (v.tmrwActive) cur.active += 1;
+      byLine.set(v.productLine, cur);
+    }
+    return [...byLine.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [brandVideos, isAll]);
+  const orphanCount = isAll ? 0 : brandVideos.filter(v => v.tmrwAssigned === false).length;
+  // Whether tm:rw tagging is present at all for this brand. When the
+  // asset manager has no videos for the brand yet, every record is an
+  // orphan — we soften the empty-state copy in that case rather than
+  // implying something's broken.
+  const hasTmrwData = !isAll && brandVideos.some(v => v.tmrwAssigned === true);
+
+  const visibleVideos = React.useMemo(() => {
+    if (isAll || !activeProduct) return brandVideos;
+    if (activeProduct === ORPHAN) return brandVideos.filter(v => v.tmrwAssigned === false);
+    return brandVideos.filter(v => v.tmrwAssigned !== false && v.productLine === activeProduct);
+  }, [brandVideos, isAll, activeProduct]);
+
+  // Picking a product line filters to it AND auto-selects its active
+  // videos (the operator's most common next step is to push them).
+  // Picking Orphans or All just filters. Clears prior selection so the
+  // tick state reflects the line you're looking at.
+  const pickProduct = (line) => {
+    setActiveProduct(line);
+    setBrandsOpenMobile(false);
+    if (line && line !== ORPHAN) {
+      const next = new Set();
+      for (const v of brandVideos) {
+        if (v.tmrwAssigned !== false && v.productLine === line && v.tmrwActive) next.add(v.id);
+      }
+      setSelected(next);
+    }
+  };
 
   // Brand sidebar filter — case-insensitive substring on display name.
   const filteredBrands = brandQuery.trim()
@@ -988,7 +1071,10 @@ const ContentLibrary = () => {
     : MOCK_BRANDS;
 
   // Reset pagination whenever the visible-set changes shape.
-  React.useEffect(() => { setPage(0); }, [activeBrand, view]);
+  React.useEffect(() => { setPage(0); }, [activeBrand, view, activeProduct]);
+  // v0.1.64: switching brand clears the product filter + selection so
+  // we don't carry one brand's product line / ticks into another.
+  React.useEffect(() => { setActiveProduct(null); setSelected(new Set()); }, [activeBrand]);
 
   const totalPages = Math.max(1, Math.ceil(visibleVideos.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
@@ -1075,17 +1161,38 @@ const ContentLibrary = () => {
           </div>
           {brand && (
             <>
+              {/* v0.1.64: product lines come from tm:rw assigned-video
+                  tags, not the old hardcoded brand.products list.
+                  Clicking a line filters + auto-selects its active
+                  videos. Orphans = Drive videos tm:rw doesn't know. */}
               <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '2px 10px 8px' }}>Products · {brand.name}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                <button style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '6px 10px', borderRadius: 6, background: 'var(--ink-8)', textAlign: 'left', fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>
-                  All products <span style={{ flex: 1 }} /><span className="tnum" style={{ color: 'var(--ink-4)', fontWeight: 400 }}>{brand.videos}</span>
-                </button>
-                {(brand.products || []).map(p => (
-                  <button key={p} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '6px 10px', borderRadius: 6, textAlign: 'left', fontSize: 12, color: 'var(--ink-3)' }}>
-                    <span style={{ flex: 1 }}>{p}</span>
-                    <span className="tnum" style={{ color: 'var(--ink-4)' }}>{MOCK_VIDEOS.filter(v => v.brand === brand.name && v.product === p).length}</span>
-                  </button>
+                <ProductNavRow
+                  label="All products" count={brandVideos.length}
+                  active={activeProduct === null}
+                  onClick={() => { setActiveProduct(null); setBrandsOpenMobile(false); }}
+                />
+                {productLines.map(p => (
+                  <ProductNavRow
+                    key={p.name} label={p.name} count={p.count}
+                    activeCount={p.active}
+                    active={activeProduct === p.name}
+                    onClick={() => pickProduct(p.name)}
+                  />
                 ))}
+                {orphanCount > 0 && (
+                  <ProductNavRow
+                    label="Orphans" count={orphanCount} tone="warn"
+                    title="In the Drive folder but not registered in the asset manager"
+                    active={activeProduct === ORPHAN}
+                    onClick={() => pickProduct(ORPHAN)}
+                  />
+                )}
+                {!hasTmrwData && orphanCount > 0 && (
+                  <div style={{ fontSize: 10, color: 'var(--ink-4)', padding: '8px 10px 2px', lineHeight: 1.4 }}>
+                    No assigned videos in the asset manager for {brand.name} yet — everything shows as an orphan until they're registered.
+                  </div>
+                )}
               </div>
             </>
           )}
