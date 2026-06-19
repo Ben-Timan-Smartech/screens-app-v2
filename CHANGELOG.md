@@ -18,6 +18,22 @@ Rules:
 
 ---
 
+## v0.1.70
+
+Hotfix: product-scope assigned videos now show under the right brand.
+
+A product-scope video (e.g. a TCL Tab A1 Plus clip) wasn't appearing in
+the CMS. tm:rw's `/videos` rows for product/family-scope videos carry
+the SKU/familyId in `scopeKey` and have no `brand` field, so the v0.1.69
+grouping filed the video under the SKU ("9445X1-2ALCA111-3") instead of
+its brand ("TCL Global") — and it vanished. The server now resolves
+each non-brand-scope video to its real brand via `/product?sku=`
+(cached per refresh), with familyId-prefix and scopeKey fallbacks.
+Brand-scope videos are unchanged. Affects the CMS and the tablet (both
+read the same `/api/library`).
+
+---
+
 ## v0.1.69
 
 Brand content sectioned into Brand global / Products / Orphans / All (CMS + tablet).

@@ -562,17 +562,53 @@ def _tmrw_videos_map() -> dict:
         print(f"[tmrwvideos] /videos fetch failed: {e}", file=sys.stderr)
         _TMRW_VIDEOS_CACHE["fetchedAt"] = now
         return cached
+    # v0.1.70: brand attribution. Brand-scope rows carry the brand in
+    # scopeKey, but product/family-scope rows carry the SKU / familyId
+    # there and have NO brand field — so the old "group by scopeKey"
+    # filed product-scope videos under the SKU (a TCL product video
+    # vanished). Resolve those to the real brand: prefer an explicit
+    # `brand` field, then /product?sku=<sku> (cached per refresh), then
+    # the familyId prefix, and only fall back to scopeKey as a last
+    # resort.
+    _sku_brand: dict[str, str | None] = {}
+
+    def _resolve_brand(r: dict) -> str | None:
+        if r.get("brand"):
+            return r["brand"].strip() or None
+        scope = (r.get("scope") or "").strip().lower()
+        scope_key = (r.get("scopeKey") or "").strip()
+        if scope == "brand":
+            return scope_key or None
+        # product / family scope — find the real brand.
+        sku = (r.get("sku") or (scope_key if scope == "product" else "")).strip()
+        if sku:
+            if sku not in _sku_brand:
+                _sku_brand[sku] = None
+                try:
+                    preq = urllib.request.Request(
+                        f"{BRAND_API_BASE}/product?sku={urllib.parse.quote(sku)}",
+                        headers={"X-API-Key": key, "Accept": "application/json"},
+                    )
+                    with urllib.request.urlopen(preq, timeout=6) as presp:
+                        pdata = json.loads(presp.read().decode("utf-8") or "{}")
+                    _sku_brand[sku] = ((pdata.get("product") or {}).get("brand") or "").strip() or None
+                except Exception as e:
+                    print(f"[tmrwvideos] product lookup for sku {sku} failed: {e}", file=sys.stderr)
+            if _sku_brand[sku]:
+                return _sku_brand[sku]
+        fam = (r.get("familyId") or "").strip()
+        if fam and "|" in fam:
+            # familyId is "<brandslug>|pgid:..." — slug, not display,
+            # but matches a library brand case-insensitively.
+            return fam.split("|", 1)[0] or None
+        return scope_key or None
+
     by_brand: dict[str, dict] = {}
     for r in rows if isinstance(rows, list) else []:
         fn = (r.get("fileName") or "").strip()
         if not fn:
             continue
-        brand = (
-            r.get("brand")
-            or (r.get("scopeKey") if r.get("scope") == "brand" else None)
-            or r.get("scopeKey")
-            or ""
-        ).strip()
+        brand = (_resolve_brand(r) or "").strip()
         if not brand:
             continue
         bucket = by_brand.setdefault(brand.lower(), {"display": brand, "videos": {}})
