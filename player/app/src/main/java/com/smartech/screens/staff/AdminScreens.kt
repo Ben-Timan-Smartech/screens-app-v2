@@ -465,6 +465,16 @@ fun DeviceAdminScreen(
                         onClick = { scope.launch { repository.refreshPlaylist() } },
                     )
                     Divider()
+                    // v0.1.66: manual content-library re-pull. The library
+                    // (brands + videos) also refreshes automatically on
+                    // every launch, but this lets staff force it after a
+                    // CMS-side change without restarting the app.
+                    ActionRow(
+                        title = "Refresh content library now",
+                        sub = "Re-pull the brand + video list from the server. Also runs automatically on every launch.",
+                        onClick = { repository.refreshLibraryNow() },
+                    )
+                    Divider()
                     ActionRow(
                         title = "Re-register device",
                         sub = "Wipes the device token. Next launch registers fresh.",

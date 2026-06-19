@@ -1350,6 +1350,20 @@ class PlayerRepository(
         }
     }
 
+    /** v0.1.66: manual content-library (brands + videos) re-pull, fired
+     *  from the staff overlay's "Refresh content library" button. The
+     *  same pull also runs automatically on every app startup (see
+     *  [startLiveSync]) so a relaunch — including the one after an APK
+     *  update — always lands the latest library. */
+    fun refreshLibraryNow() {
+        LogBuffer.i(TAG, "refreshLibraryNow() requested")
+        liveScope.launch {
+            val url = store.liveServerUrl.first()?.trimEnd('/')
+            runCatching { remoteLibrary.refresh(url) }
+                .onFailure { LogBuffer.w(TAG, "refreshLibraryNow() failed: ${it.message}") }
+        }
+    }
+
     /** Push a new HDMI mode override to the server. `null` clears
      *  the override (== auto). Non-null must match one of the modeIds
      *  this tablet reported in supportedModes — the server stores
@@ -1700,6 +1714,15 @@ class PlayerRepository(
             // additions from the CMS land in the on-tablet picker
             // without needing an APK update. Fire-and-forget.
             store.liveServerUrl.first()?.let { refreshStoresFromServer(it.trimEnd('/')) }
+            // v0.1.66: pull the content library once on every startup —
+            // covers a normal relaunch AND the relaunch after an APK
+            // update, so the brand/video list is current immediately
+            // rather than waiting for the periodic tick (which, before
+            // the fix below, never fired in slow mode). Best-effort.
+            store.liveServerUrl.first()?.let {
+                runCatching { remoteLibrary.refresh(it.trimEnd('/')) }
+                    .onFailure { e -> LogBuffer.w(TAG, "Startup library refresh failed: ${e.message}") }
+            }
             while (true) {
                 val url = store.liveServerUrl.first()
                 if (url.isNullOrBlank()) {
@@ -1716,10 +1739,15 @@ class PlayerRepository(
                 // independent of the polling cadence. With a 10 s tick
                 // that's every 30 ticks; with a 60 s tick every 5;
                 // with a 600 s tick every 1.
+                // v0.1.66: was `% libraryEvery == 1`, which NEVER fired
+                // when libraryEvery == 1 (slow mode) — so slow-poll
+                // tablets never refreshed the library after startup.
+                // `== 0` fires correctly for every libraryEvery, and the
+                // startup pull above already covers the first interval.
                 libraryRefreshTickCounter++
                 val effectiveInterval = _pollMode.value.intervalMs
                 val libraryEvery = (5L * 60_000L / effectiveInterval).coerceAtLeast(1).toInt()
-                if (libraryRefreshTickCounter % libraryEvery == 1) {
+                if (libraryRefreshTickCounter % libraryEvery == 0) {
                     runCatching { remoteLibrary.refresh(store.liveServerUrl.first()) }
                 }
                 delay(effectiveInterval)
