@@ -208,6 +208,13 @@ fun StaffOverlay(
                                 assigned = rv.tmrwAssigned,
                                 pending = rv.pendingSync || rv.mediaUrl.isNullOrBlank(),
                                 scope = rv.tmrwScope,
+                                // v0.1.71: extra list-view columns.
+                                sizeMb = rv.sizeMb,
+                                width = rv.width,
+                                height = rv.height,
+                                sku = rv.sku,
+                                orientation = rv.tmrwOrientation,
+                                resolution = rv.tmrwResolution,
                             )
                         }
                 } else {

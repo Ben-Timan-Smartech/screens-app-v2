@@ -67,6 +67,13 @@ class RemoteLibrary(
         // v0.1.69: "brand" → Brand global videos; "family"/"product" →
         // grouped under their product; null on orphan/fallback.
         val tmrwScope: String? = null,
+        // v0.1.71: extra asset-manager columns surfaced in the picker's
+        // list view. sku = the product SKU; tmrwOrientation/tmrwResolution
+        // are tm:rw's own values, used as a fallback for pending videos
+        // that have no scanned width/height yet.
+        val sku: String? = null,
+        val tmrwOrientation: String? = null,
+        val tmrwResolution: String? = null,
     )
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }

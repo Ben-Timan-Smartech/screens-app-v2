@@ -27,6 +27,32 @@ const dimensionLabel = (w, h) => {
   return `${w}×${h}`;
 };
 
+// v0.1.71: orientation + resolution resolvers for the list-view columns.
+// Prefer the scanned MP4 dimensions (exact); fall back to the tm:rw-
+// supplied orientation/resolution strings — the only source for
+// pending-sync videos that aren't in the Drive scan yet.
+const orientationLabel = (v) => {
+  if (v.width && v.height) {
+    if (v.width > v.height) return 'Landscape';
+    if (v.height > v.width) return 'Portrait';
+    return 'Square';
+  }
+  const o = (v.tmrwOrientation || '').toLowerCase();
+  if (o.startsWith('land')) return 'Landscape';
+  if (o.startsWith('port')) return 'Portrait';
+  if (o.startsWith('sq'))   return 'Square';
+  return v.tmrwOrientation || '—';
+};
+const resolutionLabel = (v) => {
+  if (v.width && v.height) return dimensionLabel(v.width, v.height);
+  return v.tmrwResolution || '—';
+};
+
+// v0.1.71: shared column template for the list-view header + rows so they
+// stay aligned. Columns: Product Name · Size · Length · Orientation ·
+// Resolution · SKU Name · (selection check).
+const LIST_GRID = 'minmax(160px, 1.6fr) 76px 72px 104px 120px minmax(120px, 1fr) 28px';
+
 // ─────────────────────────────────────────────────────────────
 // Video tile — real first-frame thumbnail + click-to-preview.
 //
@@ -341,65 +367,75 @@ const AddContentModal = ({ targetDeviceId, targetName, onClose }) => {
 
 // ─────────────────────────────────────────────────────────────
 // VideoListRow — single-line row used by the list view.
-// Tighter than VideoTile: 60×34 thumbnail, title, brand chip, optional
-// product/dims, "on N screens", and the Push selection checkbox at the
-// far right. Same selection semantics as VideoTile.
+// v0.1.71: columns are Product Name (with a 48×28 thumbnail + status
+// badges) · Size · Length · Orientation · Resolution · SKU Name, plus
+// the Push selection checkbox at the far right. Same selection
+// semantics as VideoTile. Clicking the row opens the detail panel.
 // ─────────────────────────────────────────────────────────────
-// v0.1.56: list view row uses a clear column layout instead of the
-// previous bullet-separated inline string. Operators want to scan
-// resolution / length / size as columns. The hover-video thumbnail
-// is gone — it was the source of the bad-preview problem (a flaky
-// Drive stream playing in a 60×34 box mostly produced black). Click
-// the row opens the detail panel instead.
 const VideoListRow = ({ v, selected, onToggle, onPreview, divider }) => {
-  const initialDims = (v.width && v.height) ? { w: v.width, h: v.height } : null;
   const lengthLabel = (() => {
     if (!v.durationSec) return '—';
     const s = Math.round(v.durationSec);
     if (s < 60) return `${s}s`;
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   })();
+  // Product Name column: the tm:rw product line for assigned product
+  // videos; brand-global / orphan videos have no product, so fall back to
+  // the video's own title so the cell is never empty.
+  const productName = v.productLine || v.product || v.title || '—';
+  // Secondary muted line under the name — the actual file, so operators
+  // can still tell two videos for the same product apart. Suppressed when
+  // it would just duplicate the product name.
+  const subtitle = v.title && v.title !== productName ? v.title : (v.filename || null);
+  const cell = { fontSize: 12, color: 'var(--ink-3)' };
   return (
     <div
       onClick={(e) => { e.stopPropagation(); onPreview && onPreview(v); }}
       style={{
         display: 'grid',
-        gridTemplateColumns: '60px 1fr 110px 70px 80px 28px',
+        gridTemplateColumns: LIST_GRID,
         alignItems: 'center', gap: 12,
         padding: '10px 12px',
         borderBottom: divider ? 'var(--border-faint)' : 'none',
         background: selected ? 'var(--ink-8)' : 'transparent',
         cursor: 'pointer',
       }}>
-      <div style={{ width: 60, height: 34, borderRadius: 4, overflow: 'hidden', flexShrink: 0, background: '#0a0a0a' }}>
-        <Thumbnail title={v.title} brand={v.brand} aspect="16/9" size="sm" />
-      </div>
-      <div style={{ minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.title}</span>
-          {/* v0.1.64/65: tm:rw status. Orphan = in the Drive folder but
-              not registered. Pending = registered in the asset manager
-              but not in the Drive folder yet, so not pushable. We only
-              flag the exceptions so a healthy list isn't noisy. */}
-          {v.pendingSync ? (
-            <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 500, color: 'var(--info)', background: 'var(--info-bg)', padding: '1px 5px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4 }} title="Registered in the asset manager but not in the Drive folder yet — can't push until it syncs">Pending</span>
-          ) : v.tmrwAssigned === false && (
-            <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 500, color: 'var(--warn)', background: 'var(--warn-bg)', padding: '1px 5px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4 }}>Orphan</span>
+      {/* Product Name (thumbnail + name + status badges) */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+        <div style={{ width: 48, height: 28, borderRadius: 4, overflow: 'hidden', flexShrink: 0, background: '#0a0a0a' }}>
+          <Thumbnail title={v.title} brand={v.brand} aspect="16/9" size="sm" />
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{productName}</span>
+            {/* v0.1.64/65: tm:rw status. Orphan = in the Drive folder but
+                not registered. Pending = registered in the asset manager
+                but not in the Drive folder yet, so not pushable. We only
+                flag the exceptions so a healthy list isn't noisy. */}
+            {v.pendingSync ? (
+              <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 500, color: 'var(--info)', background: 'var(--info-bg)', padding: '1px 5px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4 }} title="Registered in the asset manager but not in the Drive folder yet — can't push until it syncs">Pending</span>
+            ) : v.tmrwAssigned === false && (
+              <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 500, color: 'var(--warn)', background: 'var(--warn-bg)', padding: '1px 5px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4 }}>Orphan</span>
+            )}
+          </div>
+          {subtitle && (
+            <div style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {subtitle}
+            </div>
           )}
         </div>
-        <div style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {v.brand}{(v.productLine || v.product) ? ` · ${v.productLine || v.product}` : ''}
-        </div>
       </div>
-      <div className="tnum" style={{ fontSize: 12, color: 'var(--ink-3)' }}>
-        {initialDims ? dimensionLabel(initialDims.w, initialDims.h) : '—'}
-      </div>
-      <div className="tnum" style={{ fontSize: 12, color: 'var(--ink-3)', textAlign: 'right' }}>
-        {lengthLabel}
-      </div>
-      <div className="tnum" style={{ fontSize: 12, color: 'var(--ink-3)', textAlign: 'right' }}>
-        {v.sizeMb ? `${v.sizeMb} MB` : '—'}
-      </div>
+      {/* Size */}
+      <div className="tnum" style={{ ...cell, textAlign: 'right' }}>{v.sizeMb ? `${v.sizeMb} MB` : '—'}</div>
+      {/* Length */}
+      <div className="tnum" style={{ ...cell, textAlign: 'right' }}>{lengthLabel}</div>
+      {/* Orientation */}
+      <div style={cell}>{orientationLabel(v)}</div>
+      {/* Resolution */}
+      <div className="tnum" style={cell}>{resolutionLabel(v)}</div>
+      {/* SKU Name */}
+      <div className="tnum" style={{ ...cell, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={v.sku || ''}>{v.sku || '—'}</div>
+      {/* Selection check */}
       <div
         onClick={(e) => { e.stopPropagation(); onToggle && onToggle(); }}
         style={{
@@ -417,21 +453,24 @@ const VideoListRow = ({ v, selected, onToggle, onPreview, divider }) => {
 };
 
 // v0.1.56: column header bar shown above the list-view rows.
+// v0.1.71: columns are Product Name · Size · Length · Orientation ·
+// Resolution · SKU Name (per the asset-manager list spec).
 const VideoListHeader = () => (
   <div style={{
     display: 'grid',
-    gridTemplateColumns: '60px 1fr 110px 70px 80px 28px',
+    gridTemplateColumns: LIST_GRID,
     gap: 12, padding: '8px 12px',
     borderBottom: 'var(--border)',
     background: 'var(--ink-9)',
     fontSize: 10, fontWeight: 500,
     color: 'var(--ink-4)', letterSpacing: 0.5, textTransform: 'uppercase',
   }}>
-    <span />
-    <span>Title</span>
-    <span>Resolution</span>
-    <span style={{ textAlign: 'right' }}>Length</span>
+    <span>Product Name</span>
     <span style={{ textAlign: 'right' }}>Size</span>
+    <span style={{ textAlign: 'right' }}>Length</span>
+    <span>Orientation</span>
+    <span>Resolution</span>
+    <span>SKU Name</span>
     <span />
   </div>
 );
@@ -1038,6 +1077,9 @@ const ContentLibrary = () => {
   // brands".
   const ORPHAN = '__orphans__';
   const BRAND_GLOBAL = '__brand_global__';
+  // v0.1.71: a single "Products" entry (replacing the per-product-line
+  // rows) that lists every product/family-scope video for the brand.
+  const PRODUCTS = '__products__';
   const isBrandGlobal = (v) => v.tmrwAssigned !== false && v.tmrwScope === 'brand';
   const isProductVid = (v) => v.tmrwAssigned !== false && v.tmrwScope !== 'brand' && !!v.productLine;
   const brandGlobalCount = isAll ? 0 : brandVideos.filter(isBrandGlobal).length;
@@ -1053,6 +1095,10 @@ const ContentLibrary = () => {
     }
     return [...byLine.values()].sort((a, b) => a.name.localeCompare(b.name));
   }, [brandVideos, isAll]);
+  // "Products" nav count = how many distinct products the brand has;
+  // its active-hint sums the per-line active counts.
+  const productCount = productLines.length;
+  const productActiveCount = productLines.reduce((s, p) => s + p.active, 0);
   const orphanCount = isAll ? 0 : brandVideos.filter(v => v.tmrwAssigned === false).length;
   // Whether tm:rw tagging is present at all for this brand. When the
   // asset manager has no videos for the brand yet, every record is an
@@ -1064,22 +1110,22 @@ const ContentLibrary = () => {
     if (isAll || !activeProduct) return brandVideos;
     if (activeProduct === ORPHAN) return brandVideos.filter(v => v.tmrwAssigned === false);
     if (activeProduct === BRAND_GLOBAL) return brandVideos.filter(isBrandGlobal);
+    if (activeProduct === PRODUCTS) return brandVideos.filter(isProductVid);
     return brandVideos.filter(v => isProductVid(v) && v.productLine === activeProduct);
   }, [brandVideos, isAll, activeProduct]);
 
-  // Picking a product (or Brand global) filters to it AND auto-selects
-  // its active, pushable videos. Picking Orphans / All just filters.
+  // Selecting a nav entry filters the list. Brand-global videos are a
+  // small, coherent set, so we also auto-tick the active, pushable ones
+  // for a one-click "push the brand video". Products / Orphans / All are
+  // too broad to auto-select — the operator picks rows themselves.
   const pickProduct = (line) => {
     setActiveProduct(line);
     setBrandsOpenMobile(false);
-    if (line && line !== ORPHAN) {
-      const match = line === BRAND_GLOBAL
-        ? isBrandGlobal
-        : (v) => isProductVid(v) && v.productLine === line;
+    if (line === BRAND_GLOBAL) {
       const next = new Set();
       for (const v of brandVideos) {
         // Skip pendingSync — assigned in tm:rw but no streamable file yet.
-        if (match(v) && v.tmrwActive && !v.pendingSync) next.add(v.id);
+        if (isBrandGlobal(v) && v.tmrwActive && !v.pendingSync) next.add(v.id);
       }
       setSelected(next);
     }
@@ -1181,10 +1227,10 @@ const ContentLibrary = () => {
           </div>
           {brand && (
             <>
-              {/* v0.1.69: brand content sectioned as Brand global /
-                  Products (per product line) / Orphans / All — all
-                  derived from the tm:rw asset-manager tags the server
-                  merges into each video. */}
+              {/* v0.1.71: brand content sectioned into four lists — All /
+                  Products / Brand videos / Orphans (Unassigned) — derived
+                  from the tm:rw asset-manager tags the server merges into
+                  each video. Each opens the same columned list view. */}
               <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '2px 10px 8px' }}>{brand.name}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                 <ProductNavRow
@@ -1192,28 +1238,26 @@ const ContentLibrary = () => {
                   active={activeProduct === null}
                   onClick={() => { setActiveProduct(null); setBrandsOpenMobile(false); }}
                 />
+                {productCount > 0 && (
+                  <ProductNavRow
+                    label="Products" count={productCount}
+                    activeCount={productActiveCount}
+                    title="Videos assigned to a specific product or product family"
+                    active={activeProduct === PRODUCTS}
+                    onClick={() => pickProduct(PRODUCTS)}
+                  />
+                )}
                 {brandGlobalCount > 0 && (
                   <ProductNavRow
-                    label="Brand global videos" count={brandGlobalCount}
+                    label="Brand videos" count={brandGlobalCount}
                     title="Brand-scope videos — apply to the whole brand"
                     active={activeProduct === BRAND_GLOBAL}
                     onClick={() => pickProduct(BRAND_GLOBAL)}
                   />
                 )}
-                {productLines.length > 0 && (
-                  <div style={{ fontSize: 10, fontWeight: 500, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '10px 10px 4px' }}>Products</div>
-                )}
-                {productLines.map(p => (
-                  <ProductNavRow
-                    key={p.name} label={p.name} count={p.count}
-                    activeCount={p.active}
-                    active={activeProduct === p.name}
-                    onClick={() => pickProduct(p.name)}
-                  />
-                ))}
                 {orphanCount > 0 && (
                   <ProductNavRow
-                    label="Orphans" count={orphanCount} tone="warn"
+                    label="Orphans (Unassigned)" count={orphanCount} tone="warn"
                     title="Files in Screens/Brand Content that aren't matched to any assigned video"
                     active={activeProduct === ORPHAN}
                     onClick={() => pickProduct(ORPHAN)}
@@ -1304,16 +1348,23 @@ const ContentLibrary = () => {
               ))}
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', border: 'var(--border)', borderRadius: 8, overflow: 'hidden', background: 'var(--ink-10)' }}>
-              <VideoListHeader />
-              {pagedVideos.map((v, i) => (
-                <VideoListRow
-                  key={v.id} v={v} divider={i < pagedVideos.length - 1}
-                  selected={selected.has(v.id)}
-                  onToggle={() => toggle(v.id)}
-                  onPreview={(vid) => setPreviewVideo(vid)}
-                />
-              ))}
+            <div style={{ border: 'var(--border)', borderRadius: 8, overflow: 'hidden', background: 'var(--ink-10)' }}>
+              {/* v0.1.71: six data columns don't fit narrow panes, so the
+                  table scrolls horizontally under a min width rather than
+                  squashing the Product Name / SKU columns to nothing. */}
+              <div style={{ overflowX: 'auto' }}>
+                <div style={{ minWidth: 760 }}>
+                  <VideoListHeader />
+                  {pagedVideos.map((v, i) => (
+                    <VideoListRow
+                      key={v.id} v={v} divider={i < pagedVideos.length - 1}
+                      selected={selected.has(v.id)}
+                      onToggle={() => toggle(v.id)}
+                      onPreview={(vid) => setPreviewVideo(vid)}
+                    />
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 
