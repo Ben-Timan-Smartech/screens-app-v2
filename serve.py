@@ -104,15 +104,51 @@ def _github_headers(*, accept: str = "application/vnd.github+json") -> dict:
     return h
 
 
+def _github_urlopen(url: str, *, accept: str = "application/vnd.github+json", timeout: int = 8):
+    """Open a GitHub API URL, falling back to an *unauthenticated* request
+    when a configured token is rejected.
+
+    The releases repo is public. A stale/expired `SCREENS_GITHUB_TOKEN`
+    makes even public-repo requests fail with 401 (GitHub doesn't ignore a
+    bad token and serve anonymously — it rejects the call), which silently
+    broke `/api/release/latest` (returns empty → players think they're up
+    to date) and the APK download proxy. So: try the token first if set,
+    then retry once with no Authorization header. Raises the last error if
+    both attempts fail."""
+    token = os.environ.get("SCREENS_GITHUB_TOKEN")
+    header_sets = []
+    if token:
+        header_sets.append(_github_headers(accept=accept))
+    anon = {k: v for k, v in _github_headers(accept=accept).items() if k != "Authorization"}
+    header_sets.append(anon)
+    last_exc: Exception | None = None
+    for i, headers in enumerate(header_sets):
+        try:
+            return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
+        except urllib.error.HTTPError as e:
+            last_exc = e
+            authed = "Authorization" in headers
+            if authed and e.code in (401, 403, 404) and i < len(header_sets) - 1:
+                print(f"[github] token rejected ({e.code}) on {url}; retrying anonymously", file=sys.stderr)
+                continue
+            raise
+        except Exception as e:
+            last_exc = e
+            if i < len(header_sets) - 1:
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+
+
 def _fetch_latest_release() -> dict | None:
     """Hit GitHub's API for the latest release. Returns the parsed JSON
     or None on any error. Errors are swallowed because the consumers
     (login page, player) both have graceful "release info unavailable"
     paths — they should never crash because GitHub is briefly slow."""
     url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/latest"
-    req = urllib.request.Request(url, headers=_github_headers())
     try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with _github_urlopen(url, timeout=8) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         print(f"[release] fetch failed: {e}", file=sys.stderr)
@@ -3677,15 +3713,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not asset_id:
             self.send_error(404, f"No {flavor} APK in latest release"); return
         api_url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/assets/{asset_id}"
-        req = urllib.request.Request(
-            api_url,
-            headers=_github_headers(accept="application/octet-stream"),
-        )
         try:
             # urllib follows the 302 from the asset API to the CDN by
             # default. The resulting `upstream` is the actual binary
-            # stream; we just relay it.
-            upstream = urllib.request.urlopen(req, timeout=30)
+            # stream; we just relay it. _github_urlopen falls back to an
+            # anonymous request if a stale token is rejected (repo is
+            # public), so a dead SCREENS_GITHUB_TOKEN can't break downloads.
+            upstream = _github_urlopen(api_url, accept="application/octet-stream", timeout=30)
         except urllib.error.HTTPError as e:
             print(f"[release-download] upstream HTTP {e.code}: {e.reason}", file=sys.stderr)
             self.send_error(502, f"Upstream fetch failed ({e.code})")
