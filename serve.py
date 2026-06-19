@@ -531,7 +531,7 @@ def _reset_tmrw_caches() -> None:
 
 def _tmrw_videos_map() -> dict:
     """Return {brandLower: {"display": <brand>, "videos": {fileNameLower:
-    {fileName, productName, active, orientation, resolution}}}}.
+    {fileName, productName, active, orientation, resolution, sku, scope}}}}.
 
     v0.1.65: one GET /videos call for the whole assigned-video set
     (marketing videos are few relative to products), grouped by brand —
@@ -611,6 +611,7 @@ def _tmrw_videos_map() -> dict:
         brand = (_resolve_brand(r) or "").strip()
         if not brand:
             continue
+        _row_scope = (r.get("scope") or "").strip().lower()
         bucket = by_brand.setdefault(brand.lower(), {"display": brand, "videos": {}})
         bucket["videos"][fn.lower()] = {
             "fileName": fn,
@@ -618,10 +619,14 @@ def _tmrw_videos_map() -> dict:
             "active": bool(r.get("active")),
             "orientation": (r.get("orientation") or "").strip() or None,
             "resolution": (r.get("resolution") or "").strip() or None,
+            # v0.1.71: SKU surfaced as a Content Library list column.
+            # Product-scope rows carry the SKU in scopeKey when there's no
+            # explicit `sku` field; brand/family rows usually have none.
+            "sku": (r.get("sku") or (r.get("scopeKey") if _row_scope == "product" else "") or "").strip() or None,
             # v0.1.69: scope drives the Content Library sectioning —
             # "brand" → Brand Global Videos; "family"/"product" → grouped
             # under their product. Normalised to lowercase.
-            "scope": (r.get("scope") or "").strip().lower() or None,
+            "scope": _row_scope or None,
         }
     import hashlib
     new_hash = hashlib.sha1(
@@ -676,6 +681,16 @@ def _library_with_logos() -> tuple[dict, str]:
                       "tmrwScope": row.get("scope")}
                 if row.get("productName"):
                     nv["productLine"] = row["productName"]
+                # v0.1.71: SKU + tm:rw orientation/resolution feed the
+                # Content Library list columns. The scan already has
+                # width/height for matched files; tm:rw fills the gaps
+                # (and is the only source for the SKU).
+                if row.get("sku"):
+                    nv["sku"] = row["sku"]
+                if row.get("orientation"):
+                    nv["tmrwOrientation"] = row["orientation"]
+                if row.get("resolution"):
+                    nv["tmrwResolution"] = row["resolution"]
                 new_videos.append(nv)
             else:
                 new_videos.append({**v, "tmrwAssigned": False, "tmrwActive": False})
@@ -708,6 +723,11 @@ def _library_with_logos() -> tuple[dict, str]:
                     "tmrwAssigned": True,
                     "tmrwActive": row["active"],
                     "tmrwScope": row.get("scope"),
+                    # v0.1.71: pending videos aren't in the Drive scan, so
+                    # tm:rw is the only source for these list columns.
+                    "sku": row.get("sku"),
+                    "tmrwOrientation": row.get("orientation"),
+                    "tmrwResolution": row.get("resolution"),
                     "pendingSync": True,
                     "source": "tmrw",
                 })

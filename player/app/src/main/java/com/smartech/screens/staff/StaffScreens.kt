@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items as lazyColumnItems
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -392,13 +394,73 @@ data class PickerVideo(
     val assigned: Boolean,   // false → "orphan" (in Drive, unknown to tm:rw)
     val pending: Boolean,    // assigned but no streamable file yet → not pushable
     val scope: String?,      // "brand" → Brand global; else grouped by product
+    // v0.1.71: extra columns for the picker's list view. width/height +
+    // sizeMb come from the Drive scan; sku/orientation/resolution come
+    // from tm:rw (the latter two as a fallback when there's no scan).
+    val sizeMb: Double? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val sku: String? = null,
+    val orientation: String? = null,
+    val resolution: String? = null,
 )
 
 private const val ORPHANS = "__orphans__"
 private const val BRAND_GLOBAL = "__brand_global__"
+// v0.1.71: single "Products" filter (replaces the per-product-line pills)
+// listing every product/family-scope video for the brand.
+private const val PRODUCTS = "__products__"
 
 private fun PickerVideo.isBrandGlobal() = assigned && scope == "brand"
 private fun PickerVideo.isProduct() = assigned && scope != "brand" && productLine != null
+
+// v0.1.71: column formatters for the list view. Prefer the exact scanned
+// dimensions; fall back to tm:rw's orientation/resolution strings (the
+// only source for pending-sync videos not yet in the Drive folder).
+private fun PickerVideo.productName(): String =
+    productLine ?: item.product ?: item.title
+
+private fun PickerVideo.lengthLabel(): String {
+    val d = item.durationSec ?: return "—"
+    return if (d < 60) "${d}s" else "${d / 60}:${(d % 60).toString().padStart(2, '0')}"
+}
+
+private fun PickerVideo.sizeLabel(): String {
+    val s = sizeMb ?: return "—"
+    return if (s == s.toLong().toDouble()) "${s.toLong()} MB" else String.format("%.1f MB", s)
+}
+
+private fun PickerVideo.orientationLabel(): String {
+    val w = width; val h = height
+    if (w != null && h != null && w > 0 && h > 0) {
+        return when {
+            w > h -> "Landscape"
+            h > w -> "Portrait"
+            else  -> "Square"
+        }
+    }
+    val o = (orientation ?: "").lowercase()
+    return when {
+        o.startsWith("land") -> "Landscape"
+        o.startsWith("port") -> "Portrait"
+        o.startsWith("sq")   -> "Square"
+        else -> orientation ?: "—"
+    }
+}
+
+private fun PickerVideo.resolutionLabel(): String {
+    val w = width; val h = height
+    if (w != null && h != null && w > 0 && h > 0) {
+        return when {
+            w == 1920 && h == 1080 -> "1080p"
+            w == 1080 && h == 1920 -> "1080p ↕"
+            w == 1280 && h == 720  -> "720p"
+            w == 3840 && h == 2160 -> "4K"
+            else -> "${w}×${h}"
+        }
+    }
+    return resolution ?: "—"
+}
 
 @Composable
 private fun FilterPill(label: String, count: Int, selected: Boolean, tone: Color = Ink, onClick: () -> Unit) {
@@ -435,19 +497,18 @@ fun VideoPickerScreen(
     var filter by remember { mutableStateOf<String?>(null) }
 
     // Sections from the tm:rw asset-manager tags: brand-global (scope
-    // "brand"), products (scope family/product, grouped by line), and
-    // orphans (in the Drive folder, unknown to the asset manager).
+    // "brand"), products (scope family/product), and orphans (in the
+    // Drive folder, unknown to the asset manager). v0.1.71: products are
+    // a single "Products" list, counted by distinct product.
     val brandGlobalCount = videos.count { it.isBrandGlobal() }
-    val productLines = remember(videos) {
-        videos.filter { it.isProduct() }
-            .groupBy { it.productLine!! }
-            .map { (name, vs) -> name to vs.size }
-            .sortedBy { it.first.lowercase() }
+    val productCount = remember(videos) {
+        videos.filter { it.isProduct() }.mapNotNull { it.productLine }.distinct().size
     }
     val orphanCount = videos.count { !it.assigned }
 
     val byFilter = when (filter) {
         null -> videos
+        PRODUCTS -> videos.filter { it.isProduct() }
         BRAND_GLOBAL -> videos.filter { it.isBrandGlobal() }
         ORPHANS -> videos.filter { !it.assigned }
         else -> videos.filter { it.isProduct() && it.productLine == filter }
@@ -468,37 +529,39 @@ fun VideoPickerScreen(
         right = {
             Column(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 56.dp)) {
                 SearchBar(query, onQueryChange = { query = it }, placeholder = "Search $brand videos")
-                // Filter pills: All · Brand global · <product lines> ·
-                // Orphans. Only shown when tm:rw has section data.
-                if (brandGlobalCount > 0 || productLines.isNotEmpty() || orphanCount > 0) {
+                // v0.1.71: four filters — All · Products · Brand videos ·
+                // Orphans (Unassigned). Only shown when tm:rw has section
+                // data; otherwise the flat "All" list stands on its own.
+                if (productCount > 0 || brandGlobalCount > 0 || orphanCount > 0) {
                     Spacer(Modifier.height(16.dp))
                     Row(
                         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         FilterPill("All", videos.size, filter == null) { filter = null }
-                        if (brandGlobalCount > 0) {
-                            FilterPill("Brand global", brandGlobalCount, filter == BRAND_GLOBAL) { filter = BRAND_GLOBAL }
+                        if (productCount > 0) {
+                            FilterPill("Products", productCount, filter == PRODUCTS) { filter = PRODUCTS }
                         }
-                        productLines.forEach { (name, n) ->
-                            FilterPill(name, n, filter == name) { filter = name }
+                        if (brandGlobalCount > 0) {
+                            FilterPill("Brand videos", brandGlobalCount, filter == BRAND_GLOBAL) { filter = BRAND_GLOBAL }
                         }
                         if (orphanCount > 0) {
-                            FilterPill("Orphans", orphanCount, filter == ORPHANS, tone = Amber) { filter = ORPHANS }
+                            FilterPill("Orphans (Unassigned)", orphanCount, filter == ORPHANS, tone = Amber) { filter = ORPHANS }
                         }
                     }
                 }
                 Spacer(Modifier.height(20.dp))
-                // v0.1.53: bound the grid with weight(1f) so the Add row
-                // below stays on-screen even with 30+ videos.
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                // v0.1.71: list view with columns — Product Name · Size ·
+                // Length · Orientation · Resolution · SKU Name. weight(1f)
+                // keeps the Add row below on-screen with 30+ videos.
+                VideoListHeader()
+                Spacer(Modifier.height(4.dp))
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
-                    items(filtered) { v ->
-                        VideoCard(
+                    lazyColumnItems(filtered, key = { it.item.id }) { v ->
+                        VideoListRow(
                             video = v,
                             selected = v.item.id in selectedIds,
                             onClick = {
@@ -544,76 +607,87 @@ fun VideoPickerScreen(
     )
 }
 
+// v0.1.71: column header bar above the list rows. Weights match
+// VideoListRow exactly so the columns line up.
 @Composable
-private fun VideoCard(video: PickerVideo, selected: Boolean, onClick: () -> Unit) {
-    // Selected = green-tinted border + check overlay so it reads on a
-    // TV across the room. Pending videos are dimmed + badged since they
-    // can't be pushed; orphans are badged but still pushable.
-    val borderColor = if (selected) Ok else BoneLine
-    val borderWidth = if (selected) 3.dp else 1.dp
-    Column(
-        Modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(Bone)
-            .border(borderWidth, borderColor, RoundedCornerShape(14.dp))
-            .clickable { onClick() }
-            .fillMaxWidth()
-            .alpha(if (video.pending) 0.55f else 1f)
+private fun VideoListHeader() {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(140.dp)
-                .background(Color(0xFF27272A)),
-            contentAlignment = Alignment.BottomStart,
-        ) {
-            Text(
-                video.item.title.uppercase().take(30),
-                color = Bone,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(16.dp),
-            )
-            val badge = when {
-                video.pending -> "PENDING"
-                !video.assigned -> "ORPHAN"
-                else -> null
-            }
-            if (badge != null) {
-                Box(
-                    Modifier
-                        .padding(12.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(if (video.pending) Color(0xFF2D5BFF) else Amber)
-                        .align(Alignment.TopStart)
-                        .padding(horizontal = 8.dp, vertical = 3.dp),
-                ) {
-                    Text(badge, color = Bone, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+        Text("PRODUCT NAME", Modifier.weight(3f), color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Text("SIZE", Modifier.weight(1f), color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Text("LENGTH", Modifier.weight(1f), color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Text("ORIENTATION", Modifier.weight(1.4f), color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Text("RESOLUTION", Modifier.weight(1.4f), color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Text("SKU NAME", Modifier.weight(2f), color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.width(40.dp))   // selection check column
+    }
+}
+
+// v0.1.71: single list row. Selected = green border + check; pending
+// videos are dimmed + badged (can't be pushed); orphans are badged but
+// still pushable.
+@Composable
+private fun VideoListRow(video: PickerVideo, selected: Boolean, onClick: () -> Unit) {
+    val productName = video.productName()
+    val subtitle = if (video.item.title != productName) video.item.title else null
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) BoneSoft else Bone)
+            .border(if (selected) 2.dp else 1.dp, if (selected) Ok else BoneLine, RoundedCornerShape(10.dp))
+            .clickable { onClick() }
+            .alpha(if (video.pending) 0.55f else 1f)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(3f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    productName,
+                    color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                val badge = when {
+                    video.pending -> "PENDING"
+                    !video.assigned -> "ORPHAN"
+                    else -> null
+                }
+                if (badge != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(if (video.pending) Color(0xFF2D5BFF) else Amber)
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    ) {
+                        Text(badge, color = Bone, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                    }
                 }
             }
-            if (selected) {
-                Box(
-                    Modifier
-                        .padding(12.dp)
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(Ok)
-                        .align(Alignment.TopEnd),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("✓", color = Bone, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                }
+            if (subtitle != null) {
+                Text(subtitle, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
-        Column(Modifier.padding(16.dp)) {
-            Text(video.item.title, fontSize = 16.sp, fontWeight = FontWeight.Medium, color = Ink)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                (video.productLine ?: video.item.product ?: "Brand loop") +
-                    (if (video.pending) " · pending sync" else ""),
-                fontSize = 13.sp,
-                color = Muted,
-            )
+        Text(video.sizeLabel(), Modifier.weight(1f), color = Muted, fontSize = 13.sp)
+        Text(video.lengthLabel(), Modifier.weight(1f), color = Muted, fontSize = 13.sp)
+        Text(video.orientationLabel(), Modifier.weight(1.4f), color = Muted, fontSize = 13.sp)
+        Text(video.resolutionLabel(), Modifier.weight(1.4f), color = Muted, fontSize = 13.sp)
+        Text(video.sku ?: "—", Modifier.weight(2f), color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Box(Modifier.width(40.dp), contentAlignment = Alignment.CenterEnd) {
+            if (selected) {
+                Box(
+                    Modifier.size(26.dp).clip(CircleShape).background(Ok),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("✓", color = Bone, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                }
+            } else {
+                Box(Modifier.size(22.dp).clip(RoundedCornerShape(5.dp)).border(2.dp, BoneLine, RoundedCornerShape(5.dp)))
+            }
         }
     }
 }

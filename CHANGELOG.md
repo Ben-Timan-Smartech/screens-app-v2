@@ -18,6 +18,21 @@ Rules:
 
 ---
 
+## v0.1.71
+
+A cleaner columned list for picking videos — in the CMS **and** on the tablet.
+
+When you pick a video for a brand, you now get four lists: **All**,
+**Products** (with a count of how many products the brand has), **Brand
+videos**, and **Orphans (Unassigned)**. Each opens the same list view,
+with proper columns: **Product Name**, **Size**, **Length**,
+**Orientation**, **Resolution**, and **SKU Name**. Orientation, resolution
+and the SKU come straight from the asset manager, so they show even for
+videos that haven't synced to the Drive folder yet. The tablet's Add-content
+picker gets the same four lists and columns (replacing the old card grid).
+
+---
+
 ## v0.1.70
 
 Hotfix: product-scope assigned videos now show under the right brand.
