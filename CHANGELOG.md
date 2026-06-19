@@ -18,9 +18,22 @@ Rules:
 
 ---
 
-## v0.1.72
+## v0.1.73
 
-A smoother, smarter tablet updater — and brand logos in the picker.
+Screens now self-heal a corrupted video instead of looping an error on it.
+
+If a cached video file gets truncated or corrupted (usually a download cut
+short by flaky in-store wifi), ExoPlayer would fail to play it — *"read
+position out of range"* — and the tablet's watchdog could only retry the
+same bad file over and over. Now, when a screen hits that error it
+**automatically deletes the bad copy, drops the video from the loop so it
+stops erroring, and re-downloads a clean copy** — which rejoins the
+rotation once it lands. It gives up after two attempts on a given file
+(so a video that's genuinely broken at the source can't loop forever) and
+logs it for follow-up.
+
+No setup needed — it just makes playback more resilient on top of the
+existing resumable-download protection.
 
 **Updates no longer download twice.** If a tablet already pulled the new
 APK but the install didn't finish (e.g. the permission prompt got in the

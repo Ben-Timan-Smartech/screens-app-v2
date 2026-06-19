@@ -61,6 +61,13 @@ class PlaybackWatchdog(
     private val onRestart: () -> Unit,
     private val isOnSplash: () -> Boolean = { false },
     /**
+     * v0.1.73: invoked with the offending mediaId when ExoPlayer reports
+     * a corrupt/truncated source file. The caller purges that video from
+     * the cache and re-downloads it (a plain prepare() would just re-read
+     * the same bad bytes). No-op by default.
+     */
+    private val onBadSource: (String) -> Unit = {},
+    /**
      * v0.1.49: caller-supplied label for the currently-playing item,
      * woven into every watchdog log line so the operator can read
      * the JSONL log file (or CMS Recent activity) and see which
@@ -98,6 +105,12 @@ class PlaybackWatchdog(
      */
     private val perItemKicks = mutableMapOf<String, Int>()
 
+    /** v0.1.73: per-item count of cache-purge+re-download attempts after a
+     *  bad-source error. Bounds the loop so a genuinely corrupt *source*
+     *  file (bad in Drive, not just a bad local copy) can't trigger
+     *  endless re-downloads. */
+    private val badSourcePurges = mutableMapOf<String, Int>()
+
     /** Hop the consecutive-stall counter doesn't trip on a real
      *  loop boundary (REPEAT_MODE_ALL resets position to 0 between
      *  items). Cleared on every [Player.Listener.onMediaItemTransition]. */
@@ -116,6 +129,26 @@ class PlaybackWatchdog(
         override fun onPlayerError(error: PlaybackException) {
             val label = currentItemLabel() ?: "(unknown item)"
             LogBuffer.w(TAG, "ExoPlayer error on '$label': ${error.errorCodeName} — ${error.message}")
+            // v0.1.73: a truncated/corrupt cached MP4 throws a source IO /
+            // container-parsing error. A plain prepare() re-reads the same
+            // bad bytes, so purge the file and re-download a clean copy.
+            // ExoPlayer dispatches this callback on the app's main thread,
+            // so currentMediaItem is safe to read here. Bounded per item so
+            // a file that's also broken at the source can't loop forever.
+            if (error.errorCode in BAD_SOURCE_CODES && !isOnSplash()) {
+                val id = player.currentMediaItem?.mediaId
+                if (id != null) {
+                    val n = (badSourcePurges[id] ?: 0) + 1
+                    badSourcePurges[id] = n
+                    if (n <= MAX_SOURCE_PURGES) {
+                        LogBuffer.w(TAG, "Bad source '$label' (${error.errorCodeName}) — purge + re-download (attempt $n/$MAX_SOURCE_PURGES)")
+                        runCatching { onBadSource(id) }
+                            .onFailure { LogBuffer.w(TAG, "onBadSource callback failed: ${it.message}") }
+                    } else {
+                        LogBuffer.w(TAG, "Bad source '$label' persists after $MAX_SOURCE_PURGES re-downloads — leaving it; the file likely needs re-encoding/replacing")
+                    }
+                }
+            }
             pendingError = true
         }
     }
@@ -309,5 +342,20 @@ class PlaybackWatchdog(
          *  watchdog doesn't auto-remove anything — that's the operator's
          *  call after they see the log. */
         private const val REPEAT_OFFENDER_KICK_THRESHOLD = 3
+
+        /** v0.1.73: error codes that mean "the bytes on disk are bad" —
+         *  a truncated download or a malformed/partial MP4 container.
+         *  These warrant purging + re-downloading rather than a prepare()
+         *  that just re-reads the same corrupt file. */
+        private val BAD_SOURCE_CODES = setOf(
+            PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+        )
+
+        /** Cap purge+re-download attempts per video per app session, so a
+         *  file that's corrupt at the *source* (not just locally) can't
+         *  spin in an endless re-download loop. */
+        private const val MAX_SOURCE_PURGES = 2
     }
 }
