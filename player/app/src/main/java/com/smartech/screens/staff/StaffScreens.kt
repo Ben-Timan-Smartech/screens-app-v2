@@ -3,6 +3,8 @@ package com.smartech.screens.staff
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
@@ -378,20 +381,71 @@ private fun BrandCard(brand: String, onClick: () -> Unit) {
 // pick → success → back → pick → success → back for each. The
 // `onPick` callback now receives the full set of selected videos in
 // one call; the caller pushes them as a single append.
+// v0.1.67: lightweight UI model for the picker. Wraps the pushable
+// VideoItem with the tm:rw asset-manager tags so the picker can group
+// by product line and flag orphan / pending videos without the
+// playlist model (VideoItem) needing to know about any of it.
+data class PickerVideo(
+    val item: VideoItem,
+    val productLine: String?,
+    val active: Boolean,
+    val assigned: Boolean,   // false → "orphan" (in Drive, unknown to tm:rw)
+    val pending: Boolean,    // assigned but no streamable file yet → not pushable
+)
+
+private const val ORPHANS = "__orphans__"
+
+@Composable
+private fun FilterPill(label: String, count: Int, selected: Boolean, tone: Color = Ink, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (selected) Ink else BoneSoft)
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Text(
+            "$label · $count",
+            color = if (selected) Bone else tone,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
 @Composable
 fun VideoPickerScreen(
     brand: String,
-    videos: List<VideoItem>,
+    videos: List<PickerVideo>,
     onBack: () -> Unit,
     onPick: (List<VideoItem>) -> Unit,
     onCancel: () -> Unit,
 ) {
     var query by remember { mutableStateOf(TextFieldValue("")) }
-    // Track selected ids (not the full VideoItem) so the set is
-    // stable across re-filter / re-fetch — same video keeps its tick
-    // even if the underlying list reshuffles.
+    // Track selected ids (not the full item) so the set is stable
+    // across re-filter / re-fetch — same video keeps its tick even if
+    // the underlying list reshuffles.
     var selectedIds by remember { mutableStateOf(setOf<String>()) }
-    val filtered = videos.filter { it.title.contains(query.text, ignoreCase = true) }
+    // v0.1.67: product-line filter. null = all, a productLine, or ORPHANS.
+    var filter by remember { mutableStateOf<String?>(null) }
+
+    // Product lines come from the tm:rw asset-manager tags the server
+    // merges into the library. Orphans = videos in the Drive folder the
+    // asset manager doesn't recognise.
+    val productLines = remember(videos) {
+        videos.filter { it.assigned && it.productLine != null }
+            .groupBy { it.productLine!! }
+            .map { (name, vs) -> name to vs.size }
+            .sortedBy { it.first.lowercase() }
+    }
+    val orphanCount = videos.count { !it.assigned }
+
+    val byFilter = when (filter) {
+        null -> videos
+        ORPHANS -> videos.filter { !it.assigned }
+        else -> videos.filter { it.assigned && it.productLine == filter }
+    }
+    val filtered = byFilter.filter { it.item.title.contains(query.text, ignoreCase = true) }
     val selectedCount = selectedIds.size
     val canCommit = selectedCount > 0
 
@@ -407,13 +461,26 @@ fun VideoPickerScreen(
         right = {
             Column(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 56.dp)) {
                 SearchBar(query, onQueryChange = { query = it }, placeholder = "Search $brand videos")
-                Spacer(Modifier.height(28.dp))
-                // v0.1.53: bound the grid with weight(1f) so the Row
-                // below it stays on-screen even when there are 30+
-                // videos in the brand. Pre-v0.1.53 the grid had no
-                // height constraint, so a long list pushed the Add
-                // button off the bottom — selection ticked fine but
-                // the commit button was offscreen.
+                // Product-line filter pills — only when tm:rw has product
+                // data (or orphans) for this brand; otherwise just videos.
+                if (productLines.isNotEmpty() || orphanCount > 0) {
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        FilterPill("All", videos.size, filter == null) { filter = null }
+                        productLines.forEach { (name, n) ->
+                            FilterPill(name, n, filter == name) { filter = name }
+                        }
+                        if (orphanCount > 0) {
+                            FilterPill("Orphans", orphanCount, filter == ORPHANS, tone = Amber) { filter = ORPHANS }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(20.dp))
+                // v0.1.53: bound the grid with weight(1f) so the Add row
+                // below stays on-screen even with 30+ videos.
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(3),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -423,10 +490,14 @@ fun VideoPickerScreen(
                     items(filtered) { v ->
                         VideoCard(
                             video = v,
-                            selected = v.id in selectedIds,
+                            selected = v.item.id in selectedIds,
                             onClick = {
-                                selectedIds = if (v.id in selectedIds) selectedIds - v.id
-                                              else selectedIds + v.id
+                                // Pending videos can't be pushed (no
+                                // streamable file yet) — ignore taps.
+                                if (!v.pending) {
+                                    selectedIds = if (v.item.id in selectedIds) selectedIds - v.item.id
+                                                  else selectedIds + v.item.id
+                                }
                             },
                         )
                     }
@@ -435,9 +506,6 @@ fun VideoPickerScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     NavPill("← Back", onBack)
                     Spacer(Modifier.weight(1f))
-                    // Count badge so the staff member can see what
-                    // they've queued without scrolling back through
-                    // the grid. Hidden when none selected.
                     if (selectedCount > 0) {
                         Text(
                             "$selectedCount selected",
@@ -452,12 +520,9 @@ fun VideoPickerScreen(
                         label = if (selectedCount <= 1) "Add video" else "Add $selectedCount videos",
                         onClick = {
                             if (!canCommit) return@NavPill
-                            // Preserve the order the staff picked
-                            // them in (selectedIds is a LinkedHashSet
-                            // by construction since Kotlin's `+` on a
-                            // Set keeps insertion order).
+                            // Preserve pick order (insertion-ordered set).
                             val picked = selectedIds.mapNotNull { id ->
-                                videos.firstOrNull { it.id == id }
+                                videos.firstOrNull { it.item.id == id }?.item
                             }
                             if (picked.isNotEmpty()) onPick(picked)
                         },
@@ -470,10 +535,10 @@ fun VideoPickerScreen(
 }
 
 @Composable
-private fun VideoCard(video: VideoItem, selected: Boolean, onClick: () -> Unit) {
+private fun VideoCard(video: PickerVideo, selected: Boolean, onClick: () -> Unit) {
     // Selected = green-tinted border + check overlay so it reads on a
-    // TV across the room. Unselected stays subtle so the grid still
-    // scans cleanly when nothing's been picked yet.
+    // TV across the room. Pending videos are dimmed + badged since they
+    // can't be pushed; orphans are badged but still pushable.
     val borderColor = if (selected) Ok else BoneLine
     val borderWidth = if (selected) 3.dp else 1.dp
     Column(
@@ -483,6 +548,7 @@ private fun VideoCard(video: VideoItem, selected: Boolean, onClick: () -> Unit) 
             .border(borderWidth, borderColor, RoundedCornerShape(14.dp))
             .clickable { onClick() }
             .fillMaxWidth()
+            .alpha(if (video.pending) 0.55f else 1f)
     ) {
         Box(
             Modifier
@@ -492,14 +558,30 @@ private fun VideoCard(video: VideoItem, selected: Boolean, onClick: () -> Unit) 
             contentAlignment = Alignment.BottomStart,
         ) {
             Text(
-                video.title.uppercase().take(30),
+                video.item.title.uppercase().take(30),
                 color = Bone,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.padding(16.dp),
             )
+            val badge = when {
+                video.pending -> "PENDING"
+                !video.assigned -> "ORPHAN"
+                else -> null
+            }
+            if (badge != null) {
+                Box(
+                    Modifier
+                        .padding(12.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (video.pending) Color(0xFF2D5BFF) else Amber)
+                        .align(Alignment.TopStart)
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                ) {
+                    Text(badge, color = Bone, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                }
+            }
             if (selected) {
-                // Selection checkmark in the top-right corner.
                 Box(
                     Modifier
                         .padding(12.dp)
@@ -514,10 +596,11 @@ private fun VideoCard(video: VideoItem, selected: Boolean, onClick: () -> Unit) 
             }
         }
         Column(Modifier.padding(16.dp)) {
-            Text(video.title, fontSize = 16.sp, fontWeight = FontWeight.Medium, color = Ink)
+            Text(video.item.title, fontSize = 16.sp, fontWeight = FontWeight.Medium, color = Ink)
             Spacer(Modifier.height(4.dp))
             Text(
-                (video.product ?: "Brand loop") + " · " + (video.durationSec?.let { "${it}s" } ?: "—"),
+                (video.productLine ?: video.item.product ?: "Brand loop") +
+                    (if (video.pending) " · pending sync" else ""),
                 fontSize = 13.sp,
                 color = Muted,
             )
