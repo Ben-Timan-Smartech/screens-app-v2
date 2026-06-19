@@ -505,23 +505,113 @@ def _brand_logo_map() -> dict:
     return new_map
 
 
+# v0.1.64: assigned-video map from the tm:rw index /videos feed. Lets
+# the Content Library split a brand's Drive videos into "active" (the
+# asset manager has registered them as an assigned/marketing video) and
+# "orphan" (present in the Drive folder but unknown to tm:rw). Keyed by
+# brandLower -> { fileNameLower: {productName, active} }. Fetched
+# per-brand (GET /videos?brand=) for only the brands the library
+# actually has, cached on the same 6h TTL as logos.
+_TMRW_VIDEOS_CACHE: dict = {"fetchedAt": 0.0, "byBrand": {}, "hash": "0"}
+_TMRW_VIDEOS_TTL = 6 * 60 * 60   # 6 hours
+
+
+def _tmrw_videos_map() -> dict:
+    """Return {brandLower: {fileNameLower: {productName, active}}}.
+    Best-effort: missing key / network error leaves the previous map in
+    place (or empty) so the library still serves — every video just
+    reads as an orphan until tm:rw is reachable."""
+    now = time.time()
+    cached = _TMRW_VIDEOS_CACHE["byBrand"]
+    if cached and (now - _TMRW_VIDEOS_CACHE["fetchedAt"]) < _TMRW_VIDEOS_TTL:
+        return cached
+    entry = _secrets.get("brandApiKey") or {}
+    key = (entry.get("value") or "").strip()
+    if not key:
+        _TMRW_VIDEOS_CACHE["fetchedAt"] = now
+        return cached
+    lib = _load_library()
+    brand_names = sorted({
+        (b.get("name") or "").strip()
+        for b in (lib.get("brands") or []) if (b.get("name") or "").strip()
+    })
+    by_brand: dict[str, dict] = {}
+    for name in brand_names:
+        url = f"{BRAND_API_BASE}/videos?brand={urllib.parse.quote(name)}"
+        req = urllib.request.Request(url, headers={"X-API-Key": key, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                rows = json.loads(resp.read().decode("utf-8") or "[]")
+        except Exception as e:
+            print(f"[tmrwvideos] /videos?brand={name} failed: {e}", file=sys.stderr)
+            continue
+        fmap: dict[str, dict] = {}
+        for r in rows if isinstance(rows, list) else []:
+            fn = (r.get("fileName") or "").strip().lower()
+            if not fn:
+                continue
+            fmap[fn] = {
+                "productName": (r.get("productName") or "").strip() or None,
+                "active": bool(r.get("active")),
+            }
+        if fmap:
+            by_brand[name.lower()] = fmap
+    import hashlib
+    new_hash = hashlib.sha1(
+        json.dumps({k: sorted(v.keys()) for k, v in by_brand.items()}, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8]
+    _TMRW_VIDEOS_CACHE.update({"byBrand": by_brand, "fetchedAt": now, "hash": new_hash})
+    total = sum(len(v) for v in by_brand.values())
+    print(f"[tmrwvideos] {total} assigned video(s) across {len(by_brand)} brand(s) from tm:rw", file=sys.stderr)
+    return by_brand
+
+
 def _library_with_logos() -> tuple[dict, str]:
-    """Library payload with each brand record enriched with its tm:rw
-    logoUrl (case-insensitive name match). Returns (data, etag). Never
-    mutates the shared library cache — builds a fresh dict for the
-    response. ETag folds in the logo-map hash so a logo refresh
+    """Library payload enriched with tm:rw data. Returns (data, etag).
+    Never mutates the shared library cache — builds a fresh dict.
+
+    Per brand: `logoUrl` (case-insensitive name match).
+    Per video: `tmrwAssigned` (bool — tm:rw knows this file as an
+    assigned video, matched by basename), `tmrwActive` (bool — assigned
+    AND its product/brand is live), and `productLine` (the tm:rw product
+    name for grouping). Unmatched videos get tmrwAssigned=false so the
+    CMS can bucket them as orphans.
+
+    ETag folds in the logo + videos map hashes so a tm:rw refresh
     invalidates client caches without waiting for a Drive re-sync."""
     data = _load_library()
     logos = _brand_logo_map()
+    vids = _tmrw_videos_map()
+    out = dict(data)
+
     brands = data.get("brands")
     if logos and isinstance(brands, list):
-        enriched = []
-        for b in brands:
-            url = logos.get((b.get("name") or "").lower())
-            enriched.append({**b, "logoUrl": url} if url else b)
-        data = {**data, "brands": enriched}
-    etag = f'"lib-{int(_LIBRARY_CACHE.get("mtime") or 0)}-{_BRAND_LOGO_CACHE["hash"]}"'
-    return data, etag
+        out["brands"] = [
+            ({**b, "logoUrl": logos.get((b.get("name") or "").lower())}
+             if logos.get((b.get("name") or "").lower()) else b)
+            for b in brands
+        ]
+
+    videos = data.get("videos")
+    if isinstance(videos, list):
+        new_videos = []
+        for v in videos:
+            bmap = vids.get((v.get("brand") or "").lower())
+            row = bmap.get((v.get("filename") or "").lower()) if bmap else None
+            if row:
+                nv = {**v, "tmrwAssigned": True, "tmrwActive": row["active"]}
+                if row.get("productName"):
+                    nv["productLine"] = row["productName"]
+                new_videos.append(nv)
+            else:
+                new_videos.append({**v, "tmrwAssigned": False, "tmrwActive": False})
+        out["videos"] = new_videos
+
+    etag = (
+        f'"lib-{int(_LIBRARY_CACHE.get("mtime") or 0)}'
+        f'-{_BRAND_LOGO_CACHE["hash"]}-{_TMRW_VIDEOS_CACHE["hash"]}"'
+    )
+    return out, etag
 
 
 def _test_brand_api_key() -> dict:
@@ -1086,7 +1176,11 @@ _INTEGRATION_SECRETS: dict[str, str] = {
 # tells us the server is up, not whether we can authenticate).
 BRAND_API_BASE = os.environ.get(
     "SCREENS_BRAND_API_BASE",
-    "https://tmrw-index-api-6dgw63xeaa-nw.a.run.app",
+    # v0.1.64: tm:rw index redeployed to a new Cloud Run revision URL.
+    # The old "-6dgw63xeaa-" host still answers (slightly stale) but is
+    # being retired. Override with SCREENS_BRAND_API_BASE if it moves
+    # again.
+    "https://tmrw-index-api-izdr7go5hq-nw.a.run.app",
 ).rstrip("/")
 
 # ── Library sync (scan-videos.py runner) ────────────────────────────

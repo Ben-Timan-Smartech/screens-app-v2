@@ -18,6 +18,43 @@ Rules:
 
 ---
 
+## v0.1.64
+
+Content Library product selector + active/orphan videos (CMS), new tm:rw URL.
+
+### Products selector + orphans
+
+Inside a brand, the Content Library left rail now lists **product lines
+pulled from the tm:rw asset manager** instead of the old hardcoded list.
+Each line shows its video count and an "N active" hint. Clicking a line
+filters the grid to it **and auto-selects its active videos** — ready to
+push. An **Orphans** entry collects videos that are in the Drive folder
+but not registered in the asset manager; list rows tag those with a small
+"Orphan" badge.
+
+How it works: the server fetches `GET /videos?brand=` from the tm:rw
+index (using the Brand Asset Manager API key), caches it 6h, and tags
+each library video with `tmrwAssigned` / `tmrwActive` / `productLine` by
+matching on filename. A video is "active" when tm:rw returns it as an
+assigned video for a live product/brand; anything the asset manager
+doesn't know is an orphan.
+
+Note: a brand only shows active videos once its assigned videos (by exact
+filename) are present in the Drive folder the player scans. Brands the
+asset manager hasn't processed yet show everything as orphans with a
+one-line explanation — that's expected, not an error.
+
+### New tm:rw API URL
+
+The tm:rw index moved to a new Cloud Run URL
+(`tmrw-index-api-izdr7go5hq-…`). Updated the default; override with
+`SCREENS_BRAND_API_BASE` if it moves again.
+
+The player APK gets the same product selector / orphan view + brand-logo
+rendering in the next release.
+
+---
+
 ## v0.1.63
 
 Brand logos from the tm:rw index, in the CMS.
