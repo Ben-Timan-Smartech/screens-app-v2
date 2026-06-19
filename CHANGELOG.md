@@ -18,6 +18,24 @@ Rules:
 
 ---
 
+## v0.1.66
+
+Tablet: refresh the content library on demand + on every launch.
+
+- **New "Refresh content library now" button** in the staff overlay
+  (Admin → actions, next to "Refresh playlist now"). Re-pulls the brand
+  + video list from the server immediately, without restarting the app.
+- **Auto-pull on every launch.** The tablet now refreshes the content
+  library once on startup — so a normal relaunch, and especially the
+  relaunch after an APK update, always lands the current library
+  instead of waiting for the periodic tick.
+- **Bug fix:** the periodic library refresh used `% interval == 1`,
+  which never fired in Slow poll mode (the legacy build's default) — so
+  those tablets only ever had whatever library they booted with. Now it
+  fires correctly in every poll mode.
+
+---
+
 ## v0.1.65
 
 Content Library now surfaces tm:rw assigned videos directly + refreshes fast.
