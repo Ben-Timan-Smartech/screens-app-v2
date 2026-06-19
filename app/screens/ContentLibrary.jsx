@@ -377,10 +377,13 @@ const VideoListRow = ({ v, selected, onToggle, onPreview, divider }) => {
       <div style={{ minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.title}</span>
-          {/* v0.1.64: tm:rw status. Orphan = not registered in the asset
-              manager. Active videos carry their product line; we only
+          {/* v0.1.64/65: tm:rw status. Orphan = in the Drive folder but
+              not registered. Pending = registered in the asset manager
+              but not in the Drive folder yet, so not pushable. We only
               flag the exceptions so a healthy list isn't noisy. */}
-          {v.tmrwAssigned === false && (
+          {v.pendingSync ? (
+            <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 500, color: 'var(--info)', background: 'var(--info-bg)', padding: '1px 5px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4 }} title="Registered in the asset manager but not in the Drive folder yet — can't push until it syncs">Pending</span>
+          ) : v.tmrwAssigned === false && (
             <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 500, color: 'var(--warn)', background: 'var(--warn-bg)', padding: '1px 5px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4 }}>Orphan</span>
           )}
         </div>
@@ -1004,6 +1007,11 @@ const ContentLibrary = () => {
     : null;
 
   const toggle = (id) => {
+    // v0.1.65: pendingSync videos (assigned in tm:rw but not yet in the
+    // Drive folder) have no streamable file, so they can't be pushed —
+    // ignore attempts to tick them.
+    const vid = MOCK_VIDEOS.find(v => v.id === id);
+    if (vid && vid.pendingSync) return;
     const n = new Set(selected);
     n.has(id) ? n.delete(id) : n.add(id);
     setSelected(n);
@@ -1059,7 +1067,12 @@ const ContentLibrary = () => {
     if (line && line !== ORPHAN) {
       const next = new Set();
       for (const v of brandVideos) {
-        if (v.tmrwAssigned !== false && v.productLine === line && v.tmrwActive) next.add(v.id);
+        // Auto-select active videos for the line — but skip pendingSync
+        // ones (assigned in tm:rw but not yet in the Drive folder, so
+        // there's no streamable file to push).
+        if (v.tmrwAssigned !== false && v.productLine === line && v.tmrwActive && !v.pendingSync) {
+          next.add(v.id);
+        }
       }
       setSelected(next);
     }

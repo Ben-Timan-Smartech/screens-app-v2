@@ -513,14 +513,35 @@ def _brand_logo_map() -> dict:
 # per-brand (GET /videos?brand=) for only the brands the library
 # actually has, cached on the same 6h TTL as logos.
 _TMRW_VIDEOS_CACHE: dict = {"fetchedAt": 0.0, "byBrand": {}, "hash": "0"}
-_TMRW_VIDEOS_TTL = 6 * 60 * 60   # 6 hours
+# v0.1.65: dropped from 6h to 5min. The fetch is now a single GET
+# /videos call (cheap), and 6h was painfully slow while the asset
+# manager is actively having videos added. "Sync now" also force-
+# resets this (see _reset_tmrw_caches), so changes can be pulled on
+# demand without waiting out the TTL.
+_TMRW_VIDEOS_TTL = 5 * 60   # 5 minutes
+
+
+def _reset_tmrw_caches() -> None:
+    """Force the next /api/library to re-pull tm:rw brands + videos.
+    Wired to the 'Sync now' action so an operator can pull a freshly
+    added assigned video immediately instead of waiting out the TTL."""
+    _BRAND_LOGO_CACHE["fetchedAt"] = 0.0
+    _TMRW_VIDEOS_CACHE["fetchedAt"] = 0.0
 
 
 def _tmrw_videos_map() -> dict:
-    """Return {brandLower: {fileNameLower: {productName, active}}}.
+    """Return {brandLower: {"display": <brand>, "videos": {fileNameLower:
+    {fileName, productName, active, orientation, resolution}}}}.
+
+    v0.1.65: one GET /videos call for the whole assigned-video set
+    (marketing videos are few relative to products), grouped by brand —
+    so a tm:rw brand with assigned videos shows up even if it has no
+    Drive folder yet (e.g. "Moods"). Brand-scope rows carry the brand in
+    scopeKey; family/product-scope rows fall back to an explicit `brand`
+    field if present, else scopeKey.
+
     Best-effort: missing key / network error leaves the previous map in
-    place (or empty) so the library still serves — every video just
-    reads as an orphan until tm:rw is reachable."""
+    place so the library still serves."""
     now = time.time()
     cached = _TMRW_VIDEOS_CACHE["byBrand"]
     if cached and (now - _TMRW_VIDEOS_CACHE["fetchedAt"]) < _TMRW_VIDEOS_TTL:
@@ -530,38 +551,44 @@ def _tmrw_videos_map() -> dict:
     if not key:
         _TMRW_VIDEOS_CACHE["fetchedAt"] = now
         return cached
-    lib = _load_library()
-    brand_names = sorted({
-        (b.get("name") or "").strip()
-        for b in (lib.get("brands") or []) if (b.get("name") or "").strip()
-    })
+    req = urllib.request.Request(
+        f"{BRAND_API_BASE}/videos",
+        headers={"X-API-Key": key, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode("utf-8") or "[]")
+    except Exception as e:
+        print(f"[tmrwvideos] /videos fetch failed: {e}", file=sys.stderr)
+        _TMRW_VIDEOS_CACHE["fetchedAt"] = now
+        return cached
     by_brand: dict[str, dict] = {}
-    for name in brand_names:
-        url = f"{BRAND_API_BASE}/videos?brand={urllib.parse.quote(name)}"
-        req = urllib.request.Request(url, headers={"X-API-Key": key, "Accept": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                rows = json.loads(resp.read().decode("utf-8") or "[]")
-        except Exception as e:
-            print(f"[tmrwvideos] /videos?brand={name} failed: {e}", file=sys.stderr)
+    for r in rows if isinstance(rows, list) else []:
+        fn = (r.get("fileName") or "").strip()
+        if not fn:
             continue
-        fmap: dict[str, dict] = {}
-        for r in rows if isinstance(rows, list) else []:
-            fn = (r.get("fileName") or "").strip().lower()
-            if not fn:
-                continue
-            fmap[fn] = {
-                "productName": (r.get("productName") or "").strip() or None,
-                "active": bool(r.get("active")),
-            }
-        if fmap:
-            by_brand[name.lower()] = fmap
+        brand = (
+            r.get("brand")
+            or (r.get("scopeKey") if r.get("scope") == "brand" else None)
+            or r.get("scopeKey")
+            or ""
+        ).strip()
+        if not brand:
+            continue
+        bucket = by_brand.setdefault(brand.lower(), {"display": brand, "videos": {}})
+        bucket["videos"][fn.lower()] = {
+            "fileName": fn,
+            "productName": (r.get("productName") or "").strip() or None,
+            "active": bool(r.get("active")),
+            "orientation": (r.get("orientation") or "").strip() or None,
+            "resolution": (r.get("resolution") or "").strip() or None,
+        }
     import hashlib
     new_hash = hashlib.sha1(
-        json.dumps({k: sorted(v.keys()) for k, v in by_brand.items()}, sort_keys=True).encode("utf-8")
+        json.dumps({k: sorted(v["videos"].keys()) for k, v in by_brand.items()}, sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
     _TMRW_VIDEOS_CACHE.update({"byBrand": by_brand, "fetchedAt": now, "hash": new_hash})
-    total = sum(len(v) for v in by_brand.values())
+    total = sum(len(v["videos"]) for v in by_brand.values())
     print(f"[tmrwvideos] {total} assigned video(s) across {len(by_brand)} brand(s) from tm:rw", file=sys.stderr)
     return by_brand
 
@@ -592,20 +619,76 @@ def _library_with_logos() -> tuple[dict, str]:
             for b in brands
         ]
 
+    # Tag scanned videos + track which assigned videos we matched, so
+    # the rest can be surfaced as "active, pending sync" entries below.
     videos = data.get("videos")
+    matched: dict[str, set] = {}   # brandLower -> {fileNameLower matched}
     if isinstance(videos, list):
         new_videos = []
         for v in videos:
-            bmap = vids.get((v.get("brand") or "").lower())
-            row = bmap.get((v.get("filename") or "").lower()) if bmap else None
+            bkey = (v.get("brand") or "").lower()
+            fnkey = (v.get("filename") or "").lower()
+            bucket = vids.get(bkey)
+            row = bucket["videos"].get(fnkey) if bucket else None
             if row:
+                matched.setdefault(bkey, set()).add(fnkey)
                 nv = {**v, "tmrwAssigned": True, "tmrwActive": row["active"]}
                 if row.get("productName"):
                     nv["productLine"] = row["productName"]
                 new_videos.append(nv)
             else:
                 new_videos.append({**v, "tmrwAssigned": False, "tmrwActive": False})
+
+        # v0.1.65: surface assigned videos tm:rw knows about but that
+        # aren't in the Drive scan yet (e.g. a brand-wide video for a
+        # brand with no Brand Content folder). They show in the library
+        # as active, flagged `pendingSync` — the CMS renders them but
+        # blocks push since there's no streamable mediaUrl until the
+        # file lands in the scanned folder. mediaUrl=None on purpose.
+        for bkey, bucket in vids.items():
+            done = matched.get(bkey, set())
+            for fnkey, row in bucket["videos"].items():
+                if fnkey in done:
+                    continue
+                new_videos.append({
+                    "id": f"tmrw-{_slug(bkey)}-{_slug(row['fileName'])}",
+                    "title": row.get("productName") or row["fileName"],
+                    "brand": bucket["display"],
+                    "product": row.get("productName"),
+                    "productLine": row.get("productName"),
+                    "filename": row["fileName"],
+                    "mediaUrl": None,
+                    "sizeMb": None,
+                    "durationSec": None,
+                    "duration": "—",
+                    "width": None,
+                    "height": None,
+                    "screens": 0,
+                    "tmrwAssigned": True,
+                    "tmrwActive": row["active"],
+                    "pendingSync": True,
+                    "source": "tmrw",
+                })
         out["videos"] = new_videos
+
+    # Ensure brands that only exist in tm:rw (have assigned videos but no
+    # Drive folder) appear in the brand rail, and bump video counts to
+    # include surfaced assigned videos.
+    brands_out = out.get("brands")
+    if isinstance(brands_out, list) and vids:
+        by_name = {(b.get("name") or "").lower(): b for b in brands_out}
+        for bkey, bucket in vids.items():
+            if bkey in by_name:
+                continue
+            display = bucket["display"]
+            brands_out.append({
+                "id": _slug(bkey),
+                "name": display,
+                "videos": len(bucket["videos"]),
+                "products": [],
+                "logoUrl": logos.get(bkey),
+            })
+        out["brands"] = brands_out
 
     etag = (
         f'"lib-{int(_LIBRARY_CACHE.get("mtime") or 0)}'
@@ -2890,6 +2973,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/library/refresh":
             if self._require_perm("library.sync") is None:
                 return
+            # v0.1.65: also drop the tm:rw brand/video caches so the next
+            # /api/library re-pulls assigned videos + logos immediately.
+            # "Sync now" is the operator's "go get the latest" button —
+            # it should reflect a video they just registered in the asset
+            # manager without waiting out the 5-min TTL.
+            _reset_tmrw_caches()
             # Run on a background thread so the HTTP request doesn't hold up
             # the response. The UI polls /api/library/info to see when it's done.
             # v0.1.46: manual triggers always force a full scan — the

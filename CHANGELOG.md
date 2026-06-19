@@ -18,6 +18,43 @@ Rules:
 
 ---
 
+## v0.1.65
+
+Content Library now surfaces tm:rw assigned videos directly + refreshes fast.
+
+### Assigned videos show up even without a Drive folder
+
+v0.1.64 only *annotated* videos already in the Drive scan, so a
+brand-wide video registered in the asset manager for a brand with no
+Brand Content folder (e.g. **Moods**) was invisible. Now the server
+pulls the whole assigned-video set from tm:rw (`GET /videos`) and
+surfaces each one in the Content Library — the brand appears in the
+rail and its videos appear under their product line, even with nothing
+on disk yet.
+
+Such videos are flagged **Pending** (registered in the asset manager
+but not yet in the Drive folder the player scans). They're visible but
+can't be selected or pushed, because there's no streamable file until
+the video lands in the scanned folder. Videos that *are* in the folder
+play as normal.
+
+### Much faster refresh
+
+The tm:rw cache dropped from **6 hours to 5 minutes**, and **Sync now**
+(Settings → Drive sync) force-refreshes it — so a video you add in the
+asset manager shows in the CMS within ~5 min automatically, or
+immediately if you hit Sync now. (The browser then picks it up on its
+next 60-second library poll.)
+
+### Still pending: playback of asset-manager videos
+
+tm:rw files assigned videos to `Smartech/Brands/{Brand}/Videos/Compressed`,
+but the player scans `Smartech/Screens/Brand Content/{Brand}`. Until those
+converge (or the API returns a streamable Drive file id), asset-manager
+videos show as Pending rather than pushable.
+
+---
+
 ## v0.1.64
 
 Content Library product selector + active/orphan videos (CMS), new tm:rw URL.
