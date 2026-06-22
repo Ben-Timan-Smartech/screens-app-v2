@@ -1157,11 +1157,15 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
           // up so the controls fit one page; single stacked column only on
           // phones. v0.1.76: tablet moved from stacked → two-column now that
           // the rail collapses to short rows. Rail narrows a touch on tablet.
-          gridTemplateColumns: vp.tier === 'mobile' ? '1fr' : (vp.tier === 'tablet' ? '1fr 260px' : '1fr 300px'),
+          // minmax(0, …) instead of 1fr so the flexible track can shrink
+          // below its content's min-content — without this a long playlist
+          // title forced the column (and the whole page) wider than a phone
+          // viewport, clipping everything on the right edge.
+          gridTemplateColumns: vp.tier === 'mobile' ? 'minmax(0, 1fr)' : (vp.tier === 'tablet' ? 'minmax(0, 1fr) 260px' : 'minmax(0, 1fr) 300px'),
           gap: vp.tier === 'mobile' ? 16 : 20, alignItems: 'start',
         }}>
           {/* Main column */}
-          <div>
+          <div style={{ minWidth: 0 }}>
             {/* Now playing preview */}
             <div style={{ marginBottom: 22 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -1287,7 +1291,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
           </div>
 
           {/* Right sidebar */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
             <CollapsibleCard title="Status" summary={`${statusValues.health.label} · ${statusValues.lastSeen}`}>
               <div>
                 <StatusLine label="Health" value={
