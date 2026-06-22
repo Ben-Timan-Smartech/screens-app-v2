@@ -174,6 +174,14 @@ class MainActivity : ComponentActivity() {
             onKick = { repo.refreshPlaylist() },
             onRestart = { repo.scheduleSelfRestart() },
             isOnSplash = { controller.isOnSplash() },
+            // v0.1.76: stuck-on-splash recovery. If a screen sits on the
+            // splash while the pushed content is already downloaded, the
+            // watchdog first restarts the player in-process, then (once)
+            // reboots the activity. shouldBePlayingContent gates this so a
+            // screen still downloading never gets needlessly bounced.
+            onRestartPlayer = { repo.restartPlayer() },
+            shouldBePlayingContent = { repo.hasPlayableContentPending() },
+            isOnFallbackSplash = { controller.isOnFallbackSplash() },
             // v0.1.73: a corrupt/truncated cached video → purge it and
             // re-download a clean copy instead of looping on the bad file.
             onBadSource = { mediaId -> repo.invalidateCachedVideo(mediaId) },
