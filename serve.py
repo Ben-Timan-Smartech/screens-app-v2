@@ -274,6 +274,15 @@ UPLOADS_DIR = Path(os.environ.get(
     _state_path_default("uploads"),
 ))
 
+# v0.1.75: CMS-uploaded splash overrides. One subfolder per brand/concept
+# (key = "<kind>-<name>" slug) holding landscape.* / portrait.* + a
+# meta.json recording the exact {kind, name}. Lives under the persistent
+# uploads dir so it survives redeploys, and is overlaid onto the Drive-
+# scanned splash registry (see _apply_uploaded_splashes) — letting an
+# operator replace a screen's splash straight from the CMS, no Drive
+# round-trip and no APK release.
+SPLASH_UPLOADS_DIR = UPLOADS_DIR / "splashes"
+
 # v0.1.21: where tablet crash reports land. One JSON file per crash,
 # named `<deviceId>-<crashTimeMs>.json` so listings sort by tablet
 # then by time. Same FUSE-mount lineage so we don't lose evidence
@@ -1328,6 +1337,15 @@ SPLASH_FOLDERS = [
     ("concept", "tm:rw Cafe", "Splash - tm-rw Cafe"),
 ]
 
+# Reverse maps so a CMS-uploaded splash for one (kind, name) propagates to
+# every registry key backed by the same Drive folder — e.g. brand:smartech
+# and concept:Smartech both use "Splash - Smartech", so an upload to either
+# updates both (and thus screens keyed by city-brand OR by concept).
+_splash_folder_by_target = {(k, n): fn for (k, n, fn) in SPLASH_FOLDERS}
+_splash_keys_by_folder: dict = {}
+for _sk, _sn, _sfn in SPLASH_FOLDERS:
+    _splash_keys_by_folder.setdefault(_sfn, []).append((_sk, _sn))
+
 # Default city → brand mapping. NYC and ROM run tm:rw; LDN and BER run
 # Smartech. Editable at runtime via /api/splashes/mapping.
 DEFAULT_CITY_BRAND: dict = {
@@ -1571,9 +1589,37 @@ def daily_sync_loop() -> None:
 
 
 def _build_splash_registry() -> None:
-    """Scan SPLASH_DIR for the configured folders. Pick the largest MP4
-    that isn't tucked under an "Old" / "Compressed" / etc subfolder."""
+    """Scan SPLASH_DIR for the configured folders and pick a landscape
+    splash plus an optional portrait splash so the server can serve the
+    right aspect per screen orientation (see [resolve_splash_for]).
+
+    Matching is by TOP-LEVEL filename — the only level the Drive hydrator
+    pulls (`_hydrate_splashes_from_drive` doesn't recurse), so portrait
+    variants must live alongside the landscape file, not in a subfolder:
+      • a name containing "portrait"  → the portrait variant
+      • a name containing "landscape" → the explicit landscape pick
+      • neither marker                → largest top-level file is landscape
+        (legacy single-splash behaviour; portrait stays absent and
+        portrait screens fall back to the landscape file)
+    Files under Old/Compressed/NoLogo/Portrait subfolders stay ignored."""
     skip_segments = ("/old/", "/compressed/", "/nologo/", "/portrait/")
+
+    def _url_for(f) -> str:
+        rel_path = f.relative_to(SPLASH_DIR)
+        base = "/splash/" + "/".join(urllib.parse.quote(p) for p in rel_path.parts)
+        # Cache-bust on file size so that *replacing* a splash (same filename,
+        # new content) changes the URL — the tablet keys its splash cache off
+        # the URL, so without this a content update to an existing file would
+        # never reach screens that already cached the old bytes. Size is stable
+        # across Drive re-hydrations for unchanged content (mtime is not).
+        try:
+            return f"{base}?v={f.stat().st_size}"
+        except OSError:
+            return base
+
+    def _by_size(ps):
+        return sorted(ps, key=lambda p: p.stat().st_size, reverse=True)
+
     out: dict = {}
     for kind, name, folder_name in SPLASH_FOLDERS:
         folder = SPLASH_DIR / folder_name
@@ -1589,24 +1635,99 @@ def _build_splash_registry() -> None:
         if not candidates:
             continue
         # Prefer files at the top level of the folder; fall back to deepest
-        # filesystem find. Then largest by size.
-        top = [c for c in candidates if c.parent == folder]
-        chosen = (sorted(top, key=lambda p: p.stat().st_size, reverse=True)
-                  or sorted(candidates, key=lambda p: p.stat().st_size, reverse=True))[0]
-        rel_path = chosen.relative_to(SPLASH_DIR)
-        url = "/splash/" + "/".join(urllib.parse.quote(p) for p in rel_path.parts)
+        # filesystem find.
+        pool = [c for c in candidates if c.parent == folder] or candidates
+        portrait_pool = [c for c in pool if "portrait" in c.stem.lower()]
+        landscape_pool = [c for c in pool if c not in portrait_pool]
+        explicit_ls = [c for c in landscape_pool if "landscape" in c.stem.lower()]
+        # Explicit "landscape" name wins; else largest non-portrait; else
+        # largest of anything (degenerate all-portrait folder).
+        ls_ranked = _by_size(explicit_ls) or _by_size(landscape_pool) or _by_size(pool)
+        chosen = ls_ranked[0]
         meta = {
             "kind":     kind,
             "name":     name,
             "filename": chosen.name,
-            "url":      url,
+            "url":      _url_for(chosen),
             "sizeMb":   round(chosen.stat().st_size / (1024 * 1024), 1),
         }
+        portrait_ranked = _by_size(portrait_pool)
+        if portrait_ranked:
+            p = portrait_ranked[0]
+            meta["filenamePortrait"] = p.name
+            meta["urlPortrait"]      = _url_for(p)
+            meta["sizePortraitMb"]   = round(p.stat().st_size / (1024 * 1024), 1)
         out[f"{kind}:{name}"] = meta
     _splash_registry.clear()
     _splash_registry.update(out)
     _city_brand.clear()
     _city_brand.update(DEFAULT_CITY_BRAND)
+    # Overlay any CMS-uploaded splashes on top of the Drive-scanned set.
+    _apply_uploaded_splashes()
+
+
+def _apply_uploaded_splashes() -> None:
+    """Overlay CMS-uploaded splashes (under SPLASH_UPLOADS_DIR) on top of
+    the Drive-scanned registry. An uploaded file wins *per orientation* —
+    an orientation without an upload keeps whatever the Drive scan found.
+    Idempotent; called at the end of _build_splash_registry and again after
+    each upload so the change is live on the next screen poll."""
+    root = SPLASH_UPLOADS_DIR
+    if not root.is_dir():
+        return
+
+    def _uploaded_url(f) -> str:
+        rel = f.relative_to(UPLOADS_DIR)
+        base = "/uploaded/" + "/".join(urllib.parse.quote(p) for p in rel.parts)
+        try:
+            return f"{base}?v={f.stat().st_size}"
+        except OSError:
+            return base
+
+    for sub in sorted(root.iterdir()):
+        if not sub.is_dir():
+            continue
+        meta_file = sub / "meta.json"
+        if not meta_file.is_file():
+            continue
+        try:
+            info = json.loads(meta_file.read_text(encoding="utf-8"))
+            kind = str(info["kind"]); name = str(info["name"])
+        except Exception:
+            continue
+
+        def _find(orient: str):
+            for f in sorted(sub.glob(f"{orient}.*")):
+                if f.is_file() and f.suffix.lower() in (".mp4", ".mov"):
+                    return f
+            return None
+
+        ls = _find("landscape")
+        pt = _find("portrait")
+        if not (ls or pt):
+            continue
+        # Apply to every registry key backed by the same Drive folder, so an
+        # upload for brand "smartech" also lands on concept "Smartech" (both
+        # back "Splash - Smartech"). resolve_splash_for checks concept before
+        # brand, so without this a brand upload would miss concept screens.
+        folder = _splash_folder_by_target.get((kind, name))
+        sibling_keys = (_splash_keys_by_folder.get(folder)
+                        if folder else None) or [(kind, name)]
+        for sk, sn in sibling_keys:
+            reg_key = f"{sk}:{sn}"
+            meta = dict(_splash_registry.get(reg_key) or {"kind": sk, "name": sn})
+            if ls:
+                meta["url"]      = _uploaded_url(ls)
+                meta["filename"] = ls.name
+                meta["sizeMb"]   = round(ls.stat().st_size / (1024 * 1024), 1)
+                meta["uploadedLandscape"] = True
+            if pt:
+                meta["urlPortrait"]      = _uploaded_url(pt)
+                meta["filenamePortrait"] = pt.name
+                meta["sizePortraitMb"]   = round(pt.stat().st_size / (1024 * 1024), 1)
+                meta["uploadedPortrait"] = True
+            meta["source"] = "upload"
+            _splash_registry[reg_key] = meta
 
 
 # Cached Drive folder name lookup. The /api/library/info endpoint shows
@@ -1733,19 +1854,33 @@ def _hydrate_splashes_from_drive() -> Path | None:
     return cache_dir
 
 
-def resolve_splash_for(city: str | None, concept: str | None) -> dict | None:
-    """Return splash meta for a screen at (city, concept). Concept overrides brand."""
+def resolve_splash_for(
+    city: str | None,
+    concept: str | None,
+    orientation: str | None = None,
+) -> dict | None:
+    """Return splash meta for a screen at (city, concept). Concept overrides
+    brand. When the screen reports a portrait orientation and the resolved
+    splash has a portrait variant, returns a shallow copy whose `url`/`sizeMb`
+    point at the portrait file — so callers that just read `url` transparently
+    get the right aspect. `variant` records which file was served."""
+    m = None
     if concept:
         m = _splash_registry.get(f"concept:{concept}")
-        if m:
-            return m
-    if city:
+    if m is None and city:
         brand = _city_brand.get(city)
         if brand:
             m = _splash_registry.get(f"brand:{brand}")
-            if m:
-                return m
-    return None
+    if m is None:
+        return None
+    if (orientation or "").upper().startswith("PORT") and m.get("urlPortrait"):
+        m = {
+            **m,
+            "url":     m["urlPortrait"],
+            "sizeMb":  m.get("sizePortraitMb", m.get("sizeMb")),
+            "variant": "portrait",
+        }
+    return m
 
 
 def lan_ip() -> str:
@@ -1859,6 +1994,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # reader to peek at Content-Type.
         if self.path.split("?", 1)[0] == "/api/library/upload":
             self._serve_api_library_upload()
+            return
+        if self.path.split("?", 1)[0] == "/api/splashes/upload":
+            self._serve_api_splash_upload()
             return
         if self.path.startswith("/api/"):
             self._serve_api_post()
@@ -2125,6 +2263,103 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         )
         self._send_json({"ok": True, "video": entry})
 
+    def _serve_api_splash_upload(self) -> None:
+        """POST /api/splashes/upload — multipart/form-data with fields:
+          file         splash video bytes (required, .mp4/.mov)
+          kind         "brand" | "concept" (optional, default "brand")
+          name         splash name matching a known SPLASH_FOLDERS entry
+                       (e.g. "smartech", "tmrw", "Smartech")
+          orientation  "landscape" | "portrait" (required)
+
+        Writes the file to SPLASH_UPLOADS_DIR/<key>/<orientation>.<ext> on
+        the persistent uploads mount, records a meta.json, then overlays it
+        on the live splash registry. Screens pick it up on their next poll
+        (the URL is cache-busted on size). A CMS upload overrides the Drive
+        splash for that orientation only. Routed straight from do_POST so it
+        bypasses the JSON body reader, same as the library upload."""
+        if self._require_perm("settings.edit") is None:
+            return
+        ctype = self.headers.get("Content-Type", "")
+        if not ctype.lower().startswith("multipart/form-data"):
+            self.send_error(415, "Expected multipart/form-data"); return
+        boundary = None
+        for piece in ctype.split(";"):
+            piece = piece.strip()
+            if piece.lower().startswith("boundary="):
+                boundary = piece[len("boundary="):].strip().strip('"')
+                break
+        if not boundary:
+            self.send_error(400, "Missing multipart boundary"); return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.send_error(411, "Content-Length required"); return
+        if length <= 0:
+            self.send_error(411, "Content-Length required"); return
+        if length > self._UPLOAD_MAX_BYTES:
+            self.send_error(413, f"Body too large (cap {self._UPLOAD_MAX_BYTES} bytes)"); return
+        raw = self.rfile.read(length)
+        try:
+            parts = _parse_multipart(raw, boundary.encode("ascii"))
+        except Exception as exc:
+            self.send_error(400, f"Bad multipart body: {exc}"); return
+
+        file_part = next((p for p in parts if p["name"] == "file" and p.get("filename")), None)
+
+        def _field(field_name: str, default: str = "") -> str:
+            return next((p["data"].decode("utf-8", "replace").strip()
+                         for p in parts if p["name"] == field_name), default)
+
+        kind = (_field("kind", "brand") or "brand").lower()
+        name = _field("name")
+        orientation = _field("orientation").lower()
+
+        if file_part is None:
+            self.send_error(400, "Missing 'file' field"); return
+        if orientation not in ("landscape", "portrait"):
+            self.send_error(400, "orientation must be 'landscape' or 'portrait'"); return
+        valid_targets = {(f[0], f[1]) for f in SPLASH_FOLDERS}
+        if (kind, name) not in valid_targets:
+            self.send_error(400, f"Unknown splash target '{kind}:{name}'"); return
+        orig_name = file_part.get("filename") or "splash.mp4"
+        ext = os.path.splitext(orig_name)[1].lower().lstrip(".") or "mp4"
+        if ext not in {"mp4", "mov"}:
+            self.send_error(415, f"Splash must be .mp4 or .mov (got .{ext})"); return
+        part_ctype = (file_part.get("content_type") or "").lower()
+        if part_ctype and not (
+            part_ctype.startswith("video/") or part_ctype == "application/octet-stream"
+        ):
+            self.send_error(415, f"Unsupported content type: {part_ctype}"); return
+
+        key_slug = re.sub(r"[^a-zA-Z0-9]+", "_", f"{kind}-{name}").strip("_").lower() or "splash"
+        dest_dir = SPLASH_UPLOADS_DIR / key_slug
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        # Drop any prior file for this orientation (maybe a different ext)
+        # so we never end up with both landscape.mp4 and landscape.mov.
+        for old in dest_dir.glob(f"{orientation}.*"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        target = dest_dir / f"{orientation}.{ext}"
+        tmp = target.with_suffix(target.suffix + ".part")
+        with open(tmp, "wb") as fh:
+            fh.write(file_part["data"])
+        tmp.replace(target)
+        (dest_dir / "meta.json").write_text(
+            json.dumps({"kind": kind, "name": name}), encoding="utf-8"
+        )
+
+        with _STATE_LOCK:
+            _apply_uploaded_splashes()
+        meta = _splash_registry.get(f"{kind}:{name}", {})
+        _log_activity(
+            kind="upload",
+            text=f"Uploaded {orientation} splash for {name}",
+            icon="upload",
+        )
+        self._send_json({"ok": True, "splash": meta})
+
     def _serve_api_get(self) -> None:
         url = urllib.parse.urlparse(self.path)
         path = url.path
@@ -2207,7 +2442,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # Per-screen splash resolution from the device's location.
                     screen_meta = _screens.get(screen_id, {})
                     location = screen_meta.get("location") or {}
-                    splash = resolve_splash_for(location.get("city"), location.get("concept"))
+                    splash = resolve_splash_for(
+                        location.get("city"),
+                        location.get("concept"),
+                        screen_meta.get("orientation"),
+                    )
                     # Enrich each pushed item with library-side flags
                     # (defaultUnmute) so the player can apply per-video
                     # audio at playback time. The items list is small
