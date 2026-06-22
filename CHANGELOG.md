@@ -18,6 +18,21 @@ Rules:
 
 ---
 
+## v0.1.76
+
+Screens that get stuck on the splash now fix themselves.
+
+- **Auto-recovery for "stuck on the splash."** Sometimes — usually right after
+  the first video is added to a brand-new screen — the video downloads fine but
+  the screen keeps showing the splash instead of switching to it. The player now
+  notices this and recovers on its own: first it quietly restarts the video
+  player, and if that doesn't do it within a minute or so, it reboots the screen
+  (the fix that's always worked). No more walking over to power-cycle it.
+- **New "Restart player" button.** On a screen's page in the CMS there's now a
+  *Restart player* button next to *Reboot*. It restarts just the video playback
+  without rebooting the whole device — the gentlest way to nudge a screen that's
+  showing the wrong thing. If it doesn't take, the screen will reboot itself.
+
 ## v0.1.75
 
 Smoother splash screens, especially on weak in-store Wi-Fi.

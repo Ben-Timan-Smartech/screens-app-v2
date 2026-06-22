@@ -76,6 +76,28 @@ class PlaybackWatchdog(
      * Implementation should be cheap — called once per tick.
      */
     private val currentItemLabel: () -> String? = { null },
+    /**
+     * v0.1.76: the light "restart the player" recovery — re-applies the
+     * cached playlist in-process. Invoked as the first rung when a screen
+     * is stuck on the splash with content already downloaded. No-op by
+     * default.
+     */
+    private val onRestartPlayer: suspend () -> Unit = {},
+    /**
+     * v0.1.76: true when the player *should* be showing content — the
+     * server pushed a non-empty playlist and every item is cached. Used to
+     * detect a screen wedged on the splash. Default false so the
+     * splash-stuck recovery stays dormant unless the caller wires it.
+     */
+    private val shouldBePlayingContent: () -> Boolean = { false },
+    /**
+     * v0.1.76: true only when the player has *fallen back* to the splash
+     * (pure-splash mode), NOT during mix-splash playback where the splash
+     * is a deliberate queue item. The stuck-on-splash detector keys off
+     * this rather than [isOnSplash] so it never fires on a normal
+     * mix-splash loop. Default false so the recovery stays dormant.
+     */
+    private val isOnFallbackSplash: () -> Boolean = { false },
     private val pollIntervalMs: Long = DEFAULT_POLL_INTERVAL_MS,
 ) {
 
@@ -85,6 +107,16 @@ class PlaybackWatchdog(
     /** Counters tracking each signal across consecutive polls. */
     private var stallTicks = 0
     private var bufferingTicks = 0
+
+    /** v0.1.76: consecutive ticks spent on the splash while content is
+     *  actually ready to play. Drives the stuck-on-splash recovery ladder. */
+    private var splashStuckTicks = 0
+
+    /** One-shot guard so a stuck-on-splash episode triggers at most one
+     *  activity reboot per app session — prevents a reboot loop if the
+     *  content somehow can't play even after a fresh start. Re-armed once
+     *  real content is back on screen. */
+    private var splashRebootDone = false
 
     /** True when [onPlayerError] fired since the last successful poll.
      *  Cleared by either a successful tick or a recovery escalation. */
@@ -179,6 +211,41 @@ class PlaybackWatchdog(
     }
 
     private suspend fun tick() {
+        // v0.1.76: stuck-on-splash-with-content recovery. A screen can sit
+        // on the bundled splash even though the server pushed content that's
+        // already downloaded (e.g. the first push after setup didn't flip
+        // the player off the splash). Normal stall detection never catches
+        // this — the splash loops happily — so watch for it explicitly and
+        // escalate: restart the player, then (once) reboot the activity.
+        if (isOnFallbackSplash() && shouldBePlayingContent()) {
+            splashStuckTicks++
+            LogBuffer.w(TAG, "On fallback splash but content is ready to play (tick $splashStuckTicks)")
+            when (splashStuckTicks) {
+                SPLASH_STUCK_TICKS_BEFORE_RESTART -> {
+                    LogBuffer.w(TAG, "Splash-stuck → restart player")
+                    runCatching { onRestartPlayer() }
+                        .onFailure { LogBuffer.w(TAG, "Restart-player callback failed: ${it.message}") }
+                }
+                SPLASH_STUCK_TICKS_BEFORE_REBOOT -> {
+                    if (splashRebootDone) {
+                        LogBuffer.w(TAG, "Splash-stuck persists after a reboot — not rebooting again; the content may be unplayable")
+                    } else {
+                        splashRebootDone = true
+                        LogBuffer.w(TAG, "Splash-stuck after restart → rebooting activity")
+                        runCatching { withContext(Dispatchers.Main) { onRestart() } }
+                            .onFailure { LogBuffer.w(TAG, "Restart callback failed: ${it.message}") }
+                    }
+                }
+            }
+            return
+        } else {
+            splashStuckTicks = 0
+            // Re-arm the one-shot reboot once we're off the fallback splash
+            // (real content or a mix-splash loop), so a future stuck episode
+            // can recover too.
+            if (!isOnFallbackSplash()) splashRebootDone = false
+        }
+
         // Read ExoPlayer state on the main thread (it's not thread-safe).
         val snapshot = withContext(Dispatchers.Main) {
             Snapshot(
@@ -336,6 +403,13 @@ class PlaybackWatchdog(
 
         /** STATE_BUFFERING longer than 4 polls (~2 min) → cheap kick. */
         private const val BUFFERING_TICKS_BEFORE_KICK = 4
+
+        /** v0.1.76: ticks spent on the splash (with content ready) before
+         *  each stuck-on-splash recovery rung. ~60 s then ~120 s at the
+         *  30 s poll — long enough that a download finishing + the normal
+         *  re-publish gets its chance first. */
+        private const val SPLASH_STUCK_TICKS_BEFORE_RESTART = 2
+        private const val SPLASH_STUCK_TICKS_BEFORE_REBOOT = 4
 
         /** v0.1.49: when the same video triggers this many kicks across
          *  loops, surface a distinct "repeat offender" log line. The

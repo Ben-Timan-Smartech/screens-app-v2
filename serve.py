@@ -3505,7 +3505,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with _STATE_LOCK:
                 if action == "command":
                     cmd = body.get("command")
-                    if cmd not in ("reboot", "clearCache", "unregister", "update", "refresh", "sendLogs"):
+                    if cmd not in ("reboot", "restartPlayer", "clearCache", "unregister", "update", "refresh", "sendLogs"):
                         self.send_error(400, "Unknown command"); return
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
 
@@ -3540,21 +3540,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     _save_per_screen()
                     print(f"[command] {device_id} -> {cmd}", file=sys.stderr)
                     label = {
-                        "reboot":     "Rebooted",
-                        "clearCache": "Cleared cache on",
-                        "update":     "Triggered update on",
-                        "refresh":    "Forced refresh on",
-                        "sendLogs":   "Requested logs from",
+                        "reboot":        "Rebooted",
+                        "restartPlayer": "Restarted player on",
+                        "clearCache":    "Cleared cache on",
+                        "update":        "Triggered update on",
+                        "refresh":       "Forced refresh on",
+                        "sendLogs":      "Requested logs from",
                     }[cmd]
                     _log_activity(
                         kind="command",
                         text=f"{label} {screen_name}",
                         icon={
-                            "reboot":     "schedule",
-                            "clearCache": "trash",
-                            "update":     "download",
-                            "refresh":    "refresh",
-                            "sendLogs":   "list",
+                            "reboot":        "schedule",
+                            "restartPlayer": "play",
+                            "clearCache":    "trash",
+                            "update":        "download",
+                            "refresh":       "refresh",
+                            "sendLogs":      "list",
                         }[cmd],
                         target=device_id,
                     )

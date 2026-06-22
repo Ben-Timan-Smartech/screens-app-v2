@@ -1107,6 +1107,11 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
         title={screen.name}
         actions={
           <>
+            <Button variant="secondary" size="sm" icon={<Icon.play size={12} />}
+              disabled={!canEdit || busy === 'restartPlayer'}
+              onClick={() => handleCommand('restartPlayer', 'Restart player')}>
+              {busy === 'restartPlayer' ? 'Restarting…' : 'Restart player'}
+            </Button>
             <Button variant="secondary" size="sm" icon={<Icon.refresh size={12} />}
               disabled={!canEdit || busy === 'reboot'}
               onClick={() => handleCommand('reboot', 'Reboot')}>
@@ -1414,10 +1419,10 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               </div>
             </Card>
 
-            {/* v0.1.76: the Update / Reboot / Clear cache / Unregister
-                commands moved up to the page header as plain buttons, so
-                the rail no longer carries a "More actions" card. Each still
-                confirms (and, when offline, queues) via handleCommand. */}
+            {/* v0.1.76: the Restart player / Reboot / Update / Clear cache /
+                Unregister commands live in the page header as plain buttons,
+                so the rail no longer carries a "More actions" card. Each
+                still confirms (and, when offline, queues) via handleCommand. */}
             {canEdit && !isLive && (
               <div style={{ fontSize: 11, color: 'var(--ink-4)', padding: '0 2px' }}>
                 Screen offline — header commands queue and run when the tablet reconnects.

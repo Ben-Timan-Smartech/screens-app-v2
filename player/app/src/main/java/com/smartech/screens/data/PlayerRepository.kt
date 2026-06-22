@@ -1421,6 +1421,56 @@ class PlayerRepository(
         }
     }
 
+    /**
+     * v0.1.76: "Restart the video player" — the light recovery step.
+     *
+     * A screen can end up sitting on the bundled splash even though the
+     * server has pushed content that's already downloaded — e.g. the
+     * first push right after setup didn't flip the player off the splash.
+     * This forces a fresh re-apply so it switches to the cached content
+     * WITHOUT tearing the activity down: re-publish the cached playlist
+     * with a bumped revision (so PlayerScreen's state collector re-fires
+     * and PlayerController.apply()'s source-key guard rebuilds the queue),
+     * then re-pull from the server in case the local copy is stale.
+     *
+     * Fired by the CMS "Restart player" command and as the first rung of
+     * the watchdog's stuck-on-splash recovery ladder. If it doesn't take,
+     * the watchdog escalates to scheduleSelfRestart() (a full reboot).
+     */
+    fun restartPlayer() {
+        LogBuffer.w(TAG, "Restart player — forcing a fresh re-apply + re-pull")
+        forceReapply()
+        refreshNow()
+    }
+
+    /** Re-publish the last-known playlist with a bumped revision so the
+     *  player rebuilds its queue even when the revision itself is
+     *  unchanged. No-op until at least one item is cached — the splash is
+     *  the right thing to show while downloads are still in flight. */
+    private var reapplyNonce = 0
+    private fun forceReapply() {
+        val pl = lastPlaylist ?: return
+        val local = pl.items.mapNotNull { v -> if (cache.has(v.id)) LocalVideo(v, cache.file(v.id)) else null }
+        if (local.isEmpty()) {
+            LogBuffer.i(TAG, "forceReapply — nothing cached yet; leaving the splash up")
+            return
+        }
+        reapplyNonce += 1
+        _state.value = State.Playing(local, "${pl.revision}#r$reapplyNonce")
+        LogBuffer.i(TAG, "forceReapply — re-published ${local.size} item(s) (nonce $reapplyNonce)")
+    }
+
+    /** v0.1.76: true when the server has pushed a non-empty playlist AND
+     *  every item is already cached on disk — i.e. the player *ought* to
+     *  be showing content, not the splash. The watchdog uses this to tell
+     *  "genuinely stuck on the splash" (recoverable by restart/reboot)
+     *  apart from "still downloading" (where the splash is the correct
+     *  fallback and a reboot would be pointless — and risk a reboot loop). */
+    fun hasPlayableContentPending(): Boolean {
+        val intended = _intendedPlaylist.value
+        return intended.isNotEmpty() && intended.all { cache.has(it.id) }
+    }
+
     /** v0.1.66: manual content-library (brands + videos) re-pull, fired
      *  from the staff overlay's "Refresh content library" button. The
      *  same pull also runs automatically on every app startup (see
@@ -1667,6 +1717,14 @@ class PlayerRepository(
                 // missed gets re-applied on the very next tick.
                 LogBuffer.i(TAG, "Refresh command — kicking next poll")
                 refreshNow()
+            }
+            "restartPlayer" -> {
+                // CMS "Restart player" — the light recovery for a screen
+                // stuck on the splash with content already downloaded.
+                // Re-applies the cached playlist in-process; if it stays
+                // stuck, the watchdog escalates to a full reboot.
+                LogBuffer.i(TAG, "Restart-player command — re-applying the player")
+                restartPlayer()
             }
             "sendLogs" -> {
                 // CMS "Request logs" — upload the full current log buffer

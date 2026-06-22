@@ -697,6 +697,14 @@ class PlayerController(context: Context) {
         return player.currentMediaItem?.mediaId == Source.SPLASH
     }
 
+    /** True only when the player has *fallen back* to the splash because
+     *  there's no real content to show (pure-splash mode). Unlike
+     *  [isOnSplash] this is false during mix-splash playback, where the
+     *  splash is a deliberate queue item that shows once per loop — so
+     *  the v0.1.76 stuck-on-splash watchdog can use it without firing on
+     *  every mix-splash cycle. */
+    fun isOnFallbackSplash(): Boolean = currentSource == Source.SPLASH
+
     fun release() {
         pendingCoordinatedStart?.let { mainHandler.removeCallbacks(it) }
         pendingCoordinatedStart = null
