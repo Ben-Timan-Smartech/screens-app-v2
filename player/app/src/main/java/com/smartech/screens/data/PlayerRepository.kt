@@ -784,6 +784,9 @@ class PlayerRepository(
     private val _remoteSplashFile = MutableStateFlow<java.io.File?>(null)
     val remoteSplashFile: StateFlow<java.io.File?> = _remoteSplashFile
     private var lastSplashUrl: String? = null
+    // v0.1.75: retry backoff for the splash download (see ensureRemoteSplash).
+    @Volatile private var splashFailCount: Int = 0
+    @Volatile private var splashRetryAtMs: Long = 0L
 
     /** Connection state for the live demo server. Surfaced to onboarding +
      *  device admin rails so the user can see at a glance whether they're
@@ -1548,31 +1551,52 @@ class PlayerRepository(
                 else -> "$base/$url"
             }
         }
-        if (absUrl == lastSplashUrl) return
-        lastSplashUrl = absUrl
         if (absUrl == null) {
-            _remoteSplashFile.value = null
-            LogBuffer.i(TAG, "Splash → bundled (no remote URL)")
+            if (lastSplashUrl != null) {
+                lastSplashUrl = null
+                _remoteSplashFile.value = null
+                LogBuffer.i(TAG, "Splash → bundled (no remote URL)")
+            }
             return
         }
-        // Stable filename from URL hash so we can detect cache hits.
+        // Stable filename from URL hash so we can detect cache hits. The
+        // server appends ?v=<size> so a replaced splash gets a new hash.
         val splashRoot = java.io.File(appContext.filesDir, "splash").apply { mkdirs() }
         val safeName = absUrl.hashCode().toUInt().toString(16) + ".mp4"
         val target = java.io.File(splashRoot, safeName)
-        if (target.exists() && target.length() > 0) {
-            _remoteSplashFile.value = target
-            LogBuffer.i(TAG, "Splash → cached $safeName")
-            return
+        if (absUrl != lastSplashUrl) {
+            // New splash URL → reset the retry backoff and point at it.
+            lastSplashUrl = absUrl
+            splashFailCount = 0
+            splashRetryAtMs = 0L
+            if (target.exists() && target.length() > 0) {
+                _remoteSplashFile.value = target
+                LogBuffer.i(TAG, "Splash → cached $safeName")
+                return
+            }
+            _remoteSplashFile.value = null   // show bundled until it downloads
+        } else {
+            // Same URL as the last tick — don't re-download every poll.
+            if (_remoteSplashFile.value != null) return
+            if (target.exists() && target.length() > 0) {
+                _remoteSplashFile.value = target
+                return
+            }
+            if (splashFailCount >= MAX_SPLASH_ATTEMPTS) return            // gave up until the URL changes
+            if (System.currentTimeMillis() < splashRetryAtMs) return     // still backing off
         }
-        // Download.
+        // Download — resumable: append to the .part on a 206, restart on a 200.
         kotlinx.coroutines.withContext(Dispatchers.IO) {
             runCatching {
-                val req = Request.Builder().url(absUrl).build()
-                httpClient.newCall(req).execute().use { r ->
+                val partial = java.io.File(splashRoot, "$safeName.part")
+                val have = if (partial.exists()) partial.length() else 0L
+                val reqB = Request.Builder().url(absUrl)
+                if (have > 0L) reqB.header("Range", "bytes=$have-")
+                httpClient.newCall(reqB.build()).execute().use { r ->
                     if (!r.isSuccessful) throw IllegalStateException("HTTP ${r.code}")
                     val body = r.body ?: throw IllegalStateException("Empty splash body")
-                    val partial = java.io.File(splashRoot, "$safeName.part")
-                    java.io.FileOutputStream(partial).use { out ->
+                    val append = have > 0L && r.code == 206
+                    java.io.FileOutputStream(partial, append).use { out ->
                         body.byteStream().use { it.copyTo(out) }
                     }
                     if (!partial.renameTo(target)) {
@@ -1581,11 +1605,15 @@ class PlayerRepository(
                     }
                 }
                 _remoteSplashFile.value = target
-                LogBuffer.i(TAG, "Splash → downloaded $safeName from $absUrl")
+                splashFailCount = 0
+                splashRetryAtMs = 0L
+                LogBuffer.i(TAG, "Splash → downloaded $safeName")
             }.onFailure {
-                LogBuffer.w(TAG, "Splash download failed: ${it.message}", it)
-                // Reset so next tick retries.
-                lastSplashUrl = null
+                splashFailCount++
+                val shift = (splashFailCount - 1).coerceIn(0, 5)
+                val backoff = minOf(SPLASH_MAX_BACKOFF_MS, SPLASH_BASE_BACKOFF_MS shl shift)
+                splashRetryAtMs = System.currentTimeMillis() + backoff
+                LogBuffer.w(TAG, "Splash download failed (attempt $splashFailCount/$MAX_SPLASH_ATTEMPTS): ${it.message}; retry in ${backoff / 1000}s")
             }
         }
     }
@@ -1914,6 +1942,14 @@ class PlayerRepository(
          *  online even mid-download. 10 s is well under the server's
          *  15 s "online" window. */
         private const val HEARTBEAT_INTERVAL_MS = 10_000L
+
+        // v0.1.75: splash-download retry backoff. On failure the splash
+        // fetch waits (exponentially, capped) before trying again instead
+        // of re-downloading every poll tick — the old behaviour spammed a
+        // download storm on screens that couldn't fetch a heavy splash.
+        private const val SPLASH_BASE_BACKOFF_MS = 30_000L
+        private const val SPLASH_MAX_BACKOFF_MS = 1_800_000L   // 30 min
+        private const val MAX_SPLASH_ATTEMPTS = 6
     }
 }
 
