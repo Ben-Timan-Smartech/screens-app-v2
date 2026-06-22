@@ -2022,6 +2022,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self._cors_headers()
         self.end_headers()
 
+    def end_headers(self) -> None:
+        # v0.1.76: force browsers to revalidate the SPA's static assets
+        # (index.html / *.jsx / *.js / *.css) on every load. They previously
+        # carried no Cache-Control, so a CMS deploy kept showing a stale
+        # cached page (and "fixes don't show up") until a manual hard-refresh.
+        # `no-cache` = "always revalidate" — the stdlib file handler answers
+        # If-Modified-Since with a 304 when unchanged, so this is cheap; on a
+        # deploy the file mtime changes and the browser gets fresh content.
+        # API responses set their own Cache-Control (no-store) and media /
+        # uploads / splash / apk are served by dedicated handlers, so scope
+        # this to the static-file paths only.
+        p = self.path.split("?", 1)[0]
+        if not (
+            p.startswith("/api/") or p.startswith("/media/")
+            or p.startswith("/splash/") or p.startswith("/uploaded/")
+            or p.startswith("/brand/") or p.startswith("/apk")
+        ):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     # ── API handlers ──────────────────────────────────────────────
 
     def _cors_headers(self) -> None:
