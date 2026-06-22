@@ -2983,7 +2983,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # uploading. Size-cap below keeps a flapping tablet from
         # filling disk.
         if path == "/api/logs":
-            body = self._read_json()
+            # NB: do NOT call self._read_json() again here. The body is
+            # already read once at the top of _serve_api_post (the shared
+            # `body = self._read_json()`). A second read calls
+            # rfile.read(Content-Length) on an already-drained stream and
+            # blocks until the socket times out on any keep-alive client
+            # (OkHttp on the tablets, browsers, .NET) — which silently
+            # broke log shipping fleet-wide from v0.1.25 until v0.1.74.
+            # Reuse the parsed body from above.
             if not isinstance(body, dict) or not body:
                 self.send_error(400, "Empty or non-JSON body"); return
             device_id = (body.get("deviceId") or "unknown")[:80]
@@ -3039,7 +3046,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # _require_perm; the only abuse vector is filling disk,
         # which we cap below.
         if path == "/api/crashes":
-            body = self._read_json()
+            # Same fix as /api/logs above: reuse the body already read at
+            # the top of _serve_api_post. Re-reading drained rfile here
+            # hung every crash upload on keep-alive clients, so crash
+            # reports never reached the server from v0.1.21 until v0.1.74.
             if not isinstance(body, dict) or not body:
                 self.send_error(400, "Empty or non-JSON body"); return
             CRASHES_DIR.mkdir(parents=True, exist_ok=True)
