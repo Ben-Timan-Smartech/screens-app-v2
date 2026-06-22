@@ -2318,9 +2318,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(400, "Missing 'file' field"); return
         if orientation not in ("landscape", "portrait"):
             self.send_error(400, "orientation must be 'landscape' or 'portrait'"); return
-        valid_targets = {(f[0], f[1]) for f in SPLASH_FOLDERS}
-        if (kind, name) not in valid_targets:
-            self.send_error(400, f"Unknown splash target '{kind}:{name}'"); return
+        if kind not in ("brand", "concept"):
+            self.send_error(400, "kind must be 'brand' or 'concept'"); return
+        if not name:
+            self.send_error(400, "Missing 'name' field"); return
+        if len(name) > 64 or not re.match(r"^[A-Za-z0-9 :+&'./_-]+$", name):
+            self.send_error(400, "Invalid splash name"); return
+        # Brands are a fixed set (the city->brand mapping keys). Concepts are
+        # open-ended so an operator can add a splash for ANY concept in the
+        # location taxonomy — even one with no Drive folder yet; the upload
+        # just creates a new concept:<name> entry in the registry that
+        # screens reporting that concept then resolve to.
+        if kind == "brand" and name not in {f[1] for f in SPLASH_FOLDERS if f[0] == "brand"}:
+            self.send_error(400, f"Unknown brand '{name}'"); return
         orig_name = file_part.get("filename") or "splash.mp4"
         ext = os.path.splitext(orig_name)[1].lower().lstrip(".") or "mp4"
         if ext not in {"mp4", "mov"}:

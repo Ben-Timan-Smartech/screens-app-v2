@@ -373,9 +373,10 @@ const LocationsTab = () => {
 // Splashes tab — per-city brand mapping (NYC/ROM → tm:rw, LDN/BER →
 // Smartech) + concept overrides. Reads /api/splashes for the
 // available splash files; lets the user reassign which brand each
-// city uses. Concept splashes use the same naming convention as the
-// Drive folder (`Splash - 7EVN`) and are read-only here — drop a new
-// folder on Drive + restart the server to add one.
+// city uses. Brand and concept splashes (landscape + portrait) can be
+// uploaded straight from here (POST /api/splashes/upload); concepts are
+// open-ended, so any taxonomy concept can be given a splash even without
+// a Drive folder.
 // ─────────────────────────────────────────────────────────────
 // File-picker styled as a small button; used to upload splash variants
 // (landscape / portrait) straight from the Splashes tab.
@@ -556,17 +557,15 @@ const SplashesTab = () => {
                 <div key={concept} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: i < LOCATION_TAXONOMY.concepts.length - 1 ? 'var(--border-faint)' : 'none', flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 13, color: 'var(--ink-1)', flex: 1, minWidth: 120 }}>{concept}</span>
                   {m ? (
-                    <>
-                      <span className="tnum" style={{ fontSize: 11, color: 'var(--ink-4)' }}>
-                        {m.sizeMb} MB{m.urlPortrait ? ` · portrait ${m.sizePortraitMb} MB` : ''}{m.source === 'upload' ? ' · uploaded' : ''}
-                      </span>
-                      <SplashUploadButton label={(m.uploadedLandscape ? 'Replace' : 'Upload') + ' landscape'} busy={busyKey === `concept:${concept}:landscape`} onPick={(f) => uploadSplash('concept', concept, 'landscape', f)} />
-                      <SplashUploadButton label={(m.uploadedPortrait ? 'Replace' : 'Upload') + ' portrait'} busy={busyKey === `concept:${concept}:portrait`} onPick={(f) => uploadSplash('concept', concept, 'portrait', f)} />
-                      <Button variant="ghost" size="sm" icon={<Icon.play size={12} />} onClick={() => setPreview(previewVideo(m))}>Preview</Button>
-                    </>
+                    <span className="tnum" style={{ fontSize: 11, color: 'var(--ink-4)' }}>
+                      {m.sizeMb} MB{m.urlPortrait ? ` · portrait ${m.sizePortraitMb} MB` : ''}{m.source === 'upload' ? ' · uploaded' : ''}
+                    </span>
                   ) : (
                     <Chip tone="outline">No splash · falls back to city brand</Chip>
                   )}
+                  <SplashUploadButton label={(m && m.uploadedLandscape ? 'Replace' : 'Upload') + ' landscape'} busy={busyKey === `concept:${concept}:landscape`} onPick={(f) => uploadSplash('concept', concept, 'landscape', f)} />
+                  <SplashUploadButton label={(m && m.uploadedPortrait ? 'Replace' : 'Upload') + ' portrait'} busy={busyKey === `concept:${concept}:portrait`} onPick={(f) => uploadSplash('concept', concept, 'portrait', f)} />
+                  {m && m.url && <Button variant="ghost" size="sm" icon={<Icon.play size={12} />} onClick={() => setPreview(previewVideo(m))}>Preview</Button>}
                 </div>
               );
             })}
