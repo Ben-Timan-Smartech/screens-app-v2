@@ -404,6 +404,39 @@ const SyncGroupCardBody = ({ screen, allScreens, onSetGroup, onSetGroupForDevice
 // (older app version, or a device whose Display API doesn't expose
 // them). That way the picker doesn't appear with one greyed "Auto"
 // row that does nothing.
+// v0.1.76: collapsible rail card. Header row (title + optional one-line
+// summary + chevron) that toggles its body. Collapsed by default so the
+// right rail reads as a short list of sections the operator expands only
+// when they need to change something. Mirrors the old danger-zone toggle.
+const CollapsibleCard = ({ title, summary, defaultOpen = false, padding = 16, children }) => {
+  const [open, setOpen] = React.useState(defaultOpen);
+  return (
+    <Card padding={padding}>
+      <div
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+          padding: 2, marginBottom: open ? 10 : 0,
+        }}>
+        <div style={{ flex: 1, fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>{title}</div>
+        {!open && summary && (
+          <span style={{
+            fontSize: 11, color: 'var(--ink-4)',
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 170,
+          }}>{summary}</span>
+        )}
+        <span style={{
+          display: 'inline-flex', color: 'var(--ink-3)',
+          transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 120ms ease',
+        }}>
+          <Icon.chevD size={14} />
+        </span>
+      </div>
+      {open && children}
+    </Card>
+  );
+};
+
 const DisplayResolutionCard = ({ screen, onSetMode, canEdit, isLive }) => {
   const modes = Array.isArray(screen?.supportedModes) ? screen.supportedModes : [];
   if (modes.length === 0) return null;
@@ -419,24 +452,10 @@ const DisplayResolutionCard = ({ screen, onSetMode, canEdit, isLive }) => {
     const hz = m.hz ? `${Math.round(m.hz)}Hz` : '';
     return `${m.w}×${m.h}${hz ? ` · ${hz}` : ''}`;
   };
+  const activeMode = active > 0 ? modes.find((m) => m.id === active) : null;
+  const summary = activeMode ? labelFor(activeMode) : (override === null ? 'Auto' : 'Override set');
   return (
-    <Card padding={16}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
-        <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Display resolution</div>
-        {active > 0 && (() => {
-          const activeMode = modes.find(m => m.id === active);
-          if (!activeMode) return null;
-          return (
-            <span style={{
-              fontSize: 10, fontWeight: 500,
-              color: 'var(--ink-3)',
-              background: 'var(--ink-8)',
-              padding: '2px 8px', borderRadius: 999,
-              letterSpacing: 0.4,
-            }}>Currently {labelFor(activeMode)}</span>
-          );
-        })()}
-      </div>
+    <CollapsibleCard title="Display resolution" summary={summary} padding={16}>
       <div style={{ fontSize: 11, color: 'var(--ink-4)', marginBottom: 10 }}>
         {isLive
           ? 'Switches the box\'s HDMI output to the selected mode. Some boxes (TX3 Mini, generic Android TV sticks) boot at 720p even when the panel supports more — pick a higher mode here.'
@@ -461,7 +480,7 @@ const DisplayResolutionCard = ({ screen, onSetMode, canEdit, isLive }) => {
           />
         ))}
       </div>
-    </Card>
+    </CollapsibleCard>
   );
 };
 
@@ -1035,10 +1054,6 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   const [previewVideo, setPreviewVideo] = React.useState(null);
   // v0.1.57: sync group modal — opens when the summary pill is tapped.
   const [syncModalOpen, setSyncModalOpen] = React.useState(false);
-  // v0.1.57: Danger-zone actions are hidden behind a toggle so the
-  // page fits one viewport. Update / Reboot / Clear cache / Unregister
-  // are needed rarely; the four-button stack was always-on previously.
-  const [dangerOpen, setDangerOpen] = React.useState(false);
   // v0.1.74: device-logs viewer modal.
   const [logsOpen, setLogsOpen] = React.useState(false);
   // Set when the user ticks a sync-group candidate that has different
@@ -1092,9 +1107,26 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
         title={screen.name}
         actions={
           <>
-            <Button variant="secondary" size="sm" icon={<Icon.refresh size={12} />}>Rotate</Button>
-            <Button variant="secondary" size="sm" icon={<Icon.sync size={12} />} onClick={handleOpenSync}>Sync to…</Button>
-            <Button variant="ghost" size="sm" icon={<Icon.more size={14} />} />
+            <Button variant="secondary" size="sm" icon={<Icon.refresh size={12} />}
+              disabled={!canEdit || busy === 'reboot'}
+              onClick={() => handleCommand('reboot', 'Reboot')}>
+              {busy === 'reboot' ? 'Rebooting…' : 'Reboot'}
+            </Button>
+            <Button variant="secondary" size="sm" icon={<Icon.download size={12} />}
+              disabled={!canEdit || busy === 'update'}
+              onClick={() => handleCommand('update', 'Triggered update on')}>
+              {busy === 'update' ? 'Updating…' : 'Update'}
+            </Button>
+            <Button variant="secondary" size="sm" icon={<Icon.trash size={12} />}
+              disabled={!canEdit || busy === 'clearCache'}
+              onClick={() => handleCommand('clearCache', 'Clear cache on')}>
+              {busy === 'clearCache' ? 'Clearing…' : 'Clear cache'}
+            </Button>
+            <Button variant="danger" size="sm" icon={<Icon.close size={12} />}
+              disabled={!canEdit || busy === 'unregister'}
+              onClick={() => handleCommand('unregister', 'Unregister')}>
+              {busy === 'unregister' ? 'Unregistering…' : 'Unregister'}
+            </Button>
           </>
         }
       />
@@ -1121,11 +1153,12 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
       }}>
         <div style={{
           display: 'grid',
-          // Two-column on laptop+ (main playlist + status/config rail);
-          // single stacked column on mobile/tablet so the rail flows
-          // beneath the main content.
-          gridTemplateColumns: vp.isCompact ? '1fr' : '1fr 300px',
-          gap: 20, alignItems: 'start',
+          // Two-column (main playlist + status/config rail) on tablet and
+          // up so the controls fit one page; single stacked column only on
+          // phones. v0.1.76: tablet moved from stacked → two-column now that
+          // the rail collapses to short rows. Rail narrows a touch on tablet.
+          gridTemplateColumns: vp.tier === 'mobile' ? '1fr' : (vp.tier === 'tablet' ? '1fr 260px' : '1fr 300px'),
+          gap: vp.tier === 'mobile' ? 16 : 20, alignItems: 'start',
         }}>
           {/* Main column */}
           <div>
@@ -1147,31 +1180,16 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 </span>
                 <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>· last seen {statusValues.lastSeen}</span>
               </div>
-              {current ? (
-                <div
-                  onClick={() => openPreview(current)}
-                  style={{ position: 'relative', borderRadius: 12, overflow: 'hidden', aspectRatio: '16/9', cursor: 'pointer' }}>
-                  <Thumbnail title={current.title} brand={current.brand} aspect="16/9" size="lg" />
-                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.15)' }}>
-                    <div style={{
-                      width: 56, height: 56, borderRadius: '50%',
-                      background: 'rgba(255,255,255,0.92)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      color: 'var(--ink-0)',
-                    }}><Icon.play size={20} /></div>
-                  </div>
-                </div>
-              ) : (
-                <div className="placeholder-tile" style={{ aspectRatio: '16/9', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <span style={{ fontSize: 13, color: 'var(--ink-4)' }}>{isLive ? 'Splash on loop · push content from the library' : 'Screen is offline'}</span>
-                </div>
-              )}
+              {/* v0.1.76: removed the 16:9 "now playing" preview box — it
+                  was an old content preview that duplicated the library's
+                  preview and pushed the real controls below the fold. The
+                  live-status line above is kept as the at-a-glance state. */}
             </div>
 
             {/* Playlist */}
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
-                <div style={{ flex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                <div style={{ flex: 1, minWidth: 140 }}>
                   <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink-1)' }}>Playlist</div>
                   <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>
                     {playlist.length} video{playlist.length === 1 ? '' : 's'}
@@ -1270,8 +1288,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
 
           {/* Right sidebar */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <Card padding={16}>
-              <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 6 }}>Status</div>
+            <CollapsibleCard title="Status" summary={`${statusValues.health.label} · ${statusValues.lastSeen}`}>
               <div>
                 <StatusLine label="Health" value={
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -1287,7 +1304,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 <StatusLine label="App version" value={statusValues.appVersion} mono />
                 <StatusLine label="Playlist" value={statusValues.revision} mono />
               </div>
-            </Card>
+            </CollapsibleCard>
 
             {/* Splash mix toggle — only meaningful when live.
                 v0.1.33: locked off when the screen is in a sync group.
@@ -1297,9 +1314,10 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 bounce back on the next poll. Greyed out + explainer. */}
             {(() => {
               const inGroup = hasHistory && !!lastKnown.syncGroup;
+              const audioOn = hasHistory ? !!lastKnown.audioOn : false;
+              const pm = hasHistory ? (lastKnown.pollMode || 'normal') : 'normal';
               return (
-                <Card padding={16}>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 6 }}>Display</div>
+                <CollapsibleCard title="Display & playback" summary={`${audioOn ? 'Audio on' : 'Muted'} · ${pm} poll`}>
                   <ToggleRow
                     label="Mix splash with playlist"
                     sub={inGroup
@@ -1330,7 +1348,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 disabled={!canEdit}
                 isLive={isLive}
               />
-            </Card>
+            </CollapsibleCard>
               );
             })()}
 
@@ -1392,64 +1410,15 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               </div>
             </Card>
 
-            {/* v0.1.57: Schedule "Coming soon" card removed — the
-                Schedules sidebar is already hidden, no need to tease
-                the feature on every screen detail page.
-
-                Danger zone collapsed behind a toggle. Update / Reboot /
-                Clear cache / Unregister are rare ops; surfacing the
-                4-button stack permanently pushed the page off one
-                viewport on common laptop heights. */}
-            <Card padding={14} style={{ borderColor: 'rgba(185, 28, 28, 0.15)' }}>
-              <div
-                onClick={() => setDangerOpen((v) => !v)}
-                style={{
-                  display: 'flex', alignItems: 'center', cursor: 'pointer',
-                  padding: 2, marginBottom: dangerOpen ? 10 : 0,
-                }}
-              >
-                <div style={{ flex: 1, fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>More actions</div>
-                <span style={{ fontSize: 10, color: 'var(--ink-4)', marginRight: 6 }}>
-                  {dangerOpen ? 'Hide' : 'Update · Reboot · Clear cache · Unregister'}
-                </span>
-                <span style={{
-                  display: 'inline-flex',
-                  color: 'var(--ink-3)',
-                  transform: dangerOpen ? 'rotate(180deg)' : 'none',
-                  transition: 'transform 120ms ease',
-                }}>
-                  <Icon.chevD size={14} />
-                </span>
+            {/* v0.1.76: the Update / Reboot / Clear cache / Unregister
+                commands moved up to the page header as plain buttons, so
+                the rail no longer carries a "More actions" card. Each still
+                confirms (and, when offline, queues) via handleCommand. */}
+            {canEdit && !isLive && (
+              <div style={{ fontSize: 11, color: 'var(--ink-4)', padding: '0 2px' }}>
+                Screen offline — header commands queue and run when the tablet reconnects.
               </div>
-              {dangerOpen && (
-                <>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <Button variant="secondary" size="sm" icon={<Icon.download size={12} />} disabled={!canEdit || busy === 'update'}
-                      onClick={() => handleCommand('update', 'Triggered update on')}
-                      style={{ justifyContent: 'flex-start' }}>
-                      {busy === 'update' ? 'Updating…' : 'Update player APK'}
-                    </Button>
-                    <Button variant="secondary" size="sm" icon={<Icon.refresh size={12} />} disabled={!canEdit || busy === 'reboot'}
-                      onClick={() => handleCommand('reboot', 'Reboot')}
-                      style={{ justifyContent: 'flex-start' }}>
-                      {busy === 'reboot' ? 'Rebooting…' : 'Reboot screen'}
-                    </Button>
-                    <Button variant="secondary" size="sm" icon={<Icon.trash size={12} />} disabled={!canEdit || busy === 'clearCache'}
-                      onClick={() => handleCommand('clearCache', 'Clear cache on')}
-                      style={{ justifyContent: 'flex-start' }}>
-                      {busy === 'clearCache' ? 'Clearing…' : 'Clear cache'}
-                    </Button>
-                    <Button variant="danger" size="sm" icon={<Icon.close size={12} />} disabled={!canEdit || busy === 'unregister'}
-                      onClick={() => handleCommand('unregister', 'Unregister')}
-                      style={{ justifyContent: 'flex-start' }}>
-                      {busy === 'unregister' ? 'Unregistering…' : 'Unregister device'}
-                    </Button>
-                  </div>
-                  {!canEdit && <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 10 }}>Available once the screen registers.</div>}
-                  {canEdit && !isLive && <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 10 }}>Commands queue and run when the tablet reconnects.</div>}
-                </>
-              )}
-            </Card>
+            )}
           </div>
         </div>
       </div>
