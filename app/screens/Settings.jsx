@@ -377,6 +377,30 @@ const LocationsTab = () => {
 // Drive folder (`Splash - 7EVN`) and are read-only here — drop a new
 // folder on Drive + restart the server to add one.
 // ─────────────────────────────────────────────────────────────
+// File-picker styled as a small button; used to upload splash variants
+// (landscape / portrait) straight from the Splashes tab.
+const SplashUploadButton = ({ label, busy, onPick }) => (
+  <label style={{
+    display: 'inline-flex', alignItems: 'center', height: 28, padding: '0 10px',
+    border: 'var(--border-strong)', borderRadius: 6, fontSize: 12, color: 'var(--ink-1)',
+    background: 'var(--ink-10)', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.55 : 1,
+    whiteSpace: 'nowrap',
+  }}>
+    {busy ? 'Uploading…' : label}
+    <input
+      type="file"
+      accept="video/mp4,video/quicktime,.mp4,.mov"
+      disabled={busy}
+      style={{ display: 'none' }}
+      onChange={(e) => {
+        const f = e.target.files && e.target.files[0];
+        e.target.value = '';
+        if (f) onPick(f);
+      }}
+    />
+  </label>
+);
+
 const SplashesTab = () => {
   const [data, setData] = React.useState({ brands: [], concepts: [], cityBrand: {} });
   const [loading, setLoading] = React.useState(true);
@@ -414,6 +438,36 @@ const SplashesTab = () => {
     filename: m.filename,
   });
   const [preview, setPreview] = React.useState(null);
+  const [busyKey, setBusyKey] = React.useState(null);
+
+  const uploadSplash = async (kind, name, orientation, file) => {
+    const key = `${kind}:${name}:${orientation}`;
+    setBusyKey(key);
+    try {
+      const fd = new FormData();
+      fd.append('kind', kind);
+      fd.append('name', name);
+      fd.append('orientation', orientation);
+      fd.append('file', file);
+      const res = await fetch('/api/splashes/upload', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      showToast(`${name} ${orientation} splash uploaded`, 'ok');
+      refresh();
+    } catch (e) {
+      showToast(`Upload failed: ${e.message}`, 'err');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const portraitPreview = (m) => ({
+    id: 'splash-' + m.name + '-portrait',
+    title: `${m.kind === 'brand' ? 'Brand' : 'Concept'} splash · ${m.name} (portrait)`,
+    brand: m.name,
+    mediaUrl: m.urlPortrait,
+    sizeMb: m.sizePortraitMb,
+    filename: m.filenamePortrait,
+  });
 
   const cities = LOCATION_TAXONOMY.cities;
 
@@ -441,15 +495,26 @@ const SplashesTab = () => {
               </div>
             )}
             {data.brands.map((m) => (
-              <div key={m.name} style={{ border: 'var(--border)', borderRadius: 10, padding: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
-                <BrandMark brand={m.name === 'tmrw' ? 'DVX' : m.name === 'smartech' ? 'SONOS' : m.name} size={36} radius={8} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{m.name === 'tmrw' ? 'tm:rw' : m.name}</div>
-                  <div style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {m.filename} · {m.sizeMb} MB
+              <div key={m.name} style={{ border: 'var(--border)', borderRadius: 10, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <BrandMark brand={m.name === 'tmrw' ? 'DVX' : m.name === 'smartech' ? 'SONOS' : m.name} size={36} radius={8} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{m.name === 'tmrw' ? 'tm:rw' : m.name}</div>
+                    <div style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      Landscape · {m.sizeMb} MB{m.uploadedLandscape ? ' · uploaded' : ''}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {m.urlPortrait ? `Portrait · ${m.sizePortraitMb} MB${m.uploadedPortrait ? ' · uploaded' : ''}` : 'Portrait · none (falls back to landscape)'}
+                    </div>
                   </div>
                 </div>
-                <Button variant="ghost" size="sm" icon={<Icon.play size={12} />} onClick={() => setPreview(previewVideo(m))}>Preview</Button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <SplashUploadButton label={(m.uploadedLandscape ? 'Replace' : 'Upload') + ' landscape'} busy={busyKey === `brand:${m.name}:landscape`} onPick={(f) => uploadSplash('brand', m.name, 'landscape', f)} />
+                  <SplashUploadButton label={(m.uploadedPortrait ? 'Replace' : 'Upload') + ' portrait'} busy={busyKey === `brand:${m.name}:portrait`} onPick={(f) => uploadSplash('brand', m.name, 'portrait', f)} />
+                  <div style={{ flex: 1 }} />
+                  <Button variant="ghost" size="sm" icon={<Icon.play size={12} />} onClick={() => setPreview(previewVideo(m))}>Landscape</Button>
+                  {m.urlPortrait && <Button variant="ghost" size="sm" icon={<Icon.play size={12} />} onClick={() => setPreview(portraitPreview(m))}>Portrait</Button>}
+                </div>
               </div>
             ))}
           </div>
@@ -488,11 +553,15 @@ const SplashesTab = () => {
             {LOCATION_TAXONOMY.concepts.map((concept, i) => {
               const m = data.concepts.find(x => x.name === concept);
               return (
-                <div key={concept} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px', borderBottom: i < LOCATION_TAXONOMY.concepts.length - 1 ? 'var(--border-faint)' : 'none' }}>
-                  <span style={{ fontSize: 13, color: 'var(--ink-1)', flex: 1 }}>{concept}</span>
+                <div key={concept} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: i < LOCATION_TAXONOMY.concepts.length - 1 ? 'var(--border-faint)' : 'none', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 13, color: 'var(--ink-1)', flex: 1, minWidth: 120 }}>{concept}</span>
                   {m ? (
                     <>
-                      <span className="tnum" style={{ fontSize: 11, color: 'var(--ink-4)' }}>{m.filename} · {m.sizeMb} MB</span>
+                      <span className="tnum" style={{ fontSize: 11, color: 'var(--ink-4)' }}>
+                        {m.sizeMb} MB{m.urlPortrait ? ` · portrait ${m.sizePortraitMb} MB` : ''}{m.source === 'upload' ? ' · uploaded' : ''}
+                      </span>
+                      <SplashUploadButton label={(m.uploadedLandscape ? 'Replace' : 'Upload') + ' landscape'} busy={busyKey === `concept:${concept}:landscape`} onPick={(f) => uploadSplash('concept', concept, 'landscape', f)} />
+                      <SplashUploadButton label={(m.uploadedPortrait ? 'Replace' : 'Upload') + ' portrait'} busy={busyKey === `concept:${concept}:portrait`} onPick={(f) => uploadSplash('concept', concept, 'portrait', f)} />
                       <Button variant="ghost" size="sm" icon={<Icon.play size={12} />} onClick={() => setPreview(previewVideo(m))}>Preview</Button>
                     </>
                   ) : (
@@ -504,7 +573,7 @@ const SplashesTab = () => {
           </div>
 
           <div style={{ fontSize: 11, color: 'var(--ink-4)', marginBottom: 12 }}>
-            To add a concept splash: drop an MP4 into <code style={{ fontFamily: 'var(--font-mono)' }}>G:\Shared drives\Smartech\Screens\Splash - {'<concept>'}\</code> and restart serve.py.
+            Upload a landscape and/or portrait MP4 per brand or concept above. Screens pick up the new splash on their next poll — portrait screens get the portrait file, and uploads override the Drive originals. (Uploading a Smartech splash applies to both the brand and the Smartech concept.)
           </div>
         </>
       )}
