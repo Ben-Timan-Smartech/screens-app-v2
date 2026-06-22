@@ -18,6 +18,23 @@ Rules:
 
 ---
 
+## v0.1.75
+
+Smoother splash screens, especially on weak in-store Wi-Fi.
+
+- **No more splash-download spam.** If a screen can't fetch its splash, it
+  now waits and retries gently — and resumes a half-finished download —
+  instead of re-trying every few seconds and clogging the connection.
+- **Right splash on a cold start.** The Smartech and tm:rw splashes are now
+  baked into the app (landscape), so a freshly-installed or just-rebooted
+  screen shows the correct on-brand splash straight away, before it's even
+  online. The splash you set in the CMS still takes over once it downloads —
+  including the portrait version on portrait screens.
+
+No setup needed — just update the screen.
+
+---
+
 ## v0.1.74
 
 Pull a screen's latest logs on demand, right from the CMS.

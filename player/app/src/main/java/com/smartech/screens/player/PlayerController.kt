@@ -27,8 +27,27 @@ import kotlin.math.abs
 @UnstableApi
 class PlayerController(context: Context) {
 
-    private val bundledSplashUri: Uri =
-        Uri.parse("android.resource://${context.packageName}/${R.raw.splash}")
+    private val appContext = context.applicationContext
+
+    /** v0.1.75: brand whose bundled landscape splash to show before the
+     *  remote splash downloads (and when fully offline). Set from the
+     *  screen's saved location via [setBundledBrand]; null = neutral
+     *  default. Only LANDSCAPE Smartech & tm:rw splashes are bundled —
+     *  portrait always comes from the server. */
+    private var bundledBrand: String? = null
+
+    private fun rawUri(resId: Int): Uri =
+        Uri.parse("android.resource://${appContext.packageName}/$resId")
+
+    private val bundledSplashUri: Uri
+        get() = rawUri(
+            when (bundledBrand?.lowercase()) {
+                "smartech" -> R.raw.splash_smartech
+                "tmrw"     -> R.raw.splash_tmrw
+                else       -> R.raw.splash
+            }
+        )
+
     /** Remote splash overrides the bundled one when set. */
     private var remoteSplashUri: Uri? = null
     private val splashUri: Uri get() = remoteSplashUri ?: bundledSplashUri
@@ -191,6 +210,19 @@ class PlayerController(context: Context) {
         // If we're currently showing the splash, re-apply with the new file.
         if (currentSource == Source.SPLASH) {
             currentSource = ""    // force re-apply
+            playSplash()
+        }
+    }
+
+    /** v0.1.75: pick which bundled splash (Smartech / tm:rw landscape) to
+     *  show before the remote splash arrives. Re-applies immediately if the
+     *  bundled splash is what's currently on screen. */
+    fun setBundledBrand(brand: String?) {
+        val norm = brand?.lowercase()
+        if (norm == bundledBrand) return
+        bundledBrand = norm
+        if (currentSource == Source.SPLASH && remoteSplashUri == null) {
+            currentSource = ""    // force re-apply with the new bundled file
             playSplash()
         }
     }

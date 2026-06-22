@@ -29,6 +29,7 @@ import com.smartech.screens.util.DisplayModes
 import com.smartech.screens.util.InputMode
 import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -120,6 +121,20 @@ class MainActivity : ComponentActivity() {
      */
     private val staffOverlayVisible = MutableStateFlow(false)
 
+    /** v0.1.75: maps a screen's saved location to the brand whose landscape
+     *  splash is bundled in the APK (Smartech or tm:rw). Mirrors the server's
+     *  default city->brand map + the Smartech concept override; only used for
+     *  the offline cold-start splash, so the server's splashUrl corrects it
+     *  once online. Null → the neutral default bundled splash. */
+    private fun bundledBrandFor(city: String?, concept: String?): String? {
+        if (concept?.equals("Smartech", ignoreCase = true) == true) return "smartech"
+        return when (city?.trim()?.uppercase()) {
+            "LDN", "BER" -> "smartech"
+            "NYC", "ROM", "GLB" -> "tmrw"
+            else -> null
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -137,6 +152,17 @@ class MainActivity : ComponentActivity() {
 
         controller = PlayerController(this)
         val repo = (application as ScreensApp).repository
+
+        // v0.1.75: choose the bundled (offline cold-start) splash by the
+        // screen's brand, derived from its saved location. The server's
+        // splashUrl still overrides this once it downloads — this just makes
+        // the pre-network splash on-brand for Smartech vs tm:rw stores. Only
+        // the landscape Smartech & tm:rw splashes are bundled in the APK.
+        lifecycleScope.launch {
+            val city = runCatching { repo.store.locCity.first() }.getOrNull()
+            val concept = runCatching { repo.store.locConcept.first() }.getOrNull()
+            controller.setBundledBrand(bundledBrandFor(city, concept))
+        }
 
         // Background safety net. The watchdog samples ExoPlayer every
         // 30 s; if playback is stuck (frozen position while we think
