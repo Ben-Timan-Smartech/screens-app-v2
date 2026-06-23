@@ -4254,6 +4254,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # Success — drop out of the retry loop.
                 break
             except Exception as e:
+                # A Range that starts at/past EOF makes Drive return
+                # 416 Range Not Satisfiable (urllib raises HTTPError
+                # code=416). Forward it AS 416 — NOT 500. A tablet doing a
+                # resumable download holds a `.part` that's now >= the real
+                # file size (the video was re-encoded smaller while it had a
+                # partial of the larger one); on 416 the player discards the
+                # partial and re-pulls from byte 0, whereas a 500 it treats
+                # as retryable and loops on the same out-of-range request
+                # forever (the bug that wedged H8 on tcl-global-3). Surfaced
+                # immediately, before the retry, since retrying is pointless.
+                if not headers_sent and getattr(e, "code", None) == 416:
+                    print(f"[/media] range past EOF for {file_id}: {e} — returning 416", file=sys.stderr)
+                    self.send_response(416)
+                    if size:
+                        self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Type", ctype)
+                    self.end_headers()
+                    return
                 if not headers_sent and attempt < 2:
                     print(f"[/media] stream attempt {attempt} failed for {file_id}: {e} — retrying", file=sys.stderr)
                     continue
