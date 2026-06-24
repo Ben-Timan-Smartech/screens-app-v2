@@ -574,6 +574,25 @@ def _reset_tmrw_caches() -> None:
     _TMRW_VIDEOS_CACHE["fetchedAt"] = 0.0
 
 
+def _drive_thumb_url(file_path: str | None) -> str | None:
+    """v0.1.77: turn a tm:rw imagery `filePath` into a small, public,
+    render-friendly thumbnail URL for the Content Library packshot.
+
+    tm:rw stores the main image as a Drive link
+    (`https://drive.google.com/uc?export=view&id=<ID>`). The
+    `lh3.googleusercontent.com/d/<ID>=w512` form serves the same file as a
+    ~10 KB JPEG with no auth and no virus-scan interstitial, so both an
+    <img> tag (CMS) and Coil (APK) can load it directly. Returns None if we
+    can't find a Drive id (and passes through a plain http(s) image URL)."""
+    if not file_path:
+        return None
+    m = re.search(r"[?&]id=([A-Za-z0-9_-]+)", file_path) \
+        or re.search(r"/d/([A-Za-z0-9_-]+)", file_path)
+    if m:
+        return f"https://lh3.googleusercontent.com/d/{m.group(1)}=w512"
+    return file_path if file_path.startswith("http") else None
+
+
 def _tmrw_videos_map() -> dict:
     """Return {brandLower: {"display": <brand>, "videos": {fileNameLower:
     {fileName, productName, active, orientation, resolution, sku, scope}}}}.
@@ -615,7 +634,32 @@ def _tmrw_videos_map() -> dict:
     # `brand` field, then /product?sku=<sku> (cached per refresh), then
     # the familyId prefix, and only fall back to scopeKey as a last
     # resort.
-    _sku_brand: dict[str, str | None] = {}
+    # v0.1.77: per-SKU detail (brand + packshot image), fetched once per
+    # refresh via a single /product?sku= call and shared by both brand
+    # resolution AND the Content Library packshot thumbnails.
+    _sku_detail: dict[str, dict] = {}
+
+    def _product_detail(sku: str) -> dict:
+        if sku not in _sku_detail:
+            d: dict = {"brand": None, "packshot": None}
+            try:
+                preq = urllib.request.Request(
+                    f"{BRAND_API_BASE}/product?sku={urllib.parse.quote(sku)}",
+                    headers={"X-API-Key": key, "Accept": "application/json"},
+                )
+                with urllib.request.urlopen(preq, timeout=6) as presp:
+                    pdata = json.loads(presp.read().decode("utf-8") or "{}")
+                d["brand"] = ((pdata.get("product") or {}).get("brand") or "").strip() or None
+                imagery = pdata.get("imagery") or []
+                main = next((im for im in imagery
+                             if (im.get("role") or "").lower() == "main"), None) \
+                    or (imagery[0] if imagery else None)
+                if main:
+                    d["packshot"] = _drive_thumb_url(main.get("filePath"))
+            except Exception as e:
+                print(f"[tmrwvideos] product lookup for sku {sku} failed: {e}", file=sys.stderr)
+            _sku_detail[sku] = d
+        return _sku_detail[sku]
 
     def _resolve_brand(r: dict) -> str | None:
         if r.get("brand"):
@@ -626,21 +670,8 @@ def _tmrw_videos_map() -> dict:
             return scope_key or None
         # product / family scope — find the real brand.
         sku = (r.get("sku") or (scope_key if scope == "product" else "")).strip()
-        if sku:
-            if sku not in _sku_brand:
-                _sku_brand[sku] = None
-                try:
-                    preq = urllib.request.Request(
-                        f"{BRAND_API_BASE}/product?sku={urllib.parse.quote(sku)}",
-                        headers={"X-API-Key": key, "Accept": "application/json"},
-                    )
-                    with urllib.request.urlopen(preq, timeout=6) as presp:
-                        pdata = json.loads(presp.read().decode("utf-8") or "{}")
-                    _sku_brand[sku] = ((pdata.get("product") or {}).get("brand") or "").strip() or None
-                except Exception as e:
-                    print(f"[tmrwvideos] product lookup for sku {sku} failed: {e}", file=sys.stderr)
-            if _sku_brand[sku]:
-                return _sku_brand[sku]
+        if sku and _product_detail(sku)["brand"]:
+            return _product_detail(sku)["brand"]
         fam = (r.get("familyId") or "").strip()
         if fam and "|" in fam:
             # familyId is "<brandslug>|pgid:..." — slug, not display,
@@ -657,6 +688,10 @@ def _tmrw_videos_map() -> dict:
         if not brand:
             continue
         _row_scope = (r.get("scope") or "").strip().lower()
+        # v0.1.71: SKU surfaced as a Content Library list column.
+        # Product-scope rows carry the SKU in scopeKey when there's no
+        # explicit `sku` field; brand/family rows usually have none.
+        sku_val = (r.get("sku") or (r.get("scopeKey") if _row_scope == "product" else "") or "").strip() or None
         bucket = by_brand.setdefault(brand.lower(), {"display": brand, "videos": {}})
         bucket["videos"][fn.lower()] = {
             "fileName": fn,
@@ -664,18 +699,24 @@ def _tmrw_videos_map() -> dict:
             "active": bool(r.get("active")),
             "orientation": (r.get("orientation") or "").strip() or None,
             "resolution": (r.get("resolution") or "").strip() or None,
-            # v0.1.71: SKU surfaced as a Content Library list column.
-            # Product-scope rows carry the SKU in scopeKey when there's no
-            # explicit `sku` field; brand/family rows usually have none.
-            "sku": (r.get("sku") or (r.get("scopeKey") if _row_scope == "product" else "") or "").strip() or None,
+            "sku": sku_val,
             # v0.1.69: scope drives the Content Library sectioning —
             # "brand" → Brand Global Videos; "family"/"product" → grouped
             # under their product. Normalised to lowercase.
             "scope": _row_scope or None,
+            # v0.1.77: product packshot (tm:rw main image) for the Content
+            # Library thumbnail. Only product-scope rows resolve to a SKU →
+            # product → main image; brand/family rows stay null and fall
+            # back to the generated thumbnail / brand logo.
+            "packshotUrl": (_product_detail(sku_val)["packshot"] if sku_val else None),
         }
     import hashlib
+    # v0.1.77: fold the packshot URL into the hash (not just the file set)
+    # so a newly-resolved product image busts the /api/library ETag and
+    # reaches clients instead of serving a stale, packshot-less 304.
     new_hash = hashlib.sha1(
-        json.dumps({k: sorted(v["videos"].keys()) for k, v in by_brand.items()}, sort_keys=True).encode("utf-8")
+        json.dumps({k: [(fk, vv.get("packshotUrl")) for fk, vv in sorted(v["videos"].items())]
+                    for k, v in by_brand.items()}, sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
     _TMRW_VIDEOS_CACHE.update({"byBrand": by_brand, "fetchedAt": now, "hash": new_hash})
     total = sum(len(v["videos"]) for v in by_brand.values())
@@ -736,6 +777,9 @@ def _library_with_logos() -> tuple[dict, str]:
                     nv["tmrwOrientation"] = row["orientation"]
                 if row.get("resolution"):
                     nv["tmrwResolution"] = row["resolution"]
+                # v0.1.77: product packshot thumbnail for the Content Library.
+                if row.get("packshotUrl"):
+                    nv["packshotUrl"] = row["packshotUrl"]
                 new_videos.append(nv)
             else:
                 new_videos.append({**v, "tmrwAssigned": False, "tmrwActive": False})
@@ -773,6 +817,7 @@ def _library_with_logos() -> tuple[dict, str]:
                     "sku": row.get("sku"),
                     "tmrwOrientation": row.get("orientation"),
                     "tmrwResolution": row.get("resolution"),
+                    "packshotUrl": row.get("packshotUrl"),  # v0.1.77
                     "pendingSync": True,
                     "source": "tmrw",
                 })

@@ -74,6 +74,10 @@ class RemoteLibrary(
         val sku: String? = null,
         val tmrwOrientation: String? = null,
         val tmrwResolution: String? = null,
+        // v0.1.77: product packshot — the tm:rw main product image, served
+        // as a small public thumbnail URL. Shown in the content picker; null
+        // for brand/orphan videos (falls back to the brand logo / monogram).
+        val packshotUrl: String? = null,
     )
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }

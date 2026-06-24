@@ -215,6 +215,7 @@ fun StaffOverlay(
                                 sku = rv.sku,
                                 orientation = rv.tmrwOrientation,
                                 resolution = rv.tmrwResolution,
+                                packshotUrl = rv.packshotUrl,  // v0.1.77
                             )
                         }
                 } else {
