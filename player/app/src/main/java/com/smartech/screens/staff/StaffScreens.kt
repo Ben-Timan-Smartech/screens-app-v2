@@ -433,6 +433,9 @@ data class PickerVideo(
     val sku: String? = null,
     val orientation: String? = null,
     val resolution: String? = null,
+    // v0.1.77: product packshot (tm:rw main image) thumbnail URL, or null
+    // for brand/orphan videos with no product image.
+    val packshotUrl: String? = null,
 )
 
 private const val ORPHANS = "__orphans__"
@@ -673,33 +676,52 @@ private fun VideoListRow(video: PickerVideo, selected: Boolean, onClick: () -> U
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(3f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    productName,
-                    color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Medium,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
+        Row(Modifier.weight(3f), verticalAlignment = Alignment.CenterVertically) {
+            // v0.1.77: product packshot (tm:rw main image). Coil loads the
+            // small public Drive thumbnail; nothing renders while loading or
+            // on error, so brand/orphan videos with no image just show text.
+            video.packshotUrl?.let { url ->
+                SubcomposeAsyncImage(
+                    model = url,
+                    contentDescription = productName,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .size(width = 48.dp, height = 32.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Bone),
+                    loading = {},
+                    error = {},
                 )
-                val badge = when {
-                    video.pending -> "PENDING"
-                    !video.assigned -> "ORPHAN"
-                    else -> null
-                }
-                if (badge != null) {
-                    Spacer(Modifier.width(8.dp))
-                    Box(
-                        Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(if (video.pending) Color(0xFF2D5BFF) else Amber)
-                            .padding(horizontal = 6.dp, vertical = 2.dp),
-                    ) {
-                        Text(badge, color = Bone, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.width(12.dp))
+            }
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        productName,
+                        color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    val badge = when {
+                        video.pending -> "PENDING"
+                        !video.assigned -> "ORPHAN"
+                        else -> null
+                    }
+                    if (badge != null) {
+                        Spacer(Modifier.width(8.dp))
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(if (video.pending) Color(0xFF2D5BFF) else Amber)
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        ) {
+                            Text(badge, color = Bone, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                        }
                     }
                 }
-            }
-            if (subtitle != null) {
-                Text(subtitle, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (subtitle != null) {
+                    Text(subtitle, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
         Text(video.sizeLabel(), Modifier.weight(1f), color = Muted, fontSize = 13.sp)

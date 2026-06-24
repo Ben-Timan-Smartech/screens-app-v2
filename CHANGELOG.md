@@ -18,6 +18,18 @@ Rules:
 
 ---
 
+## v0.1.77
+
+Product packshots in the content library.
+
+- **See the product, not just the file name.** The content library — in both
+  the CMS and the on-tablet picker — now shows each product's packshot image
+  next to it, pulled automatically from the tm:rw asset manager. It makes
+  picking the right clip much faster when several share similar names.
+- Videos that aren't tied to a specific product (brand-wide clips, or files
+  the asset manager doesn't recognise yet) simply keep the existing
+  thumbnail — nothing to set up, images appear as the catalogue fills in.
+
 ## v0.1.76
 
 Screens that get stuck on the splash now fix themselves.

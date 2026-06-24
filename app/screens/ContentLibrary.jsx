@@ -54,6 +54,27 @@ const resolutionLabel = (v) => {
 const LIST_GRID = 'minmax(160px, 1.6fr) 76px 72px 104px 120px minmax(120px, 1fr) 28px';
 
 // ─────────────────────────────────────────────────────────────
+// v0.1.77: product packshot. When a video's product (tm:rw SKU) has a main
+// image, the server hands us `packshotUrl` (a small public Drive thumbnail).
+// Show it as the Content Library thumbnail; on no image or a load error fall
+// straight back to the generated <Thumbnail> so the cell is never empty.
+// `fit="contain"` + white backing reads like a proper on-white packshot.
+const ProductThumb = ({ v, fit = 'contain', ...thumbProps }) => {
+  const [failed, setFailed] = React.useState(false);
+  if (v && v.packshotUrl && !failed) {
+    return (
+      <img
+        src={v.packshotUrl}
+        alt={v.productLine || v.title || 'product'}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        style={{ width: '100%', height: '100%', objectFit: fit, background: '#fff', display: 'block' }}
+      />
+    );
+  }
+  return <Thumbnail {...thumbProps} />;
+};
+
 // Video tile — real first-frame thumbnail + click-to-preview.
 //
 // Behaviour:
@@ -130,7 +151,7 @@ const VideoTile = ({ v, selected, onToggle, onPreview }) => {
             is cheap and always renders correctly. Click still opens
             the detail panel where the operator can open the file in
             Drive natively. */}
-        <Thumbnail title={v.title} brand={v.brand} duration={v.duration} />
+        <ProductThumb v={v} title={v.title} brand={v.brand} duration={v.duration} />
 
         {/* Play overlay. Icon color is hardcoded #141414 (not var(--ink-0))
             so the dark-mode token flip doesn't render a white play
@@ -403,7 +424,7 @@ const VideoListRow = ({ v, selected, onToggle, onPreview, divider }) => {
       {/* Product Name (thumbnail + name + status badges) */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
         <div style={{ width: 48, height: 28, borderRadius: 4, overflow: 'hidden', flexShrink: 0, background: '#0a0a0a' }}>
-          <Thumbnail title={v.title} brand={v.brand} aspect="16/9" size="sm" />
+          <ProductThumb v={v} title={v.title} brand={v.brand} aspect="16/9" size="sm" />
         </div>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
