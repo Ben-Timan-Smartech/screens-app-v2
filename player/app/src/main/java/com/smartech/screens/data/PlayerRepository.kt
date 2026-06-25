@@ -768,8 +768,11 @@ class PlayerRepository(
      *  the same ID later succeeds. Drives the red-X badge in the
      *  on-tablet staff playlist view so the operator can tell a real
      *  failure apart from a still-pending download at a glance. */
-    private val _downloadFailures = MutableStateFlow<Set<String>>(emptySet())
-    val downloadFailures: StateFlow<Set<String>> = _downloadFailures
+    // v0.1.79: was Set<String> (just the ids). Now id → human-readable
+    // reason, so the playlist view can show WHY a download failed instead
+    // of a bare red ✕.
+    private val _downloadFailures = MutableStateFlow<Map<String, String>>(emptyMap())
+    val downloadFailures: StateFlow<Map<String, String>> = _downloadFailures
 
     /**
      * The user's *intended* playlist — what the server says is on this
@@ -1119,7 +1122,7 @@ class PlayerRepository(
             } catch (t: Throwable) {
                 LogBuffer.w(TAG, "Live download failed for ${v.id}: ${t.message}")
                 _downloads.update { it - v.id }
-                _downloadFailures.update { it + v.id }
+                _downloadFailures.update { it + (v.id to (t.message ?: "Download failed")) }
             }
         }
         val cap = store.cacheCapBytes.first()
@@ -1171,8 +1174,11 @@ class PlayerRepository(
                 for (v in fresh) {
                     liveScope.launch {
                         runCatching { cache.ensure(v) }
-                            .onFailure {
-                                LogBuffer.w(TAG, "Optimistic pre-cache failed for ${v.id}: ${it.message}")
+                            .onFailure { e ->
+                                LogBuffer.w(TAG, "Optimistic pre-cache failed for ${v.id}: ${e.message}")
+                                // v0.1.79: surface the reason on the row.
+                                // Cleared on a later successful download.
+                                _downloadFailures.update { it + (v.id to (e.message ?: "Download failed")) }
                             }
                     }
                 }

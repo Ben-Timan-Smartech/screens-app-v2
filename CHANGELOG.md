@@ -18,6 +18,18 @@ Rules:
 
 ---
 
+## v0.1.79
+
+Clearer status for each video in the playlist (on the tablet).
+
+- **See where each video is.** When you add content on the tablet, every
+  playlist row now shows its live status — "Syncing to server…", a download
+  progress bar, or a green tick once it's ready.
+- **Failures explain themselves.** If a video can't download, the row now
+  shows the actual reason (e.g. "Couldn't download: timeout") instead of
+  just a red ✕ — so you can tell whether it's the Wi-Fi, a missing file, or
+  something else.
+
 ## v0.1.78
 
 Steadier updates on weak store Wi-Fi, and far less log noise.
