@@ -103,6 +103,11 @@ class PlayerRepository(
      */
     /** Last revision we successfully pulled from the live server. */
     private var lastLiveRevision: Int = -1
+    // v0.1.78: the empty-items "keeping last good playlist" guard used to log
+    // every poll — 58% of all shipped fleet warnings on a screen stuck in
+    // that state. Log only when the revision changes so the signal survives
+    // without the spam.
+    private var lastEmptyItemsLoggedRev: Int = Int.MIN_VALUE
 
     suspend fun refreshPlaylist() {
         // Live LAN demo wins if a server URL is configured.
@@ -819,7 +824,7 @@ class PlayerRepository(
                 body
             }
         }.getOrElse {
-            LogBuffer.w(TAG, "Live state fetch failed: ${it.message}")
+            LogBuffer.throttledW(TAG, "live-state-fail", "Live state fetch failed: ${it.message}")
             _connection.value = ConnectionStatus.OFFLINE
             return
         }
@@ -1045,11 +1050,14 @@ class PlayerRepository(
                 lastPlaylist = null
                 lastLiveRevision = state.revision
             } else {
-                LogBuffer.w(
-                    TAG,
-                    "Server returned empty items at rev ${state.revision} " +
-                        "(local rev $lastLiveRevision) — keeping last good playlist",
-                )
+                if (state.revision != lastEmptyItemsLoggedRev) {
+                    LogBuffer.w(
+                        TAG,
+                        "Server returned empty items at rev ${state.revision} " +
+                            "(local rev $lastLiveRevision) — keeping last good playlist",
+                    )
+                    lastEmptyItemsLoggedRev = state.revision
+                }
                 // Re-publish whatever we last had so the player doesn't
                 // accidentally fall through to splash on a subsequent
                 // state-flow recomposition. Restore the intent flow too
@@ -1810,7 +1818,7 @@ class PlayerRepository(
                 .post(body.toRequestBody("application/json".toMediaType()))
                 .build()
             httpClient.newCall(req).execute().close()
-        }.onFailure { LogBuffer.w(TAG, "Heartbeat failed: ${it.message}") }
+        }.onFailure { LogBuffer.throttledW(TAG, "heartbeat-fail", "Heartbeat failed: ${it.message}") }
     }
 
     /** First-time-seen handshake. Cheap to call repeatedly. */

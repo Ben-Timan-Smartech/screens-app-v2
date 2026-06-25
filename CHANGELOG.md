@@ -18,6 +18,19 @@ Rules:
 
 ---
 
+## v0.1.78
+
+Steadier updates on weak store Wi-Fi, and far less log noise.
+
+- **Updates resume instead of restarting.** If a screen's Wi-Fi drops
+  mid-download, the app now picks the update back up where it left off
+  rather than restarting the ~10 MB download from scratch — so updates
+  actually finish on flaky in-store connections.
+- **Cleaner activity logs.** Patchy Wi-Fi was flooding the logs with
+  repeated "timeout" lines, and a stuck screen logged the same message
+  every few seconds — burying anything that mattered. Those are now
+  collapsed to one line with a count, so real issues stand out.
+
 ## v0.1.77
 
 Product packshots in the content library.

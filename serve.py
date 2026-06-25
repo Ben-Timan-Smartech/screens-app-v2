@@ -104,7 +104,7 @@ def _github_headers(*, accept: str = "application/vnd.github+json") -> dict:
     return h
 
 
-def _github_urlopen(url: str, *, accept: str = "application/vnd.github+json", timeout: int = 8):
+def _github_urlopen(url: str, *, accept: str = "application/vnd.github+json", timeout: int = 8, extra_headers: dict | None = None):
     """Open a GitHub API URL, falling back to an *unauthenticated* request
     when a configured token is rejected.
 
@@ -121,6 +121,11 @@ def _github_urlopen(url: str, *, accept: str = "application/vnd.github+json", ti
         header_sets.append(_github_headers(accept=accept))
     anon = {k: v for k, v in _github_headers(accept=accept).items() if k != "Authorization"}
     header_sets.append(anon)
+    if extra_headers:
+        # v0.1.78: forward client headers (notably Range) to GitHub + the CDN
+        # so the APK proxy supports resumable downloads.
+        for h in header_sets:
+            h.update(extra_headers)
     last_exc: Exception | None = None
     for i, headers in enumerate(header_sets):
         try:
@@ -4092,6 +4097,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(503, "Release info unavailable"); return
         asset_id = info.get(f"_{flavor}AssetId")
         tag = info.get("tagName") or ""
+        # v0.1.78: forward the client's Range so the tablet's resumable APK
+        # download actually resumes (206) instead of restarting from 0 on
+        # flaky wifi. Both the asset API and the public download URL 302 to a
+        # CDN that honours Range; urllib carries the header across the redirect.
+        client_range = self.headers.get("Range")
         try:
             if asset_id:
                 # Authed/asset path (works for private repos + exact bytes).
@@ -4100,7 +4110,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # _github_urlopen retries anonymously if a stale token is
                 # rejected (repo is public).
                 api_url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/assets/{asset_id}"
-                upstream = _github_urlopen(api_url, accept="application/octet-stream", timeout=30)
+                upstream = _github_urlopen(
+                    api_url, accept="application/octet-stream", timeout=30,
+                    extra_headers=({"Range": client_range} if client_range else None),
+                )
             elif tag:
                 # Token-free path (atom fallback gave us only the tag): the
                 # PUBLIC release-download URL. github.com 302s to the CDN and
@@ -4108,8 +4121,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # entirely, so downloads work with a dead/absent token.
                 name = f"screens-player-{flavor}-{tag}.apk"
                 pub_url = f"https://github.com/{GITHUB_RELEASES_REPO}/releases/download/{tag}/{name}"
+                req_headers = {"User-Agent": "screens-app-v2-server"}
+                if client_range:
+                    req_headers["Range"] = client_range
                 upstream = urllib.request.urlopen(
-                    urllib.request.Request(pub_url, headers={"User-Agent": "screens-app-v2-server"}),
+                    urllib.request.Request(pub_url, headers=req_headers),
                     timeout=30,
                 )
             else:
@@ -4124,8 +4140,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         try:
             filename = f"screens-player-{flavor}-v{info.get('versionName','')}.apk"
-            self.send_response(200)
+            # v0.1.78: relay the upstream's 206 + Content-Range so a resumed
+            # download lands correctly; advertise Accept-Ranges so the tablet
+            # knows it can resume.
+            up_status = getattr(upstream, "status", None) or 200
+            self.send_response(206 if up_status == 206 else 200)
             self.send_header("Content-Type", "application/vnd.android.package-archive")
+            self.send_header("Accept-Ranges", "bytes")
+            content_range = upstream.headers.get("Content-Range")
+            if content_range:
+                self.send_header("Content-Range", content_range)
             content_length = upstream.headers.get("Content-Length")
             if content_length:
                 self.send_header("Content-Length", content_length)
