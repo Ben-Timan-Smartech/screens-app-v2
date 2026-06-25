@@ -111,6 +111,6 @@ class RemoteLibrary(
                 _state.value = lib.copy(videos = items)
                 LogBuffer.i("RemoteLibrary", "Fetched ${items.size} videos across ${lib.brands.size} brands")
             }
-        }.onFailure { LogBuffer.w("RemoteLibrary", "Refresh failed: ${it.message}") }
+        }.onFailure { LogBuffer.throttledW("RemoteLibrary", "library-refresh-fail", "Refresh failed: ${it.message}") }
     }
 }

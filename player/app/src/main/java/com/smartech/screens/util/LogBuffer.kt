@@ -49,6 +49,33 @@ object LogBuffer {
     fun w(tag: String, msg: String, t: Throwable? = null) = add(Level.W, tag, msg, t)
     fun e(tag: String, msg: String, t: Throwable? = null) = add(Level.E, tag, msg, t)
 
+    /** v0.1.78: throttle bookkeeping — key → [lastLoggedAtMs, suppressedCount]. */
+    private val throttleState = HashMap<String, LongArray>()
+
+    /**
+     * v0.1.78: log a recurring warning at most once per [windowMs] per
+     * [key], counting how many identical ones were suppressed in between.
+     * Collapses storms of transient warnings — flaky-wifi heartbeat/state
+     * timeouts, DNS blips — that otherwise drown real signal in the shipped
+     * logs. The FIRST occurrence always logs immediately, so a brand-new
+     * problem still surfaces fast; only the repeats are squelched, with a
+     * "(+N more)" tail when the window rolls over.
+     */
+    @Synchronized
+    fun throttledW(tag: String, key: String, msg: String, windowMs: Long = 5 * 60_000L) {
+        val now = System.currentTimeMillis()
+        val st = throttleState.getOrPut(key) { longArrayOf(0L, 0L) }
+        if (st[0] == 0L || now - st[0] >= windowMs) {
+            val suppressed = st[1]
+            st[0] = now
+            st[1] = 0
+            val suffix = if (suppressed > 0) " (+$suppressed more in the last ${windowMs / 60_000}m)" else ""
+            add(Level.W, tag, msg + suffix, null)
+        } else {
+            st[1]++
+        }
+    }
+
     @Synchronized
     private fun add(level: Level, tag: String, msg: String, t: Throwable?) {
         // Mirror to logcat so adb logcat still works.
