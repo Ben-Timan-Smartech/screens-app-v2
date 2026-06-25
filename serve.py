@@ -655,7 +655,12 @@ def _tmrw_videos_map() -> dict:
                              if (im.get("role") or "").lower() == "main"), None) \
                     or (imagery[0] if imagery else None)
                 if main:
-                    d["packshot"] = _drive_thumb_url(main.get("filePath"))
+                    # Prefer `driveUrl` (the servable Drive link) over
+                    # `filePath`: for many products (e.g. TCL Global) filePath
+                    # is a local CloudStorage *sync path* and the Drive URL
+                    # lives in driveUrl; for others (e.g. Foreo) filePath itself
+                    # is the Drive URL and driveUrl is null. Try driveUrl first.
+                    d["packshot"] = _drive_thumb_url(main.get("driveUrl") or main.get("filePath"))
             except Exception as e:
                 print(f"[tmrwvideos] product lookup for sku {sku} failed: {e}", file=sys.stderr)
             _sku_detail[sku] = d
