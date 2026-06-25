@@ -390,6 +390,7 @@ fun PlaylistView(
                             progress = progress,
                             cached = cached,
                             failed = failed,
+                            failReason = failures[v.id],
                             canMoveUp = i > 0,
                             canMoveDown = i < items.size - 1,
                             onMoveUp = { moveItem(i, i - 1) },
@@ -530,6 +531,7 @@ private fun PlaylistRow(
     progress: PlayerRepository.DownloadProgress? = null,
     cached: Boolean = false,
     failed: Boolean = false,
+    failReason: String? = null,
     canMoveUp: Boolean = false,
     canMoveDown: Boolean = false,
     onMoveUp: () -> Unit = {},
@@ -584,9 +586,27 @@ private fun PlaylistRow(
             }
         }
 
-        if (downloading) {
-            Spacer(Modifier.height(10.dp))
-            DownloadProgressStrip(progress!!)
+        // v0.1.79: per-item lifecycle status line. An active download wins
+        // (it may be retrying); otherwise show the failure reason — the
+        // headline add, since a fatal error previously showed only a red ✕
+        // with no explanation; otherwise, with nothing on disk yet, it's
+        // still syncing to the server / queued to download.
+        when {
+            downloading -> {
+                Spacer(Modifier.height(10.dp))
+                DownloadProgressStrip(progress!!)
+            }
+            failReason != null -> {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Couldn't download: $failReason",
+                    color = Color(0xFFA63824), fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                )
+            }
+            !cached -> {
+                Spacer(Modifier.height(6.dp))
+                Text("Syncing to server…", color = Muted, fontSize = 13.sp)
+            }
         }
     }
 }
