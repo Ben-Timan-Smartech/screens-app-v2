@@ -155,6 +155,29 @@ def _fetch_latest_release() -> dict | None:
         return None
 
 
+def _latest_tag_from_atom() -> str | None:
+    """Token-free fallback for the latest release tag.
+
+    Reads the PUBLIC `releases.atom` feed, served by github.com — NOT
+    api.github.com — so it isn't subject to the API's 60/hr anonymous
+    per-IP limit that Cloud Run's shared egress IP keeps tripping once the
+    `SCREENS_GITHUB_TOKEN` is dead. The newest release is the first
+    `<entry>`; its alternate link is `…/releases/tag/<tag>`. Returns the tag
+    (e.g. "v0.1.77") or None."""
+    url = f"https://github.com/{GITHUB_RELEASES_REPO}/releases.atom"
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "screens-app-v2-server", "Accept": "application/atom+xml"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            xml = resp.read().decode("utf-8", "replace")
+    except Exception as e:
+        print(f"[release] atom fallback failed: {e}", file=sys.stderr)
+        return None
+    m = re.search(r"/releases/tag/([^\"'<>\s]+)", xml)
+    return m.group(1) if m else None
+
+
 def _release_info() -> dict:
     """Return {tagName, versionName, versionCode, modernUrl, legacyUrl,
     publishedAt, releaseUrl} for the latest release, or {} if we can't
@@ -170,10 +193,33 @@ def _release_info() -> dict:
         if _release_cache["data"] is not None and (now - _release_cache["fetched_at"]) < RELEASE_CACHE_TTL:
             return _release_cache["data"]
     raw = _fetch_latest_release()
-    if not raw:
-        # Don't poison the cache with empty data — let the next request retry.
+    assets: list = []
+    notes = ""
+    published_at = None
+    release_url = None
+    if raw:
+        tag = raw.get("tag_name") or ""
+        assets = raw.get("assets") or []
+        notes = raw.get("body") or ""
+        published_at = raw.get("published_at")
+        release_url = raw.get("html_url")
+    else:
+        # API unreachable — typically a dead SCREENS_GITHUB_TOKEN plus
+        # anonymous api.github.com calls that Cloud Run's shared egress IP
+        # gets rate-limited on (60/hr per IP). Fall back to the PUBLIC
+        # releases.atom feed (github.com, not the rate-limited
+        # api.github.com) for the latest tag. That's all we need: APKs
+        # download via the public release-download URL, which requires no
+        # asset IDs (see _serve_release_download). Keeps updates flowing
+        # with no token at all.
+        tag = _latest_tag_from_atom() or ""
+        if tag:
+            release_url = f"https://github.com/{GITHUB_RELEASES_REPO}/releases/tag/{tag}"
+            print(f"[release] API unavailable — atom fallback, latest tag {tag}", file=sys.stderr)
+    if not tag:
+        # Couldn't reach GitHub at all. Don't poison the cache with empty
+        # data — let the next request retry.
         return {}
-    tag = raw.get("tag_name") or ""
     version_name = tag[1:] if tag.startswith("v") else tag
     # Match: MAJOR.MINOR.PATCH → MAJOR*10000 + MINOR*100 + PATCH (mirrors
     # the formula in player/app/build.gradle.kts so the player can
@@ -183,7 +229,6 @@ def _release_info() -> dict:
         version_code = major * 10_000 + minor * 100 + patch
     except (ValueError, TypeError):
         version_code = 0
-    assets = raw.get("assets") or []
     def _find_asset(flavor: str) -> dict | None:
         for a in assets:
             if flavor in (a.get("name") or "").lower():
@@ -191,6 +236,9 @@ def _release_info() -> dict:
         return None
     modern_asset = _find_asset("modern")
     legacy_asset = _find_asset("legacy")
+    # On the atom fallback we have no asset list — our release workflow
+    # always ships both flavors, so advertise both URLs in that case.
+    have_assets = raw is not None
 
     # All download URLs point at our own /apk routes. The bytes still
     # come from GitHub but they're proxied through Cloud Run, which:
@@ -212,11 +260,11 @@ def _release_info() -> dict:
         "tagName":      tag,
         "versionName":  version_name,
         "versionCode":  version_code,
-        "modernUrl":    _apk_url("modern") if modern_asset else None,
-        "legacyUrl":    _apk_url("legacy") if legacy_asset else None,
-        "publishedAt":  raw.get("published_at"),
-        "releaseUrl":   raw.get("html_url"),
-        "notes":        raw.get("body") or "",
+        "modernUrl":    _apk_url("modern") if (modern_asset or not have_assets) else None,
+        "legacyUrl":    _apk_url("legacy") if (legacy_asset or not have_assets) else None,
+        "publishedAt":  published_at,
+        "releaseUrl":   release_url,
+        "notes":        notes,
         # Internal: asset IDs for the proxy endpoint. Leading underscore
         # is purely a "don't ship this to public consumers" hint — we
         # return the same dict to /api/auth/me, but no UI surfaces it.
@@ -4043,16 +4091,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not info:
             self.send_error(503, "Release info unavailable"); return
         asset_id = info.get(f"_{flavor}AssetId")
-        if not asset_id:
-            self.send_error(404, f"No {flavor} APK in latest release"); return
-        api_url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/assets/{asset_id}"
+        tag = info.get("tagName") or ""
         try:
-            # urllib follows the 302 from the asset API to the CDN by
-            # default. The resulting `upstream` is the actual binary
-            # stream; we just relay it. _github_urlopen falls back to an
-            # anonymous request if a stale token is rejected (repo is
-            # public), so a dead SCREENS_GITHUB_TOKEN can't break downloads.
-            upstream = _github_urlopen(api_url, accept="application/octet-stream", timeout=30)
+            if asset_id:
+                # Authed/asset path (works for private repos + exact bytes).
+                # urllib follows the 302 from the asset API to the CDN; the
+                # resulting stream is the binary, which we relay.
+                # _github_urlopen retries anonymously if a stale token is
+                # rejected (repo is public).
+                api_url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/assets/{asset_id}"
+                upstream = _github_urlopen(api_url, accept="application/octet-stream", timeout=30)
+            elif tag:
+                # Token-free path (atom fallback gave us only the tag): the
+                # PUBLIC release-download URL. github.com 302s to the CDN and
+                # urllib follows it — avoids the rate-limited asset API
+                # entirely, so downloads work with a dead/absent token.
+                name = f"screens-player-{flavor}-{tag}.apk"
+                pub_url = f"https://github.com/{GITHUB_RELEASES_REPO}/releases/download/{tag}/{name}"
+                upstream = urllib.request.urlopen(
+                    urllib.request.Request(pub_url, headers={"User-Agent": "screens-app-v2-server"}),
+                    timeout=30,
+                )
+            else:
+                self.send_error(404, f"No {flavor} APK in latest release"); return
         except urllib.error.HTTPError as e:
             print(f"[release-download] upstream HTTP {e.code}: {e.reason}", file=sys.stderr)
             self.send_error(502, f"Upstream fetch failed ({e.code})")
