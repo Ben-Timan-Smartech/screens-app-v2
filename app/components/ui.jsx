@@ -471,6 +471,23 @@ const setScreenSyncGroup = async (deviceId, syncGroup) => {
   return res.json();
 };
 
+// setScreenName — v0.1.81. POST /api/screens/<id>/name to rename a screen
+// from the CMS. The server tags the name as operator-set so the tablet's
+// heartbeat (which keeps reporting its local name) can't overwrite it.
+// Works on offline screens too — the registry record updates immediately.
+const setScreenName = async (deviceId, name) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/name`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `rename failed: ${res.status}`);
+  }
+  return res.json();
+};
+
 // addStore — v0.1.38. POST /api/stores. Adds a row to the dynamic
 // taxonomy LOCATION_TAXONOMY.stores so both the CMS dropdowns and
 // any tablet that fetches /api/stores at launch see it.
@@ -1461,7 +1478,7 @@ Object.assign(window, {
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
+  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,
   addStore, deleteStore, refreshStoresFromServer,
 });

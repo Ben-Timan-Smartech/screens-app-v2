@@ -753,6 +753,83 @@ const LogsModal = ({ deviceId, screenName, isLive, canEdit, onClose }) => {
   );
 };
 
+// EditableTitle — v0.1.81. The screen name in the page header, renamable in
+// place. Click the pencil → inline input with Save/Cancel (Enter saves, Esc
+// cancels). onSave returns a promise; errors surface as a toast and keep the
+// editor open. Falls back to plain text when the operator can't edit (e.g.
+// the slot has never registered a tablet).
+const EditableTitle = ({ name, canEdit, onSave }) => {
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState(name);
+  const [saving, setSaving] = React.useState(false);
+  const inputRef = React.useRef(null);
+
+  React.useEffect(() => { if (!editing) setDraft(name); }, [name, editing]);
+  React.useEffect(() => {
+    if (editing && inputRef.current) { inputRef.current.focus(); inputRef.current.select(); }
+  }, [editing]);
+
+  const cancel = () => { setEditing(false); setDraft(name); };
+  const commit = async () => {
+    const next = (draft || '').trim();
+    if (!next || next === name) { cancel(); return; }
+    setSaving(true);
+    try {
+      await onSave(next);
+      setEditing(false);
+    } catch (e) {
+      showToast(`Rename failed: ${e.message}`, 'err');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+        <span>{name}</span>
+        {canEdit && (
+          <button
+            onClick={() => setEditing(true)}
+            title="Rename screen"
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              width: 24, height: 24, borderRadius: 4, color: 'var(--ink-4)',
+              cursor: 'pointer', background: 'transparent', border: 'none',
+            }}>
+            <Icon.edit size={13} />
+          </button>
+        )}
+      </span>
+    );
+  }
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+      <input
+        ref={inputRef}
+        value={draft}
+        disabled={saving}
+        maxLength={80}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); commit(); }
+          if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+        }}
+        style={{
+          fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 600,
+          color: 'var(--ink-0)', background: 'var(--ink-10)',
+          border: 'var(--border-strong)', borderRadius: 4, padding: '4px 8px',
+          outline: 'none', minWidth: 160, maxWidth: 320,
+        }}
+      />
+      <Button variant="primary" size="sm" icon={<Icon.check size={12} />} disabled={saving} onClick={commit}>
+        {saving ? 'Saving…' : 'Save'}
+      </Button>
+      <Button variant="secondary" size="sm" disabled={saving} onClick={cancel}>Cancel</Button>
+    </span>
+  );
+};
+
 const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   const vp = useViewport();
   const live = useLiveScreens();
@@ -773,6 +850,15 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   const screen = lastKnown
     ? liveScreenToRow(lastKnown)
     : { id: screenId, name: 'Screen not found', orient: 'landscape' };
+
+  // v0.1.81: optimistic rename. The live-screens poll lags a rename by a few
+  // seconds, so we show the new name immediately and clear the override once
+  // the server's polled value catches up.
+  const [nameOverride, setNameOverride] = React.useState(null);
+  const displayName = nameOverride || screen.name;
+  React.useEffect(() => {
+    if (nameOverride && screen.name === nameOverride) setNameOverride(null);
+  }, [screen.name, nameOverride]);
 
   // The server persists `currentItems` per deviceId regardless of whether the
   // tablet is currently online — that's what the tablet picks up next poll.
@@ -816,6 +902,12 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   const canEdit = !!targetDeviceId;
 
   const [busy, setBusy] = React.useState(null);
+  const handleRename = async (next) => {
+    if (!targetDeviceId) throw new Error('No registered tablet for this screen yet');
+    await setScreenName(targetDeviceId, next);
+    setNameOverride(next);
+    showToast(`Renamed to “${next}”`, 'ok');
+  };
   const handleCommand = async (command, label) => {
     if (!targetDeviceId) {
       showToast('No registered tablet for this slot yet', 'err');
@@ -1102,9 +1194,9 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
         crumbs={[
           { label: 'Screens', href: '/screens' },
           { label: store.name, href: `/screens/${store.id}` },
-          screen.name,
+          displayName,
         ]}
-        title={screen.name}
+        title={<EditableTitle name={displayName} canEdit={canEdit} onSave={handleRename} />}
         actions={
           <>
             <Button variant="secondary" size="sm" icon={<Icon.play size={12} />}
@@ -1139,7 +1231,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
       {addOpen && canEdit && (
         <AddContentModal
           targetDeviceId={targetDeviceId}
-          targetName={screen.name}
+          targetName={displayName}
           onClose={() => setAddOpen(false)}
         />
       )}
