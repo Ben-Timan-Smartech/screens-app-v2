@@ -758,18 +758,23 @@ const LogsModal = ({ deviceId, screenName, isLive, canEdit, onClose }) => {
 // cancels). onSave returns a promise; errors surface as a toast and keep the
 // editor open. Falls back to plain text when the operator can't edit (e.g.
 // the slot has never registered a tablet).
-const EditableTitle = ({ name, canEdit, onSave }) => {
+const EditableTitle = ({ name, editSeed, canEdit, onSave }) => {
+  // `name` is what's shown as the title; `editSeed` is what the input
+  // pre-fills with when you click the pencil. They differ for a screen that
+  // hasn't been renamed yet: the title shows "code · concept" but the editor
+  // seeds with just the code, so you edit that rather than the composite.
+  const seed = editSeed != null ? editSeed : name;
   const [editing, setEditing] = React.useState(false);
-  const [draft, setDraft] = React.useState(name);
+  const [draft, setDraft] = React.useState(seed);
   const [saving, setSaving] = React.useState(false);
   const inputRef = React.useRef(null);
 
-  React.useEffect(() => { if (!editing) setDraft(name); }, [name, editing]);
+  React.useEffect(() => { if (!editing) setDraft(seed); }, [seed, editing]);
   React.useEffect(() => {
     if (editing && inputRef.current) { inputRef.current.focus(); inputRef.current.select(); }
   }, [editing]);
 
-  const cancel = () => { setEditing(false); setDraft(name); };
+  const cancel = () => { setEditing(false); setDraft(seed); };
   const commit = async () => {
     const next = (draft || '').trim();
     if (!next || next === name) { cancel(); return; }
@@ -1196,7 +1201,12 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
           { label: store.name, href: `/screens/${store.id}` },
           displayName,
         ]}
-        title={<EditableTitle name={displayName} canEdit={canEdit} onSave={handleRename} />}
+        title={<EditableTitle
+          name={displayName}
+          editSeed={(nameOverride || screen.nameSetByOperator) ? displayName : (screen.screenCode || displayName)}
+          canEdit={canEdit}
+          onSave={handleRename}
+        />}
         actions={
           <>
             <Button variant="secondary" size="sm" icon={<Icon.play size={12} />}

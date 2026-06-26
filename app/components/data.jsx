@@ -73,12 +73,23 @@ const liveScreenToRow = (ls) => {
   const loc = ls.location || {};
   const items = ls.currentItems || [];
   const currentItem = items[0];
+  // v0.1.81: an operator rename (POST /api/screens/<id>/name, flagged
+  // nameSetByOperator on the server) is authoritative — it overrides the
+  // auto "code · concept" label. Without this the rename appeared not to
+  // save: the server stored `name` but this row kept re-deriving the
+  // composite on every poll. Un-renamed screens still show "code · concept".
+  const composed = [loc.screenCode, loc.concept].filter(Boolean).join(' · ');
   return {
     id:         ls.deviceId,
     deviceId:   ls.deviceId,
     storeId:    loc.storeId || 'unassigned',
     screenCode: loc.screenCode || ls.deviceId.slice(0, 6),
-    name:       [loc.screenCode, loc.concept].filter(Boolean).join(' · ') || (ls.name || 'Unnamed screen'),
+    nameSetByOperator: !!ls.nameSetByOperator,
+    name:       (ls.nameSetByOperator && ls.name) ? ls.name
+                  : (composed || ls.name || 'Unnamed screen'),
+    appVersion: ls.appVersion || null,
+    registeredAt: ls.registeredAt || 0,
+    secondsSinceHeartbeat: ls.secondsSinceHeartbeat != null ? ls.secondsSinceHeartbeat : null,
     playing:    currentItem?.title || null,
     brand:      currentItem?.brand || null,
     status:     ls.online ? 'online' : 'offline',

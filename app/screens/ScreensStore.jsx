@@ -38,6 +38,11 @@ const ScreenCard = ({ s, selected, onToggle, onOpen }) => {
           </div>
         )}
         <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 4 }}>
+          {s.appVersion && (
+            <div className="tnum" title="App version" style={{ background: 'rgba(9,9,11,0.55)', color: '#fff', borderRadius: 4, padding: '2px 6px', fontSize: 10, display: 'inline-flex', alignItems: 'center' }}>
+              v{s.appVersion}
+            </div>
+          )}
           <div style={{ background: 'rgba(9,9,11,0.55)', color: '#fff', borderRadius: 4, padding: '2px 6px', fontSize: 10, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             {s.orient === 'portrait' ? <Icon.device size={10} /> : <Icon.deviceLand size={10} />}
             <span>{s.tier}</span>
@@ -108,6 +113,12 @@ const ScreenRow = ({ s, selected, onToggle, onOpen }) => {
         {s.orient === 'portrait' ? <Icon.device size={11} /> : <Icon.deviceLand size={11} />}
         <span className="tnum">{s.tier}</span>
       </div>
+      {/* v0.1.81: app version per screen, so you can spot which boxes are
+          behind without opening each one. '—' until the tablet has checked in. */}
+      <span className="tnum scr-mobile-hide" title="App version"
+        style={{ fontSize: 11, color: 'var(--ink-3)', width: 52, textAlign: 'right' }}>
+        {s.appVersion ? `v${s.appVersion}` : '—'}
+      </span>
       <span className="tnum scr-mobile-hide" style={{ fontSize: 11, color: 'var(--ink-3)', width: 70, textAlign: 'right' }}>{s.brand || '—'}</span>
       <Icon.chevR size={13} />
     </button>
@@ -133,6 +144,28 @@ const ScreensStoreView = ({ storeId }) => {
     setViewMode(m);
     try { localStorage.setItem('screens.viewMode', m); } catch {}
   };
+  // v0.1.81: sortable list. 'name' (A–Z), 'added' (newest registration
+  // first), 'updated' (most-recently-seen first). Persisted like viewMode.
+  const [sortBy, setSortBy] = React.useState(() => {
+    try { return localStorage.getItem('screens.sortBy') || 'name'; } catch { return 'name'; }
+  });
+  const setSort = (m) => {
+    setSortBy(m);
+    try { localStorage.setItem('screens.sortBy', m); } catch {}
+  };
+  const sortedScreens = React.useMemo(() => {
+    const arr = [...screens];
+    if (sortBy === 'added') {
+      arr.sort((a, b) => (b.registeredAt || 0) - (a.registeredAt || 0));
+    } else if (sortBy === 'updated') {
+      // smaller secondsSinceHeartbeat = seen more recently; never-seen last
+      const r = (x) => (x.secondsSinceHeartbeat == null ? Infinity : x.secondsSinceHeartbeat);
+      arr.sort((a, b) => r(a) - r(b));
+    } else {
+      arr.sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base', numeric: true }));
+    }
+    return arr;
+  }, [screens, sortBy]);
   // v0.1.57: read viewport so the in-store grid + stats strip
   // collapse on mobile (≤640 px). Previously the grid hard-coded
   // 4 columns, which produced 80-px-wide tiles on a phone.
@@ -172,6 +205,20 @@ const ScreensStoreView = ({ storeId }) => {
           </div>
           <span style={{ flex: 1 }} className="scr-mobile-hide" />
           <Input placeholder="Search screens or content…" leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 160, maxWidth: 260 }} />
+          {/* v0.1.81: sort control. Native select for robustness/accessibility. */}
+          <select
+            value={sortBy}
+            onChange={(e) => setSort(e.target.value)}
+            title="Sort screens"
+            style={{
+              height: 28, fontSize: 12, color: 'var(--ink-1)',
+              background: 'var(--ink-10)', border: 'var(--border-strong)',
+              borderRadius: 2, padding: '0 8px', cursor: 'pointer', flexShrink: 0,
+            }}>
+            <option value="name">Sort: Name (A–Z)</option>
+            <option value="added">Sort: Recently added</option>
+            <option value="updated">Sort: Recently updated</option>
+          </select>
           {/* v0.1.56: view toggle is now functional + remembers the choice. */}
           <Button
             variant={viewMode === 'grid' ? 'secondary' : 'ghost'}
@@ -202,7 +249,7 @@ const ScreensStoreView = ({ storeId }) => {
           </div>
         ) : viewMode === 'list' ? (
           <div style={{ border: 'var(--border)', borderRadius: 12, background: 'var(--ink-10)', overflow: 'hidden' }}>
-            {screens.map(s => (
+            {sortedScreens.map(s => (
               <ScreenRow
                 key={s.id}
                 s={s}
@@ -221,7 +268,7 @@ const ScreensStoreView = ({ storeId }) => {
             gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
             gap: 12,
           }}>
-            {screens.map(s => <ScreenCard key={s.id} s={s} selected={selected.has(s.id)} onToggle={() => toggle(s.id)} onOpen={() => navigate(`/screens/${store.id}/${s.id}`)} />)}
+            {sortedScreens.map(s => <ScreenCard key={s.id} s={s} selected={selected.has(s.id)} onToggle={() => toggle(s.id)} onOpen={() => navigate(`/screens/${store.id}/${s.id}`)} />)}
           </div>
         )}
 
