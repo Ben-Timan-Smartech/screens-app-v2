@@ -102,6 +102,7 @@ fun PlaylistView(
     val canonicalItems by repository.intendedPlaylist.collectAsState()
     val downloads by repository.downloads.collectAsState()
     val failures by repository.downloadFailures.collectAsState()
+    val playbackFailures by repository.playbackFailures.collectAsState()
     // Local override so deletes feel instant — clears as soon as the live
     // poll catches up to the new server revision.
     var pendingItems by remember { mutableStateOf<List<VideoItem>?>(null) }
@@ -391,6 +392,7 @@ fun PlaylistView(
                             cached = cached,
                             failed = failed,
                             failReason = failures[v.id],
+                            playbackFailReason = playbackFailures[v.id],
                             canMoveUp = i > 0,
                             canMoveDown = i < items.size - 1,
                             onMoveUp = { moveItem(i, i - 1) },
@@ -532,6 +534,7 @@ private fun PlaylistRow(
     cached: Boolean = false,
     failed: Boolean = false,
     failReason: String? = null,
+    playbackFailReason: String? = null,
     canMoveUp: Boolean = false,
     canMoveDown: Boolean = false,
     onMoveUp: () -> Unit = {},
@@ -600,6 +603,15 @@ private fun PlaylistRow(
                 Spacer(Modifier.height(8.dp))
                 Text(
                     "Couldn't download: $failReason",
+                    color = Color(0xFFA63824), fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                )
+            }
+            playbackFailReason != null -> {
+                // v0.1.80: downloaded fine, but the device can't play it
+                // (the watchdog skipped it). Show the reason + format.
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    playbackFailReason,
                     color = Color(0xFFA63824), fontSize = 13.sp, fontWeight = FontWeight.Medium,
                 )
             }

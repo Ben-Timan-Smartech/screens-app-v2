@@ -18,6 +18,23 @@ Rules:
 
 ---
 
+## v0.1.80
+
+A screen no longer freezes on a video it can't play — and the logs say why.
+
+- **One bad video can't freeze the screen.** If a clip is too demanding for
+  a player to decode (common on older "legacy" boxes — 4K, very high bitrate,
+  or an unusual codec), the screen now detects it's stuck, **skips past it,
+  and keeps playing the rest** instead of freezing on it.
+- **The playlist tells you which one, and why.** The skipped video is flagged
+  on its row in plain English — e.g. *"Won't play on this screen — too
+  high-res/bitrate or an unsupported codec. Format: hevc 3840×2160"* — so you
+  know exactly what to re-encode.
+- **Richer diagnostic logs.** Every watchdog action now records the video's
+  name **and its format** (codec / resolution / bitrate), so a stall is
+  obvious at a glance instead of needing a deep dive — for both staff and
+  support.
+
 ## v0.1.79
 
 Clearer status for each video in the playlist (on the tablet).
