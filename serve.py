@@ -16,6 +16,7 @@ Run from the project root:
 
 from __future__ import annotations
 
+import html
 import http.server
 import json
 import os
@@ -2080,6 +2081,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._serve_release_download("legacy"); return
         if raw_path == "/apk/modern":
             self._serve_release_download("modern"); return
+        # Public, no-sign-in landing page for installing / re-installing the
+        # player APK. The point: hand someone (or a tablet's own browser) a
+        # single URL — screens.smartechworld.com/download — where they pick
+        # modern vs legacy, see the current version, and can re-tap to
+        # re-trigger a download when the in-app updater stalls.
+        if raw_path in ("/download", "/install"):
+            self._serve_download_page(); return
         super().do_GET()
 
     def do_HEAD(self) -> None:
@@ -3183,10 +3191,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         if path == "/api/screens/register":
             device_id = body.get("deviceId") or "unknown"
-            name = body.get("name") or device_id
             with _STATE_LOCK:
+                prev = _screens.get(device_id, {})
+                # v0.1.81: if an operator has renamed this screen from the
+                # CMS (nameSetByOperator), keep that name across re-
+                # registration. A tablet re-registers on every app relaunch
+                # / update with its *local* name — without this, the operator
+                # rename would silently revert on the next restart.
+                name = (
+                    (prev.get("name") if prev.get("nameSetByOperator") else None)
+                    or body.get("name")
+                    or device_id
+                )
                 _screens[device_id] = {
-                    **_screens.get(device_id, {}),
+                    **prev,
                     "deviceId":        device_id,
                     "name":            name,
                     "location":        body.get("location"),
@@ -3322,8 +3340,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "decoderTier", "safeBitrateMbps",
                 ):
                     val = body.get(key)
-                    if val is not None:
-                        s[key] = val
+                    if val is None:
+                        continue
+                    # v0.1.81: a CMS rename sets nameSetByOperator. The tablet
+                    # keeps reporting its *local* name on every heartbeat, so
+                    # skip the name merge once an operator has overridden it —
+                    # otherwise the rename would be clobbered seconds later.
+                    if key == "name" and s.get("nameSetByOperator"):
+                        continue
+                    s[key] = val
                 s["lastHeartbeat"] = time.time()
                 # v0.1.37: pick the right pollMode default for a brand-
                 # new tablet. Legacy flavor (Android 6/7 hardware on
@@ -3584,7 +3609,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }   (legacy — writes pollMode)
         # POST /api/screens/<deviceId>/sync-group      { syncGroup: string | null }
         # POST /api/screens/<deviceId>/display-mode    { displayMode: int | null }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|poll-mode|low-data-mode|sync-group|display-mode)$", path)
+        # POST /api/screens/<deviceId>/name            { name: string }
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|poll-mode|low-data-mode|sync-group|display-mode|name)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -3875,6 +3901,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     )
                     self._send_json({"ok": True, "displayMode": new_mode})
                     return
+                if action == "name":
+                    # v0.1.81: rename a screen from the CMS. The name lives on
+                    # the _screens registry record (not per-screen playback
+                    # state). We tag it nameSetByOperator so neither the
+                    # tablet's heartbeat nor a re-registration clobbers it —
+                    # see /api/screens/heartbeat + /api/screens/register.
+                    # Operator-only (not in the self-edit list above, so this
+                    # required screens.push). Works on offline screens too.
+                    raw_name = body.get("name")
+                    if not isinstance(raw_name, str):
+                        self.send_error(400, "name must be a string"); return
+                    new_name = raw_name.strip()[:80]
+                    if not new_name:
+                        self.send_error(400, "name cannot be empty"); return
+                    s = _screens.get(device_id)
+                    if not s:
+                        self.send_error(404, "Unknown screen"); return
+                    old_name = s.get("name") or device_id
+                    s["name"] = new_name
+                    s["nameSetByOperator"] = True
+                    _save_screens()
+                    if new_name != old_name:
+                        _log_activity(
+                            kind="settings",
+                            text=f"Renamed '{old_name}' → '{new_name}'",
+                            icon="settings",
+                            target=device_id,
+                        )
+                    self._send_json({"ok": True, "name": new_name})
+                    return
 
         self.send_error(404, "Unknown API endpoint")
 
@@ -4073,6 +4129,127 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             who=actor["display_name"],
         )
         self._send_json({"ok": True})
+
+    def _serve_download_page(self) -> None:
+        """Public, sign-in-free landing page for installing the player APK.
+
+        Served at /download (and /install). Renders the current version and
+        two big download buttons — modern (Android 8+) and legacy (Android
+        6/7) — that point back at the /apk proxy routes. Re-tapping a button
+        re-streams the file, so this doubles as the "the in-app updater
+        stalled, just grab it again" page. Self-contained HTML (inline CSS,
+        no app bundle) so it loads instantly on a fresh tablet's browser."""
+        info = _release_info() or {}
+        version = info.get("versionName") or ""
+        release_url = info.get("releaseUrl") or ""
+        published = (info.get("publishedAt") or "")[:10]   # YYYY-MM-DD
+        ver_label = f"v{html.escape(version)}" if version else "latest build"
+
+        def _btn(href: str, primary: bool, title: str, sub: str) -> str:
+            bg = "#2563eb" if primary else "#1c1c20"
+            border = "#2563eb" if primary else "#33333a"
+            fg = "#ffffff" if primary else "#e7e7ea"
+            return (
+                f'<a class="btn" download href="{href}" '
+                f'style="background:{bg};border:1px solid {border};color:{fg}">'
+                f'<span class="btn-title">{html.escape(title)}</span>'
+                f'<span class="btn-sub">{html.escape(sub)}</span>'
+                f'</a>'
+            )
+
+        modern_btn = _btn("/apk", True, "Download for this screen",
+                          "Standard build · Android 8 and newer")
+        legacy_btn = _btn("/apk/legacy", False, "Older device? Use the legacy build",
+                          "For Android 6 / 7 boxes")
+
+        ver_line = (
+            f'Latest version <strong>{ver_label}</strong>'
+            + (f' · released {html.escape(published)}' if published else "")
+        ) if version else (
+            "Version lookup is temporarily unavailable — the download buttons "
+            "below still fetch the latest build."
+        )
+        notes_link = (
+            f'<a class="notes" href="{html.escape(release_url)}" target="_blank" '
+            f'rel="noopener noreferrer">Release notes ↗</a>'
+            if release_url else ""
+        )
+
+        page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Install the Screens player</title>
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #0b0b0d; color: #e7e7ea;
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: 40px 18px;
+  }}
+  .card {{ width: 100%; max-width: 460px; }}
+  .kicker {{ font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: #6b6b73; }}
+  h1 {{ font-size: 26px; line-height: 1.2; margin: 8px 0 6px; color: #fafafa; }}
+  .ver {{ font-size: 13.5px; color: #9a9aa2; margin: 0 0 24px; line-height: 1.5; }}
+  .ver strong {{ color: #d4d4d8; font-weight: 600; }}
+  .btn {{
+    display: flex; flex-direction: column; gap: 2px;
+    text-decoration: none; border-radius: 12px;
+    padding: 16px 18px; margin-bottom: 12px;
+    transition: transform .04s ease;
+  }}
+  .btn:active {{ transform: scale(.99); }}
+  .btn-title {{ font-size: 16px; font-weight: 600; }}
+  .btn-sub {{ font-size: 12.5px; opacity: .8; }}
+  .help {{
+    margin-top: 22px; padding: 16px 18px;
+    background: #131316; border: 1px solid #26262c; border-radius: 12px;
+    font-size: 13px; line-height: 1.6; color: #a8a8b0;
+  }}
+  .help b {{ color: #d4d4d8; font-weight: 600; }}
+  .help ol {{ margin: 8px 0 0; padding-left: 18px; }}
+  .help li {{ margin-bottom: 4px; }}
+  .notes {{ display: inline-block; margin-top: 14px; font-size: 13px; color: #7aa2f7; text-decoration: none; }}
+  .foot {{ margin-top: 28px; font-size: 11.5px; color: #5a5a62; text-align: center; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="kicker">Smartech Screens</div>
+    <h1>Install the player</h1>
+    <p class="ver">{ver_line}</p>
+    {modern_btn}
+    {legacy_btn}
+    {notes_link}
+    <div class="help">
+      <b>Download won't start, or stalled?</b> Just tap the button again — each
+      tap re-fetches the file from the start.
+      <ol>
+        <li>Tap a download button above.</li>
+        <li>Open the downloaded file and choose <b>Install</b>.</li>
+        <li>If prompted, allow installs from this browser (Settings →
+            "Install unknown apps"), then re-open the file.</li>
+        <li>Launch <b>Screens</b> and follow on-screen setup.</li>
+      </ol>
+    </div>
+    <div class="foot">Not sure which build? Use the standard one — try legacy only if it won't install.</div>
+  </div>
+</body>
+</html>"""
+        body = page.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def _serve_release_download(self, flavor: str) -> None:
         """Stream the latest release's modern or legacy APK to the client.

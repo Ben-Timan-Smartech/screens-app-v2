@@ -246,6 +246,17 @@ const LoginScreen = () => {
               Older device? Use the legacy build (Android 6/7)
             </a>
           )}
+          {/* v0.1.81: full install page — version, both builds, and
+              re-trigger/troubleshoot steps. Handy to send to whoever's
+              setting up a tablet, or to open on the tablet's own browser. */}
+          <a
+            href="/download"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ fontSize: 10, color: 'var(--ink-4)', textDecoration: 'underline' }}
+          >
+            Install help &amp; all versions →
+          </a>
         </div>
       )}
     </FullPage>

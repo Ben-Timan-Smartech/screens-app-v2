@@ -18,6 +18,21 @@ Rules:
 
 ---
 
+## v0.1.81
+
+Rename screens from the CMS, plus a simple install page for the player.
+
+- **Rename a screen in the CMS.** Open a screen and click the pencil next to its
+  name to rename it — handy when a tablet registered with a generic or wrong
+  name. The new name sticks (the tablet can no longer overwrite it on its next
+  check-in) and shows everywhere — the screens list, the activity log, and on
+  pushes. Works even while the screen is offline.
+- **A shareable install page.** Visit **screens.smartechworld.com/download** for a
+  one-tap install page: it shows the current version and download buttons for
+  the standard and legacy builds, with step-by-step install help. Send it to
+  whoever's setting up a screen, or open it on the tablet itself if the in-app
+  update stalls — re-tapping a button restarts the download from scratch.
+
 ## v0.1.80
 
 A screen no longer freezes on a video it can't play — and the logs say why.
