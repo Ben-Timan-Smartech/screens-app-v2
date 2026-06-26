@@ -488,6 +488,25 @@ const setScreenName = async (deviceId, name) => {
   return res.json();
 };
 
+// setScreenLocation — v0.1.81. POST /api/screens/<id>/location to edit a
+// screen's location fields (region/city/storeId/concept/screenCode/...) from
+// the CMS. Only the keys passed are changed; pass '' or null to clear one.
+// The server flags it locationSetByOperator so the tablet's heartbeat can't
+// overwrite it. Concept drives splash selection, so this is how you fix a
+// screen pulling the wrong splash without touching the tablet.
+const setScreenLocation = async (deviceId, fields) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/location`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields || {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `location update failed: ${res.status}`);
+  }
+  return res.json();
+};
+
 // addStore — v0.1.38. POST /api/stores. Adds a row to the dynamic
 // taxonomy LOCATION_TAXONOMY.stores so both the CMS dropdowns and
 // any tablet that fetches /api/stores at launch see it.
@@ -1478,7 +1497,7 @@ Object.assign(window, {
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
+  setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,
   addStore, deleteStore, refreshStoresFromServer,
 });

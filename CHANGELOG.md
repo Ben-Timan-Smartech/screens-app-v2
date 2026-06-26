@@ -33,6 +33,15 @@ Rename screens from the CMS, plus a simple install page for the player.
   remembered); **filtered by concept**; and shows the **concept** in its own
   column plus the **app version** each screen is running — so you can group by
   concept and spot which boxes are behind without opening each one.
+- **Edit a screen's location & concept from the CMS.** A screen's detail page
+  now has a **Location** card to change its region, city, store, **concept**,
+  and screen code without touching the tablet. This overrides what the tablet
+  reports (it can't undo your change on its next check-in). Because **concept
+  picks the splash**, this is how you fix a screen showing the wrong splash —
+  e.g. set a New York screen's concept to **tmrw** to get the tm:rw splash.
+- **New "tmrw" concept.** Added as a selectable concept (pinned to the top of
+  the picker) wired to the tm:rw splash, so tm:rw screens can be set explicitly
+  rather than relying on the city default.
 - **A shareable install page.** Visit **screens.smartechworld.com/download** for a
   one-tap install page: it shows the current version and download buttons for
   the standard and legacy builds, with step-by-step install help. Send it to

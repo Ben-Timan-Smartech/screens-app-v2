@@ -1431,6 +1431,12 @@ SPLASH_FOLDERS = [
     # (kind, name, folder_name)
     ("brand",   "tmrw",       "Splash - tmrw"),
     ("brand",   "smartech",   "Splash - Smartech"),
+    # v0.1.81: "tmrw" as a selectable *concept* (not just a brand), backed by
+    # the same "Splash - tmrw" folder — so a screen whose concept is "tmrw"
+    # resolves to the tm:rw splash directly (concept beats city). Sharing the
+    # folder means an uploaded tm:rw splash propagates to both brand:tmrw and
+    # concept:tmrw (see _apply_uploaded_splashes sibling-key logic).
+    ("concept", "tmrw",       "Splash - tmrw"),
     ("concept", "Smartech",   "Splash - Smartech"),
     ("concept", "Bikeshop",   "Splash - Bike Shop"),
     ("concept", "7EVN",       "Splash - 7EVN"),
@@ -3203,11 +3209,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     or body.get("name")
                     or device_id
                 )
+                # v0.1.81: a CMS location edit (locationSetByOperator) wins over
+                # whatever the tablet re-reports on re-registration too.
+                location = (
+                    prev.get("location") if prev.get("locationSetByOperator")
+                    else body.get("location")
+                )
                 _screens[device_id] = {
                     **prev,
                     "deviceId":        device_id,
                     "name":            name,
-                    "location":        body.get("location"),
+                    "location":        location,
                     "registeredAt":    time.time(),
                     "lastHeartbeat":   time.time(),
                     "appVersion":      body.get("appVersion"),
@@ -3347,6 +3359,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # skip the name merge once an operator has overridden it —
                     # otherwise the rename would be clobbered seconds later.
                     if key == "name" and s.get("nameSetByOperator"):
+                        continue
+                    # v0.1.81: same override for location — once an operator
+                    # edits region/city/store/concept from the CMS, don't let
+                    # the tablet's reported location overwrite it.
+                    if key == "location" and s.get("locationSetByOperator"):
                         continue
                     s[key] = val
                 s["lastHeartbeat"] = time.time()
@@ -3610,7 +3627,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/sync-group      { syncGroup: string | null }
         # POST /api/screens/<deviceId>/display-mode    { displayMode: int | null }
         # POST /api/screens/<deviceId>/name            { name: string }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|poll-mode|low-data-mode|sync-group|display-mode|name)$", path)
+        # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|poll-mode|low-data-mode|sync-group|display-mode|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -3930,6 +3948,53 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             target=device_id,
                         )
                     self._send_json({"ok": True, "name": new_name})
+                    return
+                if action == "location":
+                    # v0.1.81: edit a screen's location (region/city/store/
+                    # concept/screenCode/...) from the CMS. Only the keys
+                    # present in the body are touched; "" or null clears a
+                    # field. We tag locationSetByOperator so the tablet's
+                    # heartbeat + re-registration don't clobber it (same
+                    # override pattern as the name rename). Concept feeds
+                    # resolve_splash_for, so this is how an operator fixes a
+                    # screen pulling the wrong splash. Operator-only (not in
+                    # the self-edit list → required screens.push). Works on
+                    # offline screens too.
+                    s = _screens.get(device_id)
+                    if not s:
+                        self.send_error(404, "Unknown screen"); return
+                    loc = dict(s.get("location") or {})
+                    allowed = ("region", "city", "storeId", "concept",
+                               "screenCode", "floor", "table")
+                    touched = False
+                    for f in allowed:
+                        if f not in body:
+                            continue
+                        v = body.get(f)
+                        if v is None:
+                            loc.pop(f, None); touched = True
+                        elif isinstance(v, str):
+                            vv = v.strip()
+                            if vv:
+                                loc[f] = vv
+                            else:
+                                loc.pop(f, None)
+                            touched = True
+                        else:
+                            self.send_error(400, f"{f} must be a string or null"); return
+                    if not touched:
+                        self.send_error(400, "No location fields supplied"); return
+                    s["location"] = loc
+                    s["locationSetByOperator"] = True
+                    _save_screens()
+                    screen_name = s.get("name") or device_id
+                    _log_activity(
+                        kind="settings",
+                        text=f"Edited location on {screen_name}",
+                        icon="settings",
+                        target=device_id,
+                    )
+                    self._send_json({"ok": True, "location": loc})
                     return
 
         self.send_error(404, "Unknown API endpoint")

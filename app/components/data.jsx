@@ -177,7 +177,9 @@ const LOCATION_TAXONOMY = {
     { id: 'events',              name: 'Events',                      address: 'Pop-up + event installations',                              city: 'GLB' },
     { id: 'test',                name: 'Test',                        address: 'Development & QA fixtures',                                 city: 'GLB' },
   ],
-  concepts: ['Smartech', 'Playhouse', 'Sanctuary', 'Bikeshop', 'The Track', '7EVN', 'Cornershop', 'tm:rw Cafe'],
+  // v0.1.81: 'tmrw' is pinned first — it maps to the tm:rw splash (server
+  // SPLASH_FOLDERS). Keep it at the head so it's the top of the concept picker.
+  concepts: ['tmrw', 'Smartech', 'Playhouse', 'Sanctuary', 'Bikeshop', 'The Track', '7EVN', 'Cornershop', 'tm:rw Cafe'],
   floors: ['GF', 'MEZ', 'TF'],
   tables: ['GF.A', 'MEZ.A', 'TF.A', 'GF.B'],  // table id encodes floor as prefix
 };
