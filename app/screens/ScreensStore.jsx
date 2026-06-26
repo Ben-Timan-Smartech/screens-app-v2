@@ -57,6 +57,12 @@ const ScreenCard = ({ s, selected, onToggle, onOpen }) => {
         {s.playing ? `Playing · ${s.playing}` : statusLabel}
         {s.status !== 'online' && s.status !== 'updating' && ` · ${s.lastSeen}`}
       </div>
+      {/* v0.1.81: concept shown as its own line (removed from the name). */}
+      {s.concept && (
+        <div style={{ fontSize: 10.5, color: 'var(--ink-4)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {s.concept}
+        </div>
+      )}
     </div>
   );
 };
@@ -109,6 +115,10 @@ const ScreenRow = ({ s, selected, onToggle, onOpen }) => {
           {s.status !== 'online' && s.status !== 'updating' && s.lastSeen ? ` · ${s.lastSeen}` : ''}
         </div>
       </div>
+      {/* v0.1.81: concept as its own column (no longer glued onto the name). */}
+      <span className="scr-mobile-hide" title="Concept" style={{ fontSize: 11, color: 'var(--ink-3)', width: 96, textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {s.concept || '—'}
+      </span>
       <div className="scr-mobile-hide" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--ink-4)' }}>
         {s.orient === 'portrait' ? <Icon.device size={11} /> : <Icon.deviceLand size={11} />}
         <span className="tnum">{s.tier}</span>
@@ -166,6 +176,21 @@ const ScreensStoreView = ({ storeId }) => {
     }
     return arr;
   }, [screens, sortBy]);
+  // v0.1.81: filter by concept. Distinct concepts present in this store drive
+  // the dropdown; 'all' shows everything. Kept in-memory (resets per visit) so
+  // a stale filter can't silently hide screens on a later navigation.
+  const concepts = React.useMemo(() => {
+    const set = new Set(screens.map(s => s.concept).filter(Boolean));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [screens]);
+  const [conceptFilter, setConceptFilter] = React.useState('all');
+  React.useEffect(() => {
+    if (conceptFilter !== 'all' && !concepts.includes(conceptFilter)) setConceptFilter('all');
+  }, [concepts, conceptFilter]);
+  const visibleScreens = React.useMemo(
+    () => (conceptFilter === 'all' ? sortedScreens : sortedScreens.filter(s => s.concept === conceptFilter)),
+    [sortedScreens, conceptFilter],
+  );
   // v0.1.57: read viewport so the in-store grid + stats strip
   // collapse on mobile (≤640 px). Previously the grid hard-coded
   // 4 columns, which produced 80-px-wide tiles on a phone.
@@ -205,6 +230,21 @@ const ScreensStoreView = ({ storeId }) => {
           </div>
           <span style={{ flex: 1 }} className="scr-mobile-hide" />
           <Input placeholder="Search screens or content…" leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 160, maxWidth: 260 }} />
+          {/* v0.1.81: concept filter — only shown when this store has concepts. */}
+          {concepts.length > 0 && (
+            <select
+              value={conceptFilter}
+              onChange={(e) => setConceptFilter(e.target.value)}
+              title="Filter by concept"
+              style={{
+                height: 28, fontSize: 12, color: 'var(--ink-1)',
+                background: 'var(--ink-10)', border: 'var(--border-strong)',
+                borderRadius: 2, padding: '0 8px', cursor: 'pointer', flexShrink: 0,
+              }}>
+              <option value="all">All concepts</option>
+              {concepts.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          )}
           {/* v0.1.81: sort control. Native select for robustness/accessibility. */}
           <select
             value={sortBy}
@@ -247,9 +287,14 @@ const ScreensStoreView = ({ storeId }) => {
               </>
             )}
           </div>
+        ) : visibleScreens.length === 0 ? (
+          <div style={{ padding: '40px 16px', border: 'var(--border)', borderRadius: 12, textAlign: 'center', color: 'var(--ink-4)', fontSize: 13 }}>
+            No screens with concept “{conceptFilter}”.
+            <button onClick={() => setConceptFilter('all')} style={{ marginLeft: 8, color: 'var(--ink-2)', textDecoration: 'underline', cursor: 'pointer' }}>Clear filter</button>
+          </div>
         ) : viewMode === 'list' ? (
           <div style={{ border: 'var(--border)', borderRadius: 12, background: 'var(--ink-10)', overflow: 'hidden' }}>
-            {sortedScreens.map(s => (
+            {visibleScreens.map(s => (
               <ScreenRow
                 key={s.id}
                 s={s}
@@ -268,7 +313,7 @@ const ScreensStoreView = ({ storeId }) => {
             gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
             gap: 12,
           }}>
-            {sortedScreens.map(s => <ScreenCard key={s.id} s={s} selected={selected.has(s.id)} onToggle={() => toggle(s.id)} onOpen={() => navigate(`/screens/${store.id}/${s.id}`)} />)}
+            {visibleScreens.map(s => <ScreenCard key={s.id} s={s} selected={selected.has(s.id)} onToggle={() => toggle(s.id)} onOpen={() => navigate(`/screens/${store.id}/${s.id}`)} />)}
           </div>
         )}
 
