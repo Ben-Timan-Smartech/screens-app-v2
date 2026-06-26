@@ -24,9 +24,15 @@ Rename screens from the CMS, plus a simple install page for the player.
 
 - **Rename a screen in the CMS.** Open a screen and click the pencil next to its
   name to rename it — handy when a tablet registered with a generic or wrong
-  name. The new name sticks (the tablet can no longer overwrite it on its next
-  check-in) and shows everywhere — the screens list, the activity log, and on
-  pushes. Works even while the screen is offline.
+  name. Your name now **overrides** the automatic "code · concept" label and
+  shows everywhere — the screens list, the activity log, and on pushes — and the
+  tablet can't overwrite it on its next check-in. The rename box starts from the
+  screen code so you're editing that, not the whole composite. Works even while
+  the screen is offline.
+- **Friendlier store screens view.** The list of screens in a store can now be
+  **sorted** by name, recently added, or recently updated (your choice is
+  remembered), and each row/card shows the **app version** that screen is
+  running — so you can spot which boxes are behind without opening each one.
 - **A shareable install page.** Visit **screens.smartechworld.com/download** for a
   one-tap install page: it shows the current version and download buttons for
   the standard and legacy builds, with step-by-step install help. Send it to
