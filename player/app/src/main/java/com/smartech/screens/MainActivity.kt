@@ -196,6 +196,11 @@ class MainActivity : ComponentActivity() {
                 val match = repo.intendedPlaylist.value.firstOrNull { it.id == id }
                 if (match != null) "${match.title} ($id)" else id
             },
+            // v0.1.80: a video the device can't decode (stuck buffering) gets
+            // flagged so the playlist view shows WHY, and skipped so it can't
+            // freeze the screen. Cleared once it plays fine again.
+            onUnplayable = { id, reason -> repo.markPlaybackFailure(id, reason) },
+            onItemPlaying = { id -> repo.clearPlaybackFailure(id) },
         )
         watchdog.start()
 

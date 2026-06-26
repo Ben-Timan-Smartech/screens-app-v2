@@ -774,6 +774,29 @@ class PlayerRepository(
     private val _downloadFailures = MutableStateFlow<Map<String, String>>(emptyMap())
     val downloadFailures: StateFlow<Map<String, String>> = _downloadFailures
 
+    // v0.1.80: items the watchdog gave up on — downloaded fine but the device
+    // can't actually play them (stuck buffering → too high-res/bitrate or an
+    // unsupported codec). id → human reason. Shown per-row in the playlist
+    // view; cleared once the item plays cleanly again (watchdog onItemPlaying)
+    // — e.g. after it's re-encoded and re-uploaded.
+    private val _playbackFailures = MutableStateFlow<Map<String, String>>(emptyMap())
+    val playbackFailures: StateFlow<Map<String, String>> = _playbackFailures
+
+    /** v0.1.80: flag a video as unplayable on this device (from the watchdog
+     *  when it skips an item that buffered through repeated kicks). */
+    fun markPlaybackFailure(videoId: String, reason: String) {
+        _playbackFailures.update { it + (videoId to reason) }
+        LogBuffer.w(TAG, "Unplayable on this device — $videoId: $reason")
+    }
+
+    /** v0.1.80: clear the unplayable flag once the item plays fine again. */
+    fun clearPlaybackFailure(videoId: String) {
+        if (_playbackFailures.value.containsKey(videoId)) {
+            _playbackFailures.update { it - videoId }
+            LogBuffer.i(TAG, "Playback recovered for $videoId — cleared unplayable flag")
+        }
+    }
+
     /**
      * The user's *intended* playlist — what the server says is on this
      * screen, even when some items are still downloading. Distinct from the

@@ -98,6 +98,20 @@ class PlaybackWatchdog(
      * mix-splash loop. Default false so the recovery stays dormant.
      */
     private val isOnFallbackSplash: () -> Boolean = { false },
+    /**
+     * v0.1.80: invoked with (mediaId, reason) when an item buffers through
+     * repeated kicks without ever playing — almost always a clip the device
+     * can't decode (too high-res/bitrate, or an unsupported codec). The
+     * caller flags it so the playlist view shows WHY, and the watchdog skips
+     * past it so one bad video can't freeze the whole screen.
+     */
+    private val onUnplayable: (mediaId: String, reason: String) -> Unit = { _, _ -> },
+    /**
+     * v0.1.80: invoked with the mediaId on a healthy (READY + advancing)
+     * tick, so the caller can clear a previous "unplayable" flag once the
+     * item plays fine again (e.g. after it's re-encoded + re-uploaded).
+     */
+    private val onItemPlaying: (mediaId: String) -> Unit = {},
     private val pollIntervalMs: Long = DEFAULT_POLL_INTERVAL_MS,
 ) {
 
@@ -137,6 +151,11 @@ class PlaybackWatchdog(
      */
     private val perItemKicks = mutableMapOf<String, Int>()
 
+    /** v0.1.80: consecutive buffering kicks per item. Drives the
+     *  "skip the video this device can't decode" escalation so one
+     *  undecodable clip can't freeze the whole screen. */
+    private val perItemBufferKicks = mutableMapOf<String, Int>()
+
     /** v0.1.73: per-item count of cache-purge+re-download attempts after a
      *  bad-source error. Bounds the loop so a genuinely corrupt *source*
      *  file (bad in Drive, not just a bad local copy) can't trigger
@@ -156,6 +175,8 @@ class PlaybackWatchdog(
             // item N to start of item N+1 looks identical to a stall.
             lastPositionMs = Long.MIN_VALUE
             stallTicks = 0
+            // v0.1.80: new item → fresh buffering-skip budget.
+            perItemBufferKicks.clear()
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -265,12 +286,44 @@ class PlaybackWatchdog(
             return
         }
 
-        // Buffering stuck.
+        // Buffering stuck — the player wants to play but can't fill its
+        // buffer. A KICK (re-prepare) fixes a transient blip; but a clip the
+        // device simply can't decode (too high-res/bitrate, or an unsupported
+        // codec — and the file is local, so it isn't a network wait) buffers
+        // FOREVER and kicking never helps. v0.1.80: after a couple of kicks
+        // on the same item, give up and skip past it so one bad video can't
+        // freeze the whole screen — and log the format so the cause is clear.
         if (snapshot.playbackState == Player.STATE_BUFFERING && snapshot.playWhenReady) {
             bufferingTicks++
             if (bufferingTicks >= BUFFERING_TICKS_BEFORE_KICK) {
                 bufferingTicks = 0
-                escalate(level = RecoveryLevel.KICK, reason = "buffering for ${BUFFERING_TICKS_BEFORE_KICK * pollIntervalMs / 1000}s")
+                val secs = BUFFERING_TICKS_BEFORE_KICK * pollIntervalMs / 1000
+                val mediaId = player.currentMediaItem?.mediaId
+                val label = currentItemLabel() ?: "(unknown item)"
+                val fmt = currentFormatLabel()
+                val kicks = ((if (mediaId != null) perItemBufferKicks[mediaId] else null) ?: 0) + 1
+                if (mediaId != null) perItemBufferKicks[mediaId] = kicks
+                val canSkip = !isOnSplash() && player.mediaItemCount > 1
+                if (mediaId != null && kicks >= BUFFERING_KICKS_BEFORE_SKIP && canSkip) {
+                    LogBuffer.w(
+                        TAG,
+                        "Watchdog SKIP — '$label' ($fmt) buffered through $kicks kicks " +
+                            "(~${kicks * secs}s) without playing; skipping to the next item",
+                    )
+                    perItemBufferKicks.remove(mediaId)
+                    runCatching {
+                        onUnplayable(
+                            mediaId,
+                            "Won't play on this screen — stuck buffering, likely too high-res/bitrate " +
+                                "or an unsupported codec for this device. Format: $fmt",
+                        )
+                    }.onFailure { LogBuffer.w(TAG, "onUnplayable callback failed: ${it.message}") }
+                    player.seekToNextMediaItem()
+                    player.prepare()
+                    player.play()
+                } else {
+                    escalate(RecoveryLevel.KICK, "buffering for ${secs}s on '$label'")
+                }
                 return
             }
         } else {
@@ -308,6 +361,10 @@ class PlaybackWatchdog(
                     }
                 } else {
                     stallTicks = 0
+                    // v0.1.80: advancing normally → clear any stale
+                    // "unplayable" flag for this item (e.g. after it was
+                    // re-encoded and now plays fine).
+                    player.currentMediaItem?.mediaId?.let { onItemPlaying(it) }
                 }
             }
         } else {
@@ -316,6 +373,20 @@ class PlaybackWatchdog(
             stallTicks = 0
             lastPositionMs = Long.MIN_VALUE
         }
+    }
+
+    /** v0.1.80: compact description of the current video track — codec,
+     *  resolution, frame rate, bitrate — woven into watchdog log lines and
+     *  the unplayable-item reason so "4K HEVC on a legacy box" is obvious at
+     *  a glance instead of needing a deep dive. Reads ExoPlayer state; only
+     *  call from the Main-dispatched tick/escalate. */
+    private fun currentFormatLabel(): String {
+        val f = player.videoFormat ?: return "format unknown"
+        val codec = (f.sampleMimeType ?: f.codecs ?: "?").substringAfterLast('/')
+        val res = if (f.width > 0 && f.height > 0) "${f.width}×${f.height}" else "?"
+        val fps = if (f.frameRate > 0f) " @${f.frameRate.toInt()}fps" else ""
+        val mbps = if (f.bitrate > 0) " ~%.0fMbps".format(f.bitrate / 1_000_000.0) else ""
+        return "$codec $res$fps$mbps"
     }
 
     private suspend fun escalate(level: RecoveryLevel, reason: String) {
@@ -336,6 +407,7 @@ class PlaybackWatchdog(
         // on the next refresh — but the log line is the breadcrumb
         // they need.
         val currentMediaId = withContext(Dispatchers.Main) { player.currentMediaItem?.mediaId }
+        val fmt = currentFormatLabel()   // v0.1.80: log the video format on every action
         if (effective == RecoveryLevel.KICK && currentMediaId != null) {
             val count = (perItemKicks[currentMediaId] ?: 0) + 1
             perItemKicks[currentMediaId] = count
@@ -344,23 +416,23 @@ class PlaybackWatchdog(
                 LogBuffer.w(
                     TAG,
                     "Repeat-offender video: '$label' has triggered $count watchdog kicks. " +
-                        "Consider removing it from the playlist or re-encoding.",
+                        "Consider removing it from the playlist or re-encoding. Format: $fmt",
                 )
             }
         }
 
         when (effective) {
             RecoveryLevel.KICK -> {
-                LogBuffer.w(TAG, "Watchdog KICK — $reason")
+                LogBuffer.w(TAG, "Watchdog KICK — $reason · $fmt")
                 withContext(Dispatchers.Main) { player.prepare() }
             }
             RecoveryLevel.REBUILD -> {
-                LogBuffer.w(TAG, "Watchdog REBUILD — $reason")
+                LogBuffer.w(TAG, "Watchdog REBUILD — $reason · $fmt")
                 runCatching { onKick() }
                     .onFailure { LogBuffer.w(TAG, "Rebuild callback failed: ${it.message}") }
             }
             RecoveryLevel.RESTART -> {
-                LogBuffer.w(TAG, "Watchdog RESTART — $reason")
+                LogBuffer.w(TAG, "Watchdog RESTART — $reason · $fmt")
                 stallTicks = 0
                 runCatching {
                     withContext(Dispatchers.Main) { onRestart() }
@@ -403,6 +475,13 @@ class PlaybackWatchdog(
 
         /** STATE_BUFFERING longer than 4 polls (~2 min) → cheap kick. */
         private const val BUFFERING_TICKS_BEFORE_KICK = 4
+
+        /** v0.1.80: buffering kicks on the SAME item before we give up and
+         *  skip it. 2 kicks ≈ 4 min of dead-air buffering — long enough to
+         *  rule out a transient blip, short enough not to leave a sign frozen.
+         *  A local file that buffers this long is one the device can't
+         *  decode, so re-kicking it again would never help. */
+        private const val BUFFERING_KICKS_BEFORE_SKIP = 2
 
         /** v0.1.76: ticks spent on the splash (with content ready) before
          *  each stuck-on-splash recovery rung. ~60 s then ~120 s at the
