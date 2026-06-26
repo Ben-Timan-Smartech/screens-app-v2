@@ -753,6 +753,111 @@ const LogsModal = ({ deviceId, screenName, isLive, canEdit, onClose }) => {
   );
 };
 
+// LocationCard — v0.1.81. Edit a screen's location (region/city/store/concept/
+// screen code) from the CMS. Concept drives splash selection, so this is the
+// CMS-side fix for a screen pulling the wrong splash. Saving flags the screen
+// locationSetByOperator server-side so the tablet's heartbeat can't overwrite
+// it. Cascading selects mirror onboarding (city filtered by region, store by
+// city); concept lists the taxonomy (tm:rw pinned first in data.jsx).
+const LOC_SELECT_STYLE = {
+  width: '100%', height: 32, fontSize: 13, color: 'var(--ink-1)',
+  background: 'var(--ink-10)', border: 'var(--border-strong)',
+  borderRadius: 2, padding: '0 8px', boxSizing: 'border-box',
+};
+const LocField = ({ label, hint, children }) => (
+  <div style={{ marginBottom: 10 }}>
+    <div style={{ fontSize: 11, color: 'var(--ink-4)', marginBottom: 4 }}>{label}</div>
+    {children}
+    {hint && <div style={{ fontSize: 10.5, color: 'var(--ink-4)', marginTop: 4, lineHeight: 1.4 }}>{hint}</div>}
+  </div>
+);
+const LocationCard = ({ location, canEdit, onSave }) => {
+  const tax = (typeof LOCATION_TAXONOMY !== 'undefined')
+    ? LOCATION_TAXONOMY : { regions: [], cities: [], stores: [], concepts: [] };
+  const init = {
+    region:     location?.region || '',
+    city:       location?.city || '',
+    storeId:    location?.storeId || '',
+    concept:    location?.concept || '',
+    screenCode: location?.screenCode || '',
+  };
+  const initKey = JSON.stringify(init);
+  const [draft, setDraft] = React.useState(init);
+  const [saving, setSaving] = React.useState(false);
+  // Re-seed when the polled location changes (e.g. after a save settles).
+  React.useEffect(() => { setDraft(init); }, [initKey]); // eslint-disable-line
+
+  const cities = tax.cities.filter(c => !draft.region || c.region === draft.region);
+  const stores = tax.stores.filter(s => !draft.city || s.city === draft.city);
+
+  const set = (patch) => setDraft(d => {
+    const next = { ...d, ...patch };
+    if (patch.region !== undefined && next.city &&
+        !tax.cities.some(c => c.code === next.city && c.region === next.region)) {
+      next.city = ''; next.storeId = '';
+    }
+    if (patch.city !== undefined && next.storeId &&
+        !tax.stores.some(s => s.id === next.storeId && s.city === next.city)) {
+      next.storeId = '';
+    }
+    return next;
+  });
+
+  const dirty = JSON.stringify(draft) !== initKey;
+  const save = async () => {
+    setSaving(true);
+    try { await onSave({ ...draft }); }
+    finally { setSaving(false); }
+  };
+
+  const summary = [draft.city, draft.concept].filter(Boolean).join(' · ') || 'Not set';
+  return (
+    <CollapsibleCard title="Location" summary={summary}>
+      <LocField label="Region">
+        <select style={LOC_SELECT_STYLE} value={draft.region} disabled={!canEdit || saving}
+          onChange={e => set({ region: e.target.value })}>
+          <option value="">—</option>
+          {tax.regions.map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+      </LocField>
+      <LocField label="City">
+        <select style={LOC_SELECT_STYLE} value={draft.city} disabled={!canEdit || saving}
+          onChange={e => set({ city: e.target.value })}>
+          <option value="">—</option>
+          {cities.map(c => <option key={c.code} value={c.code}>{c.code}</option>)}
+        </select>
+      </LocField>
+      <LocField label="Store">
+        <select style={LOC_SELECT_STYLE} value={draft.storeId} disabled={!canEdit || saving}
+          onChange={e => set({ storeId: e.target.value })}>
+          <option value="">—</option>
+          {stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+      </LocField>
+      <LocField label="Concept" hint="Sets the splash. A concept with no splash uploaded falls back to the city's default.">
+        <select style={LOC_SELECT_STYLE} value={draft.concept} disabled={!canEdit || saving}
+          onChange={e => set({ concept: e.target.value })}>
+          <option value="">None (use city default)</option>
+          {tax.concepts.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </LocField>
+      <LocField label="Screen code">
+        <input type="text" value={draft.screenCode} disabled={!canEdit || saving} maxLength={40}
+          onChange={e => set({ screenCode: e.target.value })}
+          style={{ ...LOC_SELECT_STYLE }} />
+      </LocField>
+      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+        <Button variant="primary" size="sm" disabled={!canEdit || !dirty || saving} onClick={save}>
+          {saving ? 'Saving…' : 'Save location'}
+        </Button>
+        {dirty && !saving && (
+          <Button variant="ghost" size="sm" onClick={() => setDraft(init)}>Reset</Button>
+        )}
+      </div>
+    </CollapsibleCard>
+  );
+};
+
 // EditableTitle — v0.1.81. The screen name in the page header, renamable in
 // place. Click the pencil → inline input with Save/Cancel (Enter saves, Esc
 // cancels). onSave returns a promise; errors surface as a toast and keep the
@@ -912,6 +1017,19 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     await setScreenName(targetDeviceId, next);
     setNameOverride(next);
     showToast(`Renamed to “${next}”`, 'ok');
+  };
+  const handleSetLocation = async (fields) => {
+    if (!targetDeviceId) { showToast('No registered tablet for this screen yet', 'err'); return; }
+    try {
+      await setScreenLocation(targetDeviceId, fields);
+      showToast(
+        isLive ? 'Location updated — splash refreshes on the next poll'
+               : 'Location saved — applies when the tablet reconnects',
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
   };
   const handleCommand = async (command, label) => {
     if (!targetDeviceId) {
@@ -1416,6 +1534,15 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 <StatusLine label="Playlist" value={statusValues.revision} mono />
               </div>
             </CollapsibleCard>
+
+            {/* v0.1.81: edit region/city/store/concept/screen code from the
+                CMS. Concept drives the splash, so this is where you fix a
+                screen pulling the wrong one (overrides the tablet). */}
+            <LocationCard
+              location={lastKnown?.location}
+              canEdit={canEdit}
+              onSave={handleSetLocation}
+            />
 
             {/* Splash mix toggle — only meaningful when live.
                 v0.1.33: locked off when the screen is in a sync group.
