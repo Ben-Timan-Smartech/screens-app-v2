@@ -18,6 +18,13 @@ Rules:
 
 ---
 
+## v0.1.82
+
+- **"Restart app" on the main staff overlay.** The Restart app button — relaunch
+  the player on the spot, without a full device reboot (cached videos +
+  registration are kept) — now sits right under "Refresh now" on the main staff
+  playlist screen, not just in Device admin → Actions.
+
 ## v0.1.81
 
 Rename screens from the CMS, plus a simple install page for the player.

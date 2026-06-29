@@ -318,6 +318,32 @@ fun PlaylistView(
                     )
                 }
 
+                Spacer(Modifier.height(10.dp))
+
+                // v0.1.82: Restart app — relaunch the player without a full
+                // device reboot (cached videos + registration survive). Same
+                // action as Device admin → Actions → Restart app, surfaced here
+                // on the main staff overlay for quick recovery.
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(6.dp))
+                        .border(1.dp, Bone, RoundedCornerShape(6.dp))
+                        .clickable {
+                            LogBuffer.w("PlaylistView", "Restart app tapped")
+                            repository.scheduleSelfRestart()
+                        }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "Restart app",
+                        color = Bone,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+
                 Spacer(Modifier.height(14.dp))
 
                 // Build number — small, low-contrast, monospaced. Lets a
