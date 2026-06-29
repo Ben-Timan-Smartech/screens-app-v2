@@ -465,6 +465,20 @@ fun DeviceAdminScreen(
                         onClick = { scope.launch { repository.refreshPlaylist() } },
                     )
                     Divider()
+                    // v0.1.81: relaunch the player from the staff overlay —
+                    // quickest recovery for a screen stuck on the splash or
+                    // wrong content, short of a full device reboot. Cache +
+                    // registration survive (scheduleSelfRestart relaunches the
+                    // activity via the launcher intent).
+                    ActionRow(
+                        title = "Restart app",
+                        sub = "Relaunch the player now. Cached videos + registration are kept.",
+                        onClick = {
+                            LogBuffer.w("Admin", "Restart app triggered by ${user.name}")
+                            repository.scheduleSelfRestart()
+                        },
+                    )
+                    Divider()
                     // v0.1.66: manual content-library re-pull. The library
                     // (brands + videos) also refreshes automatically on
                     // every launch, but this lets staff force it after a
