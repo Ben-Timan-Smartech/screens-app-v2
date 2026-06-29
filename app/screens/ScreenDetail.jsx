@@ -1433,18 +1433,6 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                   title="Tells the tablet to re-poll. Useful in Slow mode when you want a push to land before the next 5-minute tick.">
                   Refresh now
                 </Button>
-                {/* v0.1.81: restart the player app right here in the playlist
-                    controls (also available in the header). Relaunches the
-                    player without a full device reboot — quickest way to
-                    recover a screen stuck on the splash or wrong content
-                    after a push. */}
-                <Button
-                  variant="secondary" size="sm" icon={<Icon.play size={12} />}
-                  disabled={!canEdit || busy === 'restartPlayer'}
-                  onClick={() => handleCommand('restartPlayer', 'Restart player')}
-                  title="Relaunch the player app on the tablet — recovers a stuck or wrong-state screen without rebooting the whole device.">
-                  {busy === 'restartPlayer' ? 'Restarting…' : 'Restart app'}
-                </Button>
                 <Button
                   variant="secondary" size="sm" icon={<Icon.trash size={12} />}
                   disabled={!canEdit || playlist.length === 0}

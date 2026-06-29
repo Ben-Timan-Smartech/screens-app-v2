@@ -42,9 +42,10 @@ Rename screens from the CMS, plus a simple install page for the player.
 - **New "tmrw" concept.** Added as a selectable concept (pinned to the top of
   the picker) wired to the tm:rw splash, so tm:rw screens can be set explicitly
   rather than relying on the city default.
-- **"Restart app" button in the playlist controls.** Sits next to Refresh now —
-  relaunches the player on the tablet (no full device reboot), the quickest way
-  to recover a screen stuck on the splash or wrong content after a push.
+- **"Restart app" button on the tablet (staff overlay).** Under Device admin →
+  Actions, right below "Refresh playlist now": relaunches the player on the spot
+  (no full device reboot; cached videos + registration are kept) — the quickest
+  way to recover a screen stuck on the splash or wrong content.
 - **A shareable install page.** Visit **screens.smartechworld.com/download** for a
   one-tap install page: it shows the current version and download buttons for
   the standard and legacy builds, with step-by-step install help. Send it to
