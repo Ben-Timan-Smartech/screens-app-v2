@@ -15,20 +15,21 @@ const SettingsRow = ({ label, sub, value, children }) => (
 // ─────────────────────────────────────────────────────────────
 // Users tab — list, PIN column, inline create form.
 // PIN is what the user types into the on-tablet staff overlay.
-// 4 digits. Shown masked by default; click eye to reveal.
+// 4 digits. v0.1.84: the raw PIN is no longer sent to the CMS — we show only
+// whether one is set (••••) or not (—). Set/change PINs from Settings → Users
+// (write-only), never displayed back.
 // ─────────────────────────────────────────────────────────────
-const PinDisplay = ({ pin }) => {
-  const [show, setShow] = React.useState(false);
-  if (!pin) return <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>—</span>;
+const PinDisplay = ({ hasPin }) => {
+  if (!hasPin) return <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>—</span>;
   return (
-    <button onClick={(e) => { e.stopPropagation(); setShow(s => !s); }} style={{
-      display: 'inline-flex', alignItems: 'center', gap: 6,
+    <span style={{
+      display: 'inline-flex', alignItems: 'center',
       fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--ink-2)',
       padding: '2px 8px', background: 'var(--ink-9)', borderRadius: 4,
-      letterSpacing: 1, cursor: 'pointer',
-    }} className="tnum" title={show ? 'Hide PIN' : 'Show PIN'}>
-      {show ? pin : '••••'}
-    </button>
+      letterSpacing: 1,
+    }} className="tnum" title="PIN set">
+      ••••
+    </span>
   );
 };
 
@@ -138,7 +139,7 @@ const _RemovedUsersTab = () => {
               <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>{u.scope}</div>
             </div>
             <div style={{ fontSize: 12, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.email}</div>
-            <PinDisplay pin={u.pin} />
+            <PinDisplay hasPin={u.hasPin} />
             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <RoleChip role={u.role} />
               {u.status === 'pending' && <Chip tone="warn">Pending</Chip>}
@@ -666,6 +667,16 @@ const DriveSyncTab = () => {
     }
   };
 
+  // The command palette's "Run Drive Sync now" navigates here (?tab=drive)
+  // then fires `run-drive-sync`; kick off a scan when it lands. Listener
+  // only attaches while this tab is mounted, so the palette navigating in
+  // first is what makes it reachable.
+  React.useEffect(() => {
+    const onRun = () => { sync(); };
+    window.addEventListener('run-drive-sync', onRun);
+    return () => window.removeEventListener('run-drive-sync', onRun);
+  }, [sync]);
+
   // v0.1.68: re-scan a single brand folder + merge. Faster than a full
   // sync when only one brand's content changed.
   const refreshFolder = async () => {
@@ -1142,7 +1153,14 @@ const Settings = () => {
   // /users) talks to the actual /api/users endpoints. Having two
   // different lists of users was confusing — sidebar Users is now
   // the single source of truth.
-  const [tab, setTab] = React.useState('brands');
+  // Seed the active tab from the route so callers can deep-link
+  // (e.g. StoresIndex "Add store" → #/settings?tab=locations, the
+  // command palette's "Run Drive Sync now" → #/settings?tab=drive).
+  const route = useRoute();
+  const [tab, setTab] = React.useState(() => route.params?.tab || 'brands');
+  React.useEffect(() => {
+    if (route.params?.tab && route.params.tab !== tab) setTab(route.params.tab);
+  }, [route.params?.tab]);
   const auth = useAuth();
   const isOwner = auth?.user?.role === 'owner';
   // v0.1.58: Integrations tab is owner-only — it shows + edits the

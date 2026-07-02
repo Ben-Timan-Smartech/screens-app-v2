@@ -281,14 +281,27 @@ class VideoCache(
                 }
             }
 
-            // If still over cap, evict oldest first.
-            var total = totalBytes()
+            // If still over cap, evict oldest first — but NEVER evict an id in
+            // [keep]. Those are the currently-pinned (in-rotation) playlist
+            // items; evicting one just makes the next poll re-download it,
+            // which re-triggers eviction, forever. So the over-cap pass only
+            // considers non-keep .mp4s. (After the reap above there usually
+            // aren't any — this mostly matters transiently, e.g. an id that
+            // just left the playlist between the reap and here.)
+            //
+            // Size the cap check on completed .mp4s only. A huge stale .part
+            // (e.g. a resource that grew across a re-encode) must not count
+            // toward the total and force eviction of good, fully-cached files
+            // the over-cap pass can't even delete (.part files aren't touched
+            // here — orphans are reaped above).
+            val mp4s = root.listFiles { f -> f.isFile && f.extension == "mp4" } ?: emptyArray()
+            var total = mp4s.sumOf { it.length() }
             if (total <= capBytes) return@withContext evicted
 
-            val remaining = root.listFiles { f -> f.isFile && f.extension == "mp4" }
-                ?.sortedBy { it.lastModified() }
-                ?: emptyList()
-            for (f in remaining) {
+            val evictable = mp4s
+                .filter { it.nameWithoutExtension !in keep }
+                .sortedBy { it.lastModified() }
+            for (f in evictable) {
                 if (total <= capBytes) break
                 val size = f.length()
                 if (f.delete()) {
@@ -296,6 +309,15 @@ class VideoCache(
                     total -= size
                     Log.w(TAG, "Evicted ${f.name} (size $size)")
                 }
+            }
+            // Pinned set alone exceeds the cap — refuse to evict in-rotation
+            // items (that would just churn re-downloads). Log so the fleet
+            // telemetry surfaces an over-capacity playlist instead.
+            if (total > capBytes) {
+                LogBuffer.w(
+                    TAG,
+                    "Pinned playlist (${keep.size} item(s), $total B) exceeds cache cap $capBytes B; not evicting in-rotation videos"
+                )
             }
             evicted
         }

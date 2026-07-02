@@ -1039,9 +1039,25 @@ const ContentLibrary = () => {
     return () => window.removeEventListener('open-upload-panel', open);
   }, []);
   const [previewVideo, setPreviewVideo] = React.useState(null);
+  // Command palette "Open a video…" navigates here then fires
+  // `open-video-preview` with the chosen id; pop the preview modal.
+  // Listener only attaches while the library is mounted, so the palette
+  // navigating in first (plus its deferred dispatch) is what reaches it.
+  React.useEffect(() => {
+    const onPreview = (e) => {
+      const id = e?.detail?.videoId;
+      const vid = (window.MOCK_VIDEOS || []).find((v) => v.id === id);
+      if (vid) setPreviewVideo(vid);
+    };
+    window.addEventListener('open-video-preview', onPreview);
+    return () => window.removeEventListener('open-video-preview', onPreview);
+  }, []);
   const [pushPickerOpen, setPushPickerOpen] = React.useState(false);
   // Brand sidebar search + grid/list view toggle + pagination.
   const [brandQuery, setBrandQuery] = React.useState('');
+  // Main library search — filters the visible videos by title / brand /
+  // product, case-insensitive. Mirrors AddContentModal's in-modal search.
+  const [videoQuery, setVideoQuery] = React.useState('');
   // v0.1.56: list view is now the default and the choice persists
   // across sessions. List view shows the columns operators actually
   // need (resolution, length, file size) more clearly than the grid.
@@ -1135,12 +1151,18 @@ const ContentLibrary = () => {
   const hasTmrwData = !isAll && brandVideos.some(v => v.tmrwAssigned === true);
 
   const visibleVideos = React.useMemo(() => {
-    if (isAll || !activeProduct) return brandVideos;
-    if (activeProduct === ORPHAN) return brandVideos.filter(v => v.tmrwAssigned === false);
-    if (activeProduct === BRAND_GLOBAL) return brandVideos.filter(isBrandGlobal);
-    if (activeProduct === PRODUCTS) return brandVideos.filter(isProductVid);
-    return brandVideos.filter(v => isProductVid(v) && v.productLine === activeProduct);
-  }, [brandVideos, isAll, activeProduct]);
+    let base;
+    if (isAll || !activeProduct) base = brandVideos;
+    else if (activeProduct === ORPHAN) base = brandVideos.filter(v => v.tmrwAssigned === false);
+    else if (activeProduct === BRAND_GLOBAL) base = brandVideos.filter(isBrandGlobal);
+    else if (activeProduct === PRODUCTS) base = brandVideos.filter(isProductVid);
+    else base = brandVideos.filter(v => isProductVid(v) && v.productLine === activeProduct);
+    const q = videoQuery.trim().toLowerCase();
+    if (!q) return base;
+    return base.filter(v =>
+      [v.title, v.brand, v.product].some(f => (f || '').toLowerCase().includes(q)),
+    );
+  }, [brandVideos, isAll, activeProduct, videoQuery]);
 
   // Selecting a nav entry filters the list. Brand-global videos are a
   // small, coherent set, so we also auto-tick the active, pushable ones
@@ -1165,7 +1187,7 @@ const ContentLibrary = () => {
     : MOCK_BRANDS;
 
   // Reset pagination whenever the visible-set changes shape.
-  React.useEffect(() => { setPage(0); }, [activeBrand, view, activeProduct]);
+  React.useEffect(() => { setPage(0); }, [activeBrand, view, activeProduct, videoQuery]);
   // v0.1.64: switching brand clears the product filter + selection so
   // we don't carry one brand's product line / ticks into another.
   React.useEffect(() => { setActiveProduct(null); setSelected(new Set()); }, [activeBrand]);
@@ -1339,7 +1361,7 @@ const ContentLibrary = () => {
                 <Icon.chevD size={11} />
               </button>
             )}
-            <Input placeholder={isAll ? 'Search all videos…' : `Search ${brand?.name || ''} videos…`} leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 140, maxWidth: 280 }} />
+            <Input placeholder={isAll ? 'Search all videos…' : `Search ${brand?.name || ''} videos…`} value={videoQuery} onChange={(e) => setVideoQuery(e.target.value)} leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 140, maxWidth: 280 }} />
             <span style={{ flex: 1 }} className="scr-mobile-hide" />
             <span style={{ fontSize: 12, color: 'var(--ink-4)' }} className="scr-mobile-hide">{visibleVideos.length} video{visibleVideos.length === 1 ? '' : 's'} · sorted by recent</span>
             <Button
