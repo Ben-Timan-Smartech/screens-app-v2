@@ -184,4 +184,23 @@ const LOCATION_TAXONOMY = {
   tables: ['GF.A', 'MEZ.A', 'TF.A', 'GF.B'],  // table id encodes floor as prefix
 };
 
-Object.assign(window, { MOCK_BRANDS, MOCK_STORES, MOCK_VIDEOS, MOCK_ACTIVITY, MOCK_SCREENS_STORE, MOCK_SCHEDULES, MOCK_USERS, ROLE_LABEL, LOCATION_TAXONOMY, liveScreenToRow });
+// allStores — union of the built-in MOCK_STORES and any custom stores
+// merged into LOCATION_TAXONOMY.stores by refreshStoresFromServer().
+// Deduped by id (built-ins win). Custom taxonomy rows only carry
+// {id,name,address,city}, so we pad the display fields the store list
+// expects (country/region + zeroed counts) to keep consumers happy.
+// Used by StoresIndex, the store-view lookup, and PushPicker so a
+// server-added store is reachable, listable, and pushable.
+const allStores = () => {
+  const seen = new Set(MOCK_STORES.map(s => s.id));
+  const extra = (LOCATION_TAXONOMY.stores || [])
+    .filter(s => s.id && !seen.has(s.id))
+    .map(s => ({
+      id: s.id, name: s.name || s.id,
+      city: s.city || 'Global', country: '—', region: 'Global',
+      total: 0, online: 0, warn: 0, offline: 0,
+    }));
+  return [...MOCK_STORES, ...extra];
+};
+
+Object.assign(window, { MOCK_BRANDS, MOCK_STORES, MOCK_VIDEOS, MOCK_ACTIVITY, MOCK_SCREENS_STORE, MOCK_SCHEDULES, MOCK_USERS, ROLE_LABEL, LOCATION_TAXONOMY, liveScreenToRow, allStores });

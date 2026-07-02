@@ -784,8 +784,22 @@ const LocationCard = ({ location, canEdit, onSave }) => {
   const initKey = JSON.stringify(init);
   const [draft, setDraft] = React.useState(init);
   const [saving, setSaving] = React.useState(false);
-  // Re-seed when the polled location changes (e.g. after a save settles).
-  React.useEffect(() => { setDraft(init); }, [initKey]); // eslint-disable-line
+  // `baseline` is the location we last seeded/saved from — the reference
+  // for both "is the draft dirty?" and "has the server moved on?". Held in
+  // a ref so the re-seed effect can read the *current* draft/baseline
+  // without a stale closure re-triggering it. We only re-seed from a fresh
+  // poll when the operator hasn't touched the form (draft === baseline);
+  // an in-progress edit is left alone so a background poll can't wipe it.
+  const baselineRef = React.useRef(init);
+  const draftRef = React.useRef(draft);
+  draftRef.current = draft;
+  React.useEffect(() => {
+    const clean = JSON.stringify(draftRef.current) === JSON.stringify(baselineRef.current);
+    if (clean) {
+      baselineRef.current = init;
+      setDraft(init);
+    }
+  }, [initKey]); // eslint-disable-line
 
   const cities = tax.cities.filter(c => !draft.region || c.region === draft.region);
   const stores = tax.stores.filter(s => !draft.city || s.city === draft.city);
@@ -803,10 +817,16 @@ const LocationCard = ({ location, canEdit, onSave }) => {
     return next;
   });
 
-  const dirty = JSON.stringify(draft) !== initKey;
+  const dirty = JSON.stringify(draft) !== JSON.stringify(baselineRef.current);
   const save = async () => {
     setSaving(true);
-    try { await onSave({ ...draft }); }
+    try {
+      await onSave({ ...draft });
+      // Adopt the just-saved values as the new baseline so the form is no
+      // longer "dirty" and Reset returns here — not to stale pre-save
+      // values that only disappear once the poll catches up.
+      baselineRef.current = { ...draft };
+    }
     finally { setSaving(false); }
   };
 
@@ -851,7 +871,7 @@ const LocationCard = ({ location, canEdit, onSave }) => {
           {saving ? 'Saving…' : 'Save location'}
         </Button>
         {dirty && !saving && (
-          <Button variant="ghost" size="sm" onClick={() => setDraft(init)}>Reset</Button>
+          <Button variant="ghost" size="sm" onClick={() => setDraft(baselineRef.current)}>Reset</Button>
         )}
       </div>
     </CollapsibleCard>
@@ -963,11 +983,16 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
 
   // v0.1.81: optimistic rename. The live-screens poll lags a rename by a few
   // seconds, so we show the new name immediately and clear the override once
-  // the server's polled value catches up.
+  // the server's polled value catches up. `renameBaseline` records the polled
+  // name at the moment we renamed; if the poll later returns anything other
+  // than that baseline the server has moved on (our rename applied, or another
+  // operator / a tablet re-register changed it), so we drop the override
+  // instead of pinning the stale value forever.
   const [nameOverride, setNameOverride] = React.useState(null);
+  const renameBaselineRef = React.useRef(null);
   const displayName = nameOverride || screen.name;
   React.useEffect(() => {
-    if (nameOverride && screen.name === nameOverride) setNameOverride(null);
+    if (nameOverride && screen.name !== renameBaselineRef.current) setNameOverride(null);
   }, [screen.name, nameOverride]);
 
   // The server persists `currentItems` per deviceId regardless of whether the
@@ -1014,6 +1039,9 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   const [busy, setBusy] = React.useState(null);
   const handleRename = async (next) => {
     if (!targetDeviceId) throw new Error('No registered tablet for this screen yet');
+    // Capture the name the poll is currently reporting so the effect above
+    // knows when the server has moved past it.
+    renameBaselineRef.current = screen.name;
     await setScreenName(targetDeviceId, next);
     setNameOverride(next);
     showToast(`Renamed to “${next}”`, 'ok');

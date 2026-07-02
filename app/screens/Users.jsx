@@ -105,6 +105,11 @@ const Users = () => {
     setState((s) => ({ ...s, loading: true }));
     return apiGet('/api/users').then((data) => {
       setState({ loading: false, users: data.users || [], roles: data.roles || [] });
+    }).catch(() => {
+      // Session expired / server error / offline — drop the spinner and
+      // surface it rather than hanging on "Loading…" forever.
+      setState((s) => ({ ...s, loading: false }));
+      setError('Couldn\'t load users. Check your connection and try again.');
     });
   }, []);
 
@@ -123,24 +128,30 @@ const Users = () => {
     e.preventDefault();
     setError(null);
     setBusy(true);
-    const { ok, status, data } = await apiPost('/api/users', draft);
-    setBusy(false);
-    if (ok) {
-      setDraft({ email: '', displayName: '', role: 'user' });
-      reload();
-      window.showToast && window.showToast(`Invited ${data.user.displayName}`);
-      return;
+    try {
+      const { ok, status, data } = await apiPost('/api/users', draft);
+      if (ok) {
+        setDraft({ email: '', displayName: '', role: 'user' });
+        reload();
+        window.showToast && window.showToast(`Invited ${data.user.displayName}`);
+        return;
+      }
+      const messages = {
+        missing_fields: 'Email and name are required.',
+        bad_role: 'Pick a valid role.',
+        domain_blocked: 'That email isn\'t in an allowed Google Workspace domain.',
+        role_above_actor: 'You can\'t assign a role above your own.',
+        cannot_invite_owner: 'Owner is singular and can\'t be invited.',
+        already_exists: 'Someone with that email is already in the workspace.',
+        forbidden: 'You don\'t have permission to invite users.',
+      };
+      setError(messages[data.error] || `Invite failed (${data.error || status}).`);
+    } catch (_) {
+      // Network error before apiPost could resolve — don't strand the button.
+      setError('Invite failed — check your connection and try again.');
+    } finally {
+      setBusy(false);
     }
-    const messages = {
-      missing_fields: 'Email and name are required.',
-      bad_role: 'Pick a valid role.',
-      domain_blocked: 'That email isn\'t in an allowed Google Workspace domain.',
-      role_above_actor: 'You can\'t assign a role above your own.',
-      cannot_invite_owner: 'Owner is singular and can\'t be invited.',
-      already_exists: 'Someone with that email is already in the workspace.',
-      forbidden: 'You don\'t have permission to invite users.',
-    };
-    setError(messages[data.error] || `Invite failed (${data.error || status}).`);
   }, [draft, reload]);
 
   const onUpdate = useCallback(async (target, patch) => {
