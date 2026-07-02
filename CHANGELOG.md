@@ -34,6 +34,14 @@ Reliability + hardening pass (from a full-project review).
   library no longer white-screens if a brand disappears mid-sync; the Users page
   and Add-content preview recover cleanly from errors/Esc; and a renamed screen
   can't get stuck showing a stale name.
+- **Player reliability sweep (self-healing).** The watchdog's deeper recovery
+  step no longer silently failed on a background thread, and "Refresh playlist
+  now" works again; a screen stuck on a single video it can't decode now
+  recovers instead of freezing forever, and a known-bad clip is skipped every
+  loop instead of re-freezing for minutes each pass; the updater can't cache a
+  corrupt APK from a double-tap; a dismissed "Installing…" screen clears itself;
+  the "Restart app" path is used for remote reboots; and splash files no longer
+  pile up on disk.
 
 ## v0.1.82
 

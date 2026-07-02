@@ -175,8 +175,13 @@ class PlaybackWatchdog(
             // item N to start of item N+1 looks identical to a stall.
             lastPositionMs = Long.MIN_VALUE
             stallTicks = 0
-            // v0.1.80: new item → fresh buffering-skip budget.
-            perItemBufferKicks.clear()
+            // NOTE: we deliberately do NOT clear perItemBufferKicks here.
+            // A known-bad item throws its own transition when we skip past
+            // it, and clearing on every transition wiped the skip budget so
+            // the same undecodable clip re-froze ~4 min each loop. The
+            // per-item counter is cleared only on a genuinely HEALTHY
+            // advancing tick (see onItemPlaying / the position-advance
+            // branch in tick()).
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -321,6 +326,22 @@ class PlaybackWatchdog(
                     player.seekToNextMediaItem()
                     player.prepare()
                     player.play()
+                } else if (mediaId != null && kicks >= BUFFERING_KICKS_BEFORE_REBUILD && !isOnSplash()) {
+                    // Can't skip (single-item playlist) but the lone item has
+                    // buffered through several kicks — a plain re-prepare will
+                    // never help an undecodable local file. Climb the recovery
+                    // ladder so the screen isn't frozen forever: REBUILD the
+                    // queue first, then a full activity RESTART on continued
+                    // buffering. (escalate() still downgrades to KICK on the
+                    // splash, which is intentional — we don't nuke the app just
+                    // because the bundled splash hiccuped.)
+                    val level = if (kicks >= BUFFERING_KICKS_BEFORE_RESTART)
+                        RecoveryLevel.RESTART else RecoveryLevel.REBUILD
+                    escalate(
+                        level,
+                        "single-item buffering for ~${kicks * secs}s on '$label' " +
+                            "($fmt) — can't skip, escalating to $level",
+                    )
                 } else {
                     escalate(RecoveryLevel.KICK, "buffering for ${secs}s on '$label'")
                 }
@@ -364,7 +385,15 @@ class PlaybackWatchdog(
                     // v0.1.80: advancing normally → clear any stale
                     // "unplayable" flag for this item (e.g. after it was
                     // re-encoded and now plays fine).
-                    player.currentMediaItem?.mediaId?.let { onItemPlaying(it) }
+                    player.currentMediaItem?.mediaId?.let {
+                        onItemPlaying(it)
+                        // Only a genuinely healthy, advancing tick resets the
+                        // per-item buffering-skip budget — NOT every item
+                        // transition. This is what keeps a known-bad clip's
+                        // kick count from being wiped each loop so it doesn't
+                        // re-freeze ~4 min every rotation.
+                        perItemBufferKicks.remove(it)
+                    }
                 }
             }
         } else {
@@ -482,6 +511,14 @@ class PlaybackWatchdog(
          *  A local file that buffers this long is one the device can't
          *  decode, so re-kicking it again would never help. */
         private const val BUFFERING_KICKS_BEFORE_SKIP = 2
+
+        /** When the buffering item CAN'T be skipped (single-item playlist),
+         *  climb past KICK once it's clearly undecodable rather than kicking
+         *  it forever. REBUILD re-publishes the queue; RESTART bounces the
+         *  activity. Spaced one kick apart (~4 min each at the default poll)
+         *  so the cheaper rung gets its chance first. */
+        private const val BUFFERING_KICKS_BEFORE_REBUILD = 2
+        private const val BUFFERING_KICKS_BEFORE_RESTART = 3
 
         /** v0.1.76: ticks spent on the splash (with content ready) before
          *  each stuck-on-splash recovery rung. ~60 s then ~120 s at the

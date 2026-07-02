@@ -138,6 +138,13 @@ fun UpdaterOverlay(updater: Updater, modifier: Modifier = Modifier) {
                     )
                 }
                 is Updater.State.Installing -> {
+                    // Auto-revert to Idle after a timeout. The system installer
+                    // takes over the foreground once launchInstaller() fires;
+                    // if the user dismisses that prompt (or it never appears),
+                    // nothing else resets Installing, so the full-screen overlay
+                    // would otherwise cover the player until the next overnight
+                    // update tick (~16 h). Reverting here uncovers the player.
+                    LaunchedEffect(s) { delay(INSTALLING_TIMEOUT_MS); updater.dismiss() }
                     CircularProgressIndicator(
                         color = Color(0xFFE8A33D),
                         modifier = Modifier.size(36.dp),
@@ -153,6 +160,9 @@ fun UpdaterOverlay(updater: Updater, modifier: Modifier = Modifier) {
                         color = Color(0xFFA1A1A1),
                         fontSize = 12.sp,
                     )
+                    TextButton(onClick = { updater.dismiss() }) {
+                        Text("Dismiss", color = Color(0xFFE8A33D))
+                    }
                 }
                 is Updater.State.Failed -> {
                     Text(
@@ -175,6 +185,12 @@ fun UpdaterOverlay(updater: Updater, modifier: Modifier = Modifier) {
         }
     }
 }
+
+/** How long the "Installing…" overlay lingers before auto-reverting to
+ *  Idle. Long enough for the system installer prompt to appear and be
+ *  acted on; short enough that a dismissed/absent prompt doesn't leave the
+ *  player covered for hours. */
+private const val INSTALLING_TIMEOUT_MS = 3L * 60L * 1000L  // 3 min
 
 /** Compact ETA formatter — "45s", "2m 05s", "1h 03m". */
 private fun formatEta(seconds: Long): String {
