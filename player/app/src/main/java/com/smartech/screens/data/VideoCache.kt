@@ -89,6 +89,14 @@ class VideoCache(
         if (target.exists() && target.length() > 0) return@withContext target
         if (inflight.putIfAbsent(item.id, true) != null) {
             while (inflight.containsKey(item.id)) Thread.sleep(100)
+            // The first caller finished — but "finished" includes "failed".
+            // Don't return `target` unconditionally: if that download threw,
+            // the file isn't on disk and the caller would wrongly log "Cached"
+            // and clear the failure badge. Treat a missing file as a failure so
+            // the caller's catch path runs.
+            if (!has(item.id)) {
+                throw IOException("Download of ${item.id} failed on the concurrent caller")
+            }
             return@withContext target
         }
         try {

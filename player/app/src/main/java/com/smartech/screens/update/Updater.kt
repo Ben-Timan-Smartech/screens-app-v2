@@ -102,6 +102,13 @@ class Updater(
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state
 
+    /** Re-entrancy guard. Both the background loop and the manual CMS /
+     *  staff-button paths call [checkAndUpdate]; a concurrent second run
+     *  would race the first on the shared `.part` file (append-mode
+     *  FileOutputStream) and corrupt the APK, then cache the broken file
+     *  forever. Only one check/download may be in flight at a time. */
+    private val inFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
@@ -178,6 +185,14 @@ class Updater(
      * "Update failed: …" in the staff overlay if something goes wrong.
      */
     suspend fun checkAndUpdate(surfaceFailures: Boolean = true) {
+        // Re-entrancy guard — bail if a check/download is already running so
+        // two runs can't race the shared `.part` file. Best-effort UI: if a
+        // manual trigger arrives while a background tick holds the lock, leave
+        // whatever state the running check is showing rather than clobber it.
+        if (!inFlight.compareAndSet(false, true)) {
+            LogBuffer.i(TAG, "checkAndUpdate already running — ignoring re-entrant call")
+            return
+        }
         try {
             _state.value = State.Checking(manual = surfaceFailures)
             val base = backendBaseUrlProvider()
@@ -252,6 +267,8 @@ class Updater(
             LogBuffer.w(TAG, "Update flow crashed: ${t.message}", t)
             if (surfaceFailures) _state.value = State.Failed(t.message ?: "Unknown error")
             else _state.value = State.Idle
+        } finally {
+            inFlight.set(false)
         }
     }
 
@@ -323,8 +340,21 @@ class Updater(
         // behaviour when the first attempt downloaded fine but the install
         // didn't complete (permission wall / dismissed prompt).
         if (target.exists() && target.length() > 0L) {
-            LogBuffer.i(TAG, "Reusing cached ${target.name} (${target.length()} bytes) — skipping download")
-            return@withContext target
+            // Integrity check before reuse. A concurrent/interrupted earlier
+            // run could have left a truncated or corrupt file that still has
+            // a non-zero length; getPackageArchiveInfo returns null for
+            // anything the framework can't parse as an APK. If it fails to
+            // validate, delete it and fall through to a clean re-download
+            // rather than caching a broken APK forever.
+            val valid = runCatching {
+                appContext.packageManager.getPackageArchiveInfo(target.absolutePath, 0) != null
+            }.getOrDefault(false)
+            if (valid) {
+                LogBuffer.i(TAG, "Reusing cached ${target.name} (${target.length()} bytes) — skipping download")
+                return@withContext target
+            }
+            LogBuffer.w(TAG, "Cached ${target.name} failed APK validation — deleting and re-downloading")
+            target.delete()
         }
 
         val maxAttempts = 6

@@ -40,9 +40,15 @@ class ScreensFcmService : FirebaseMessagingService() {
                 "playlist.updated" -> repo.refreshPlaylist()
                 "settings.updated" -> repo.refreshSettings()
                 "reboot" -> {
-                    // Best we can do without device-owner privilege: relaunch self.
-                    Log.i(TAG, "Reboot requested — exiting to be relaunched by LAUNCHER intent")
-                    android.os.Process.killProcess(android.os.Process.myPid())
+                    // Use the same safe path as the LAN "reboot" command
+                    // (PlayerRepository.executeCommand): relaunch the activity
+                    // via scheduleSelfRestart() instead of killing the process.
+                    // killProcess left tablets dark — on Android 11+ there's no
+                    // boot receiver / alarm to bring us back, so nothing
+                    // relaunched. scheduleSelfRestart() bounces the activity
+                    // with CLEAR_TASK while the JVM keeps running.
+                    Log.i(TAG, "Reboot requested — restarting activity")
+                    repo.scheduleSelfRestart()
                 }
                 "cache.clear" -> {
                     repo.cache.reconcile(keep = emptySet(), capBytes = 0L)

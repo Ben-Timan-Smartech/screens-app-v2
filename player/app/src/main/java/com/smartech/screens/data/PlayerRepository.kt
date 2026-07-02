@@ -181,9 +181,20 @@ class PlayerRepository(
     private fun publish(playlist: PlaylistResponse) {
         val local = playlist.items
             .mapNotNull { v -> if (cache.has(v.id)) LocalVideo(v, cache.file(v.id)) else null }
+        // v0.1.80: drop items the watchdog has flagged as unplayable on this
+        // device (stuck-buffering → too high-res/bitrate or an unsupported
+        // codec) so a known-bad clip isn't re-queued and re-frozen every loop.
+        // The flag is cleared once the item plays cleanly again
+        // (clearPlaybackFailure, driven by onItemPlaying) — e.g. after it's
+        // re-encoded and re-uploaded — so this is self-healing. Guard against
+        // dropping EVERYTHING: if every cached item is failed, fall back to
+        // playing them anyway rather than blanking the screen.
+        val failedIds = _playbackFailures.value.keys
+        val playable = local.filter { it.item.id !in failedIds }
+        val toPlay = if (playable.isEmpty()) local else playable
         _state.value = when {
-            local.isEmpty() -> State.Empty("No cached videos yet")
-            else -> State.Playing(local, playlist.revision)
+            toPlay.isEmpty() -> State.Empty("No cached videos yet")
+            else -> State.Playing(toPlay, playlist.revision)
         }
         // Persist a copy of every successful publish() with content so a
         // cold boot can rehydrate without waiting for the network. Saved
@@ -840,14 +851,23 @@ class PlayerRepository(
         // wire; t4 as soon as possible after the body has been read.
         var t1Local = 0L
         var t4Local = 0L
+        // OkHttp's execute() + body read is blocking network I/O. This
+        // method is called from the watchdog REBUILD rung and the admin
+        // "Refresh playlist now" button, both on the Main dispatcher —
+        // running it inline throws NetworkOnMainThreadException, which
+        // runCatching would swallow and flip the connection to OFFLINE.
+        // Do the fetch on IO; the StateFlow updates below stay on the
+        // caller's context. (Mirrors pushPlaylistToServer.)
         val resp = runCatching {
-            val req = Request.Builder().url("$base/api/state?screenId=$deviceId").build()
-            t1Local = System.currentTimeMillis()
-            httpClient.newCall(req).execute().use { r ->
-                if (!r.isSuccessful) throw IllegalStateException("HTTP ${r.code}")
-                val body = r.body?.string() ?: ""
-                t4Local = System.currentTimeMillis()
-                body
+            kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val req = Request.Builder().url("$base/api/state?screenId=$deviceId").build()
+                t1Local = System.currentTimeMillis()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) throw IllegalStateException("HTTP ${r.code}")
+                    val body = r.body?.string() ?: ""
+                    t4Local = System.currentTimeMillis()
+                    body
+                }
             }
         }.getOrElse {
             LogBuffer.throttledW(TAG, "live-state-fail", "Live state fetch failed: ${it.message}")
@@ -1052,6 +1072,17 @@ class PlayerRepository(
         }
 
         val items = safeRaw.map { it.toVideoItem(base) }
+
+        // Prune failure flags for videos that have left the playlist so the
+        // maps don't grow unbounded across playlist churn (and a stale flag
+        // can't linger if the same id is re-added later). Only prune when we
+        // have a real (non-empty) playlist — the empty-items branch below keeps
+        // the last-good playlist, so its ids are still live.
+        if (items.isNotEmpty()) {
+            val liveIds = items.map { it.id }.toSet()
+            _downloadFailures.update { m -> m.filterKeys { it in liveIds } }
+            _playbackFailures.update { m -> m.filterKeys { it in liveIds } }
+        }
 
         if (items.isEmpty()) {
             // Distinguish "the server has actively cleared this screen"
@@ -1683,8 +1714,29 @@ class PlayerRepository(
                     if (!r.isSuccessful) throw IllegalStateException("HTTP ${r.code}")
                     val body = r.body ?: throw IllegalStateException("Empty splash body")
                     val append = have > 0L && r.code == 206
+                    // Bytes the server says are in THIS body (remaining range on
+                    // a 206, whole file on a 200). Used for the premature-EOF
+                    // guard below — a midstream socket close often surfaces as a
+                    // clean read()==-1 with no exception, and without this check
+                    // we'd rename a truncated .part into .mp4 and hand a broken
+                    // splash to the player. Mirrors VideoCache/Updater.
+                    val expectedBodyBytes = body.contentLength()
+                    var bytesFromBody = 0L
                     java.io.FileOutputStream(partial, append).use { out ->
-                        body.byteStream().use { it.copyTo(out) }
+                        val buf = ByteArray(64 * 1024)
+                        body.byteStream().use { input ->
+                            while (true) {
+                                val read = input.read(buf)
+                                if (read == -1) break
+                                out.write(buf, 0, read)
+                                bytesFromBody += read
+                            }
+                        }
+                    }
+                    if (expectedBodyBytes > 0 && bytesFromBody < expectedBodyBytes) {
+                        throw IllegalStateException(
+                            "Premature EOF on splash: got $bytesFromBody of $expectedBodyBytes body bytes"
+                        )
                     }
                     if (!partial.renameTo(target)) {
                         partial.delete()
@@ -1694,6 +1746,15 @@ class PlayerRepository(
                 _remoteSplashFile.value = target
                 splashFailCount = 0
                 splashRetryAtMs = 0L
+                // Each splash URL (server appends ?v=<size> so a replaced
+                // splash gets a new hash → a new <hash>.mp4) otherwise leaves
+                // the old file behind forever. Now that the current target is
+                // safely in place, delete every other file in the splash dir
+                // (superseded .mp4s and any stale .part) so it can't grow
+                // unbounded.
+                splashRoot.listFiles()?.forEach { f ->
+                    if (f != target) f.delete()
+                }
                 LogBuffer.i(TAG, "Splash → downloaded $safeName")
             }.onFailure {
                 splashFailCount++
