@@ -1269,6 +1269,7 @@ class PlayerRepository(
                 val req = Request.Builder()
                     .url(url)
                     .post(body.toRequestBody("application/json".toMediaType()))
+                    .withDeviceSecret()
                     .build()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) {
@@ -1304,6 +1305,7 @@ class PlayerRepository(
                 val req = Request.Builder()
                     .url("$base/api/screens/${urlEncode(deviceId)}/mix-splash")
                     .post(body.toRequestBody("application/json".toMediaType()))
+                    .withDeviceSecret()
                     .build()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setMixSplashOnServer HTTP ${r.code}")
@@ -1338,6 +1340,7 @@ class PlayerRepository(
                 val req = Request.Builder()
                     .url("$base/api/screens/${urlEncode(deviceId)}/audio")
                     .post(body.toRequestBody("application/json".toMediaType()))
+                    .withDeviceSecret()
                     .build()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setAudioOnServer HTTP ${r.code}")
@@ -1369,6 +1372,7 @@ class PlayerRepository(
                 val req = Request.Builder()
                     .url("$base/api/screens/${urlEncode(deviceId)}/poll-mode")
                     .post(body.toRequestBody("application/json".toMediaType()))
+                    .withDeviceSecret()
                     .build()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setPollModeOnServer HTTP ${r.code}")
@@ -1577,6 +1581,7 @@ class PlayerRepository(
                 val req = Request.Builder()
                     .url("$base/api/screens/${urlEncode(deviceId)}/display-mode")
                     .post(body.toRequestBody("application/json".toMediaType()))
+                    .withDeviceSecret()
                     .build()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setDisplayModeOnServer HTTP ${r.code}")
@@ -1610,6 +1615,7 @@ class PlayerRepository(
                 val req = Request.Builder()
                     .url("$base/api/screens/${urlEncode(deviceId)}/sync-group")
                     .post(body.toRequestBody("application/json".toMediaType()))
+                    .withDeviceSecret()
                     .build()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setSyncGroupOnServer HTTP ${r.code}")
@@ -1623,6 +1629,21 @@ class PlayerRepository(
     }
 
     private fun urlEncode(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+
+    /**
+     * Attach the server-issued device secret as `X-Device-Secret` to a
+     * self-edit request when we have one. Only the tablet's own no-login
+     * self-edit POSTs (playlist/audio/poll-mode/sync-group/display-mode/
+     * mix-splash) should carry this — NOT heartbeat/register/state. If the
+     * secret is null/blank the header is omitted (the server currently
+     * grace-allows a missing header). Reads the stored secret via a suspend
+     * flow, so call from inside the existing IO coroutine of each sender.
+     */
+    private suspend fun okhttp3.Request.Builder.withDeviceSecret(): okhttp3.Request.Builder {
+        val secret = store.deviceSecret.first()
+        if (!secret.isNullOrBlank()) header("X-Device-Secret", secret)
+        return this
+    }
 
     /**
      * Restart the player. Old implementation used AlarmManager.set +
@@ -1911,6 +1932,13 @@ class PlayerRepository(
         }.onFailure { LogBuffer.throttledW(TAG, "heartbeat-fail", "Heartbeat failed: ${it.message}") }
     }
 
+    /** Minimal view of POST /api/screens/register's JSON response — we only
+     *  need the server-issued device secret (used for self-edit auth). */
+    @Serializable
+    private data class RegisterLiveResponse(
+        val deviceSecret: String? = null,
+    )
+
     /** First-time-seen handshake. Cheap to call repeatedly. */
     private suspend fun registerLive(base: String) {
         val deviceId = store.ensureDeviceId()
@@ -1932,7 +1960,19 @@ class PlayerRepository(
                 .url("$base/api/screens/register")
                 .post(body.toRequestBody("application/json".toMediaType()))
                 .build()
-            httpClient.newCall(req).execute().close()
+            httpClient.newCall(req).execute().use { r ->
+                // Persist the server-issued device secret so subsequent
+                // self-edit POSTs (playlist/audio/poll-mode/etc.) can carry
+                // the X-Device-Secret header. Stable across re-registrations,
+                // so it's fine to re-read (and re-save) on every handshake.
+                val secret = runCatching {
+                    val raw = r.body?.string().orEmpty()
+                    liveJson.decodeFromString(RegisterLiveResponse.serializer(), raw).deviceSecret
+                }.getOrNull()
+                if (!secret.isNullOrBlank()) {
+                    store.setDeviceSecret(secret)
+                }
+            }
             LogBuffer.i(TAG, "Registered against live server")
         }.onFailure { LogBuffer.w(TAG, "Register failed: ${it.message}") }
     }

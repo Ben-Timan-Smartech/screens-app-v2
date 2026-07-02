@@ -18,6 +18,18 @@ Rules:
 
 ---
 
+## v0.1.84
+
+Screen-control security.
+
+- **Screens can only be controlled by signed-in staff (with the right role) or
+  by the screen itself.** Previously the tablet's own no-login controls
+  (playlist/audio/sync/etc.) could be driven by anyone who knew a screen's id —
+  including a read-only viewer. Now every signed-in action is permission-checked,
+  and each tablet authenticates its own changes with a per-device key issued at
+  setup. Rolls out safely: existing screens keep working until they're on this
+  version, then the check is enforced fleet-wide.
+
 ## v0.1.83
 
 Reliability + hardening pass (from a full-project review).

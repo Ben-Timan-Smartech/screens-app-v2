@@ -22,6 +22,7 @@ class DeviceStore(private val context: Context) {
     private object Keys {
         val DeviceId = stringPreferencesKey("device_id")
         val DeviceToken = stringPreferencesKey("device_token")
+        val DeviceSecret = stringPreferencesKey("device_secret")
         val ScreenId = stringPreferencesKey("screen_id")
         val PlaylistEtag = stringPreferencesKey("playlist_etag")
         val SettingsEtag = stringPreferencesKey("settings_etag")
@@ -63,6 +64,11 @@ class DeviceStore(private val context: Context) {
     val deviceId: Flow<String?> = context.dataStore.data.map { it[Keys.DeviceId] }
     val screenId: Flow<String?> = context.dataStore.data.map { it[Keys.ScreenId] }
     val deviceToken: Flow<String?> = context.dataStore.data.map { it[Keys.DeviceToken] }
+    /** Per-device secret issued by the server on register. Sent as the
+     *  `X-Device-Secret` header on the tablet's own self-edit POSTs so the
+     *  server can authenticate them without a user login. Stable across
+     *  re-registrations. */
+    val deviceSecret: Flow<String?> = context.dataStore.data.map { it[Keys.DeviceSecret] }
     val playlistEtag: Flow<String?> = context.dataStore.data.map { it[Keys.PlaylistEtag] }
     val settingsEtag: Flow<String?> = context.dataStore.data.map { it[Keys.SettingsEtag] }
     val orientationOverride: Flow<String?> = context.dataStore.data.map { it[Keys.OrientationOverride] }
@@ -102,6 +108,9 @@ class DeviceStore(private val context: Context) {
             else prefs[Keys.OrientationOverride] = value
         }
     }
+
+    /** Persist the server-issued device secret. Blank/null clears it. */
+    suspend fun setDeviceSecret(value: String?) { editStr(Keys.DeviceSecret, value) }
 
     /**
      * Setters for each location level. When a parent level changes, descendant

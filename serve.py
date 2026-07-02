@@ -21,6 +21,7 @@ import http.server
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import socketserver
@@ -1467,6 +1468,21 @@ DEFAULT_CITY_BRAND: dict = {
 
 _splash_registry: dict = {}     # key "brand:tmrw" / "concept:7EVN" -> meta
 _city_brand: dict = {}          # mutable copy of DEFAULT_CITY_BRAND
+
+# v0.1.84: device-token auth for the tablet's own self-edit calls.
+# SELF_EDIT_ACTIONS are the actions a tablet performs on its OWN screen with
+# no CMS login (staff overlay playlist editor, audio/poll/sync toggles). An
+# authenticated CMS caller is always permission-checked instead (so a
+# read-only viewer can't push via this path). A cookieless caller must present
+# the screen's deviceSecret (issued at /register). ENFORCE flips grace→required
+# once the fleet is on the APK that sends the header — until then a pre-secret
+# tablet (no header) is grace-allowed (and logged); a *wrong* secret is always
+# rejected.
+SELF_EDIT_ACTIONS = (
+    "playlist", "mix-splash", "audio", "poll-mode", "low-data-mode",
+    "sync-group", "display-mode",
+)
+ENFORCE_DEVICE_SECRET = os.environ.get("SCREENS_ENFORCE_DEVICE_SECRET", "0") == "1"
 # v0.1.58: integration secrets, {name: {value, updatedAt, updatedBy}}.
 # Currently holds the Brand Asset Manager API key; structured as a dict
 # so adding more keys later doesn't require an endpoint change. Only the
@@ -2798,6 +2814,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # the new /api/state poll.
                         "displayMode":           state.get("displayMode"),
                     }
+                    # v0.1.84: never expose the per-device secret to CMS
+                    # clients (the **s spread above would otherwise include it).
+                    record.pop("deviceSecret", None)
                     screens.append(record)
             self._send_json({"screens": screens})
             return
@@ -3246,6 +3265,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "screenHeight":    body.get("screenHeight"),
                     "orientation":     body.get("orientation"),
                 }
+                # v0.1.84: per-device secret for authenticating the tablet's
+                # own self-edit calls. Issued once, preserved across re-
+                # registration (the tablet stores it) — never regenerated, or
+                # the tablet's stored copy would stop matching.
+                device_secret = prev.get("deviceSecret") or secrets.token_urlsafe(24)
+                _screens[device_id]["deviceSecret"] = device_secret
                 is_new = "registeredAt" not in (_screens.get(device_id, {}))
                 was_fresh = device_id not in _per_screen
                 state = _ensure_screen_state(device_id)
@@ -3284,7 +3309,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 tone="ok",
                 target=device_id,
             )
-            self._send_json({"ok": True, "screenId": device_id})
+            self._send_json({"ok": True, "screenId": device_id, "deviceSecret": device_secret})
             return
 
         # v0.1.15: light up every member of a sync group with a giant
@@ -3657,12 +3682,34 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             #     URL's deviceId matches a registered screen.
             # `command` is privileged either way (reboot, unregister)
             # and stays user-only.
-            is_self_edit = (
-                action in ("playlist", "mix-splash", "audio", "poll-mode", "low-data-mode", "sync-group", "display-mode")
-                and device_id in _screens
-            )
-            if not is_self_edit:
-                need = "screens.command" if action in ("command", "mix-splash") else "screens.push"
+            # v0.1.84: authenticate the caller.
+            #  • A CMS session is ALWAYS permission-checked — a read-only
+            #    viewer (who can list /api/screens and learn deviceIds) must
+            #    not be able to push/audio/sync via the tablet self-edit path.
+            #  • A cookieless caller is the tablet editing its own screen; it
+            #    must present the screen's deviceSecret (issued at /register).
+            #    Grace during rollout: a pre-secret tablet that sends no header
+            #    is allowed + logged; a *wrong* secret is always rejected;
+            #    ENFORCE_DEVICE_SECRET flips grace→required once the fleet ships
+            #    the header.
+            need = "screens.command" if action in ("command", "mix-splash") else "screens.push"
+            user = self._current_user()
+            if user is not None:
+                if self._require_perm(need) is None:
+                    return
+            elif action in SELF_EDIT_ACTIONS and device_id in _screens:
+                provided = self.headers.get("X-Device-Secret")
+                expected = (_screens.get(device_id) or {}).get("deviceSecret")
+                if expected and provided == expected:
+                    pass  # authenticated device
+                elif provided and provided != expected:
+                    self.send_error(403, "Invalid device secret"); return
+                elif ENFORCE_DEVICE_SECRET:
+                    self.send_error(403, "Device secret required"); return
+                else:
+                    print(f"[self-edit] {device_id} {action} without device secret (grace)", file=sys.stderr)
+            else:
+                # Cookieless and not a valid self-edit (e.g. `command`) — 401.
                 if self._require_perm(need) is None:
                     return
             with _STATE_LOCK:
