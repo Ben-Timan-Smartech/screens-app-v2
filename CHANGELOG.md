@@ -20,7 +20,7 @@ Rules:
 
 ## v0.1.84
 
-Screen-control security.
+Security + a round of polish.
 
 - **Screens can only be controlled by signed-in staff (with the right role) or
   by the screen itself.** Previously the tablet's own no-login controls
@@ -29,6 +29,16 @@ Screen-control security.
   and each tablet authenticates its own changes with a per-device key issued at
   setup. Rolls out safely: existing screens keep working until they're on this
   version, then the check is enforced fleet-wide.
+- **Staff PINs are no longer shown.** The CMS used to display every staff PIN to
+  any admin; PINs are now write-only — you set/change them but never see them
+  back (like resetting a password).
+- **CMS polish.** The store, stores-index, and content-library search boxes now
+  actually filter; the command palette's dark-mode / video-preview / Drive-sync /
+  upload actions all work; dead buttons that did nothing were removed; and you
+  can finally drag a playlist item to the last position.
+- **Fewer wasted downloads + snappier splash toggle.** A store with a big
+  playlist no longer churns re-downloading its own in-rotation videos, and the
+  "mix splash" toggle now takes effect immediately instead of on the next poll.
 
 ## v0.1.83
 

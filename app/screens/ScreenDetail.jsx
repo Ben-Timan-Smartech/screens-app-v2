@@ -1538,6 +1538,37 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                       } : null}
                     />
                   ))}
+                  {/* Trailing drop zone — lets a drag target the very end of the
+                      list. Per-row drops only insert *above* a row, so without
+                      this you couldn't move an item to the bottom. Uses the
+                      sentinel overIndex === playlist.length to show its marker;
+                      handleReorder(from, playlist.length) resolves to the last
+                      slot (insertAt = playlist.length - 1 since from < length). */}
+                  {canEdit && dragIndex !== null && (
+                    <div
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        if (overIndex !== playlist.length) setOverIndex(playlist.length);
+                      }}
+                      onDragLeave={() => {
+                        if (overIndex === playlist.length) setOverIndex(null);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const from = dragIndex;
+                        setDragIndex(null);
+                        setOverIndex(null);
+                        handleReorder(from, playlist.length);
+                      }}
+                      style={{
+                        height: 28,
+                        borderRadius: 8,
+                        boxShadow: overIndex === playlist.length ? 'inset 0 2px 0 0 var(--ink-1)' : 'none',
+                        transition: 'box-shadow .08s',
+                      }}
+                    />
+                  )}
                 </div>
               )}
             </div>

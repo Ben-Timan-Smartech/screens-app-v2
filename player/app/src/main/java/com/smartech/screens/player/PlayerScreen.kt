@@ -35,6 +35,7 @@ fun PlayerScreen(
     val serverOffsetMs by repository.serverOffsetMsFlow.collectAsState()
     val intendedPlaylist by repository.intendedPlaylist.collectAsState()
     val downloads by repository.downloads.collectAsState()
+    val mixSplash by repository.mixSplashFlow.collectAsState()
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
@@ -43,9 +44,14 @@ fun PlayerScreen(
     // item's per-video defaultUnmute on every queue transition.
     LaunchedEffect(audioOn) { controller.setAudioOn(audioOn) }
 
-    LaunchedEffect(state, repository.mixSplash) {
+    // Keying on the reactive mixSplash value (not repository.mixSplash, which
+    // is a plain property read) so a toggle recomposes + re-applies promptly.
+    // Without this the toggle only reached the controller via an incidental
+    // recomposition — a re-published equal State.Playing gets deduped by the
+    // MutableStateFlow, so `state` never changes on its own.
+    LaunchedEffect(state, mixSplash) {
         when (val s = state) {
-            is PlayerRepository.State.Playing -> controller.apply(s.items, s.revision, repository.mixSplash)
+            is PlayerRepository.State.Playing -> controller.apply(s.items, s.revision, mixSplash)
             else -> controller.playSplash()
         }
     }

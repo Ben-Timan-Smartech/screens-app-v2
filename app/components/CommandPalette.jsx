@@ -191,8 +191,10 @@ const buildCommands = () => [
              hint: 'Filter by title, brand, or product.' },
     run: (v) => {
       navigate('/library');
-      // Library listens for this and opens the preview modal.
-      window.dispatchEvent(new CustomEvent('open-video-preview', { detail: { videoId: v.id } }));
+      // Library listens for this and opens the preview modal. Defer one
+      // tick so ContentLibrary has mounted + attached its listener before
+      // we fire (a synchronous dispatch would land before the mount).
+      setTimeout(() => window.dispatchEvent(new CustomEvent('open-video-preview', { detail: { videoId: v.id } })), 0);
     },
   },
 
@@ -206,7 +208,10 @@ const buildCommands = () => [
     perm: 'library.sync',
     run: () => {
       navigate('/library');
-      window.dispatchEvent(new Event('open-upload-panel'));
+      // Defer one tick so ContentLibrary has mounted + attached its
+      // `open-upload-panel` listener before we fire (a synchronous
+      // dispatch would land before the mount and be missed).
+      setTimeout(() => window.dispatchEvent(new Event('open-upload-panel')), 0);
     },
   },
   {
@@ -217,8 +222,12 @@ const buildCommands = () => [
     keywords: 'refresh library scan import',
     perm: 'library.sync',
     run: () => {
-      navigate('/settings#drive-sync');
-      window.dispatchEvent(new Event('run-drive-sync'));
+      // ?tab=drive selects the Drive sync tab (the router parses the
+      // query, and Settings seeds its tab from it). Defer the event
+      // one tick so the DriveSyncTab has mounted + attached its
+      // `run-drive-sync` listener before we fire.
+      navigate('/settings?tab=drive');
+      setTimeout(() => window.dispatchEvent(new Event('run-drive-sync')), 0);
     },
   },
   {

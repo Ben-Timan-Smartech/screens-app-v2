@@ -14,30 +14,29 @@ const ROLE_LABELS = {
   brand_partner: 'Brand partner',
 };
 
-// v0.1.56: inline PIN editor — masked display + click to edit. Saves
-// the new value via PATCH /api/users/<id> { pin: "1234" | "" } when
-// the input blurs or Enter is pressed. Empty PIN clears it.
+// v0.1.56 / v0.1.84: write-only PIN editor. The server no longer returns the
+// raw PIN (it exposes only `hasPin`) — PINs are set, not viewed, like resetting
+// any credential. Click to type a new 4-digit PIN; PATCH /api/users/<id>
+// { pin: "1234" }. Submitting an empty box is a no-op (cancel), so a set PIN
+// isn't cleared by accident.
 const PinCell = ({ user, editable, onSave }) => {
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(user.pin || '');
-  const [show, setShow] = useState(false);
-  useEffect(() => { setDraft(user.pin || ''); }, [user.pin]);
+  const [draft, setDraft] = useState('');
 
   const commit = async () => {
     const next = draft.replace(/\D/g, '').slice(0, 4);
     setEditing(false);
-    if (next !== (user.pin || '')) {
-      if (next && next.length !== 4) {
-        window.showToast && window.showToast('PIN must be 4 digits or empty', 'err');
-        setDraft(user.pin || '');
-        return;
-      }
-      await onSave(next);
+    setDraft('');
+    if (!next) return;                       // empty = cancel, no change
+    if (next.length !== 4) {
+      window.showToast && window.showToast('PIN must be 4 digits', 'err');
+      return;
     }
+    await onSave(next);
   };
 
   if (!editable) {
-    return user.pin ? (
+    return user.hasPin ? (
       <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--ink-3)', letterSpacing: 1 }}>••••</span>
     ) : (
       <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>—</span>
@@ -52,12 +51,12 @@ const PinCell = ({ user, editable, onSave }) => {
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === 'Enter') commit();
-          if (e.key === 'Escape') { setDraft(user.pin || ''); setEditing(false); }
+          if (e.key === 'Escape') { setDraft(''); setEditing(false); }
         }}
-        placeholder="••••"
+        placeholder={user.hasPin ? 'new PIN' : '••••'}
         inputMode="numeric"
         style={{
-          width: 64, height: 26, padding: '0 8px', borderRadius: 4,
+          width: 72, height: 26, padding: '0 8px', borderRadius: 4,
           fontFamily: 'var(--font-mono)', fontSize: 13, letterSpacing: 2,
           background: 'var(--ink-10)', color: 'var(--ink-1)',
           border: 'var(--border-strong)',
@@ -68,18 +67,14 @@ const PinCell = ({ user, editable, onSave }) => {
   return (
     <button
       onClick={(e) => { e.stopPropagation(); setEditing(true); }}
-      onMouseEnter={() => setShow(true)}
-      onMouseLeave={() => setShow(false)}
       style={{
         fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--ink-2)', letterSpacing: 1,
         padding: '4px 8px', borderRadius: 4, background: 'var(--ink-9)',
-        border: 'var(--border)', cursor: 'pointer', minWidth: 64, textAlign: 'left',
+        border: 'var(--border)', cursor: 'pointer', minWidth: 72, textAlign: 'left',
       }}
-      title="Click to edit"
+      title={user.hasPin ? 'Set a new PIN' : 'Set PIN'}
     >
-      {user.pin
-        ? (show ? user.pin : '••••')
-        : <span style={{ color: 'var(--ink-4)' }}>Set PIN</span>}
+      {user.hasPin ? '••••' : <span style={{ color: 'var(--ink-4)' }}>Set PIN</span>}
     </button>
   );
 };

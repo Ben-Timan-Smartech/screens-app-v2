@@ -885,6 +885,14 @@ const useDarkMode = () => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     try { localStorage.setItem('screens.dark', dark ? '1' : '0'); } catch (_) {}
   }, [dark]);
+  // Honour the global `toggle-dark-mode` event (fired by the command
+  // palette) so it stays a single source of truth with the sidebar
+  // toggle — both drive this same hook.
+  React.useEffect(() => {
+    const onToggle = () => setDark((d) => !d);
+    window.addEventListener('toggle-dark-mode', onToggle);
+    return () => window.removeEventListener('toggle-dark-mode', onToggle);
+  }, []);
   return [dark, setDark];
 };
 

@@ -188,10 +188,17 @@ const ScreensStoreView = ({ storeId }) => {
   React.useEffect(() => {
     if (conceptFilter !== 'all' && !concepts.includes(conceptFilter)) setConceptFilter('all');
   }, [concepts, conceptFilter]);
-  const visibleScreens = React.useMemo(
-    () => (conceptFilter === 'all' ? sortedScreens : sortedScreens.filter(s => s.concept === conceptFilter)),
-    [sortedScreens, conceptFilter],
-  );
+  // Free-text search over name / concept / currently-playing content.
+  // Kept in-memory (resets per visit) like the concept filter above.
+  const [query, setQuery] = React.useState('');
+  const visibleScreens = React.useMemo(() => {
+    const byConcept = conceptFilter === 'all' ? sortedScreens : sortedScreens.filter(s => s.concept === conceptFilter);
+    const q = query.trim().toLowerCase();
+    if (!q) return byConcept;
+    return byConcept.filter(s =>
+      [s.name, s.concept, s.playing].some(f => (f || '').toLowerCase().includes(q)),
+    );
+  }, [sortedScreens, conceptFilter, query]);
   // v0.1.57: read viewport so the in-store grid + stats strip
   // collapse on mobile (≤640 px). Previously the grid hard-coded
   // 4 columns, which produced 80-px-wide tiles on a phone.
@@ -204,12 +211,6 @@ const ScreensStoreView = ({ storeId }) => {
         crumbs={[{ label: 'Screens', href: '/screens' }, store.name]}
         title={store.name}
         subtitle={`${store.city} · ${store.country} · ${store.region}`}
-        actions={
-          <>
-            <Button variant="secondary" size="sm" icon={<Icon.sync size={12} />}>Sync playlist</Button>
-            <Button variant="primary" size="sm" icon={<Icon.plus size={13} />}>Add screen</Button>
-          </>
-        }
       />
       <div style={{ flex: 1, overflow: 'auto', padding: isMobile ? '14px 12px 32px' : '20px 24px 40px' }}>
         {/* Store stats strip */}
@@ -230,7 +231,7 @@ const ScreensStoreView = ({ storeId }) => {
             <span style={{ fontSize: 12, color: 'var(--ink-4)' }}>offline</span>
           </div>
           <span style={{ flex: 1 }} className="scr-mobile-hide" />
-          <Input placeholder="Search screens or content…" leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 160, maxWidth: 260 }} />
+          <Input placeholder="Search screens or content…" value={query} onChange={(e) => setQuery(e.target.value)} leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 160, maxWidth: 260 }} />
           {/* v0.1.81: concept filter — only shown when this store has concepts. */}
           {concepts.length > 0 && (
             <select
@@ -290,8 +291,11 @@ const ScreensStoreView = ({ storeId }) => {
           </div>
         ) : visibleScreens.length === 0 ? (
           <div style={{ padding: '40px 16px', border: 'var(--border)', borderRadius: 12, textAlign: 'center', color: 'var(--ink-4)', fontSize: 13 }}>
-            No screens with concept “{conceptFilter}”.
-            <button onClick={() => setConceptFilter('all')} style={{ marginLeft: 8, color: 'var(--ink-2)', textDecoration: 'underline', cursor: 'pointer' }}>Clear filter</button>
+            {query.trim()
+              ? <>No screens match “{query.trim()}”.
+                  <button onClick={() => setQuery('')} style={{ marginLeft: 8, color: 'var(--ink-2)', textDecoration: 'underline', cursor: 'pointer' }}>Clear search</button></>
+              : <>No screens with concept “{conceptFilter}”.
+                  <button onClick={() => setConceptFilter('all')} style={{ marginLeft: 8, color: 'var(--ink-2)', textDecoration: 'underline', cursor: 'pointer' }}>Clear filter</button></>}
           </div>
         ) : viewMode === 'list' ? (
           <div style={{ border: 'var(--border)', borderRadius: 12, background: 'var(--ink-10)', overflow: 'hidden' }}>
@@ -336,9 +340,10 @@ const ScreensStoreView = ({ storeId }) => {
             zIndex: 5,
           }}>
             <span style={{ fontSize: 12, fontWeight: 500 }} className="tnum">{selected.size} selected</span>
-            <button style={{ fontSize: 12, color: 'rgba(250,250,250,0.7)', padding: '4px 6px' }}>Sync content</button>
-            <button style={{ fontSize: 12, color: 'rgba(250,250,250,0.7)', padding: '4px 6px' }}>Apply schedule</button>
-            <button style={{ background: 'var(--ink-10)', color: 'var(--ink-0)', padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 500 }}>Push content →</button>
+            <button onClick={() => setSelected(new Set())} style={{ fontSize: 12, color: 'rgba(250,250,250,0.7)', padding: '4px 6px', cursor: 'pointer' }}>Clear</button>
+            {/* Content is chosen in the library, then pushed to screens via the
+                PushPicker. Jump there so the operator can tick videos and push. */}
+            <button onClick={() => navigate('/library')} style={{ background: 'var(--ink-10)', color: 'var(--ink-0)', padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer' }}>Push content →</button>
           </div>
         )}
       </div>
@@ -371,6 +376,15 @@ const StoresIndex = () => {
   if (regionCount > 0) {
     subtitleParts.push(`${regionCount} region${regionCount === 1 ? '' : 's'}`);
   }
+  // Free-text search over store name / city / region, case-insensitive.
+  const [query, setQuery] = React.useState('');
+  const visibleStores = React.useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return stores;
+    return stores.filter(s =>
+      [s.name, s.city, s.region].some(f => (f || '').toLowerCase().includes(q)),
+    );
+  }, [stores, query]);
   const vp = useViewport();
   const isMobile = vp.tier === 'mobile';
   return (
@@ -378,16 +392,21 @@ const StoresIndex = () => {
       <PageHeader
         title="Screens"
         subtitle={subtitleParts.join(' · ')}
-        actions={<Button variant="primary" size="sm" icon={<Icon.plus size={13} />}>Add store</Button>}
+        actions={<Button variant="primary" size="sm" icon={<Icon.plus size={13} />} onClick={() => navigate('/settings?tab=locations')}>Add store</Button>}
       />
       <div style={{ flex: 1, overflow: 'auto', padding: isMobile ? '14px 12px 32px' : '20px 24px 40px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18, flexWrap: 'wrap' }}>
-          <Input placeholder="Search stores or cities…" leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 180, maxWidth: 300 }} />
+          <Input placeholder="Search stores or cities…" value={query} onChange={(e) => setQuery(e.target.value)} leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 180, maxWidth: 300 }} />
           <span style={{ flex: 1 }} className="scr-mobile-hide" />
-          <Button variant="ghost" size="sm" icon={<Icon.filter size={12} />}>Region</Button>
         </div>
+        {visibleStores.length === 0 ? (
+          <div style={{ padding: '40px 16px', border: 'var(--border)', borderRadius: 12, textAlign: 'center', color: 'var(--ink-4)', fontSize: 13 }}>
+            No stores match “{query.trim()}”.
+            <button onClick={() => setQuery('')} style={{ marginLeft: 8, color: 'var(--ink-2)', textDecoration: 'underline', cursor: 'pointer' }}>Clear search</button>
+          </div>
+        ) : (
         <div style={{ border: 'var(--border)', borderRadius: 12, background: 'var(--ink-10)', overflow: 'hidden' }}>
-          {stores.map((store) => {
+          {visibleStores.map((store) => {
             const health = store.offline > 0 ? 'err' : store.warn > 0 ? 'warn' : (store.online > 0 ? 'ok' : 'idle');
             const ratio = store.total > 0 ? store.online / store.total : 0;
             return (
@@ -418,6 +437,7 @@ const StoresIndex = () => {
             );
           })}
         </div>
+        )}
       </div>
     </AppShell>
   );
