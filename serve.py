@@ -2060,7 +2060,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         if not path:
             return str(APP_DIR / "index.html")
-        return str((APP_DIR / path).resolve())
+        # SECURITY: contain the SPA-fallback path inside APP_DIR. This override
+        # replaces the stdlib translate_path (which normalises away `..`), so
+        # without this guard a request like `/..%2f..%2fdata/secrets.json`
+        # decodes to `../../data/secrets.json` and `resolve()` escapes APP_DIR,
+        # serving the auth DB / integration secrets / source. Mirror the
+        # containment the media/splash/brand/uploaded branches already do.
+        full = (APP_DIR / path).resolve()
+        try:
+            full.relative_to(APP_DIR)
+        except ValueError:
+            return str(APP_DIR / "index.html")
+        return str(full)
 
     # ── /media/ gets range support; /api/ goes to JSON handlers ──
 
@@ -2947,19 +2958,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/splashes":
-            # Sorted lists make the CMS UI deterministic.
-            brands = sorted(
-                [v for k, v in _splash_registry.items() if k.startswith("brand:")],
-                key=lambda m: m["name"],
-            )
-            concepts = sorted(
-                [v for k, v in _splash_registry.items() if k.startswith("concept:")],
-                key=lambda m: m["name"],
-            )
+            # Sorted lists make the CMS UI deterministic. Snapshot under the
+            # lock — a concurrent splash upload (_apply_uploaded_splashes) or
+            # mapping edit mutates these dicts, and iterating them unlocked
+            # would raise "dictionary changed size during iteration" → 500.
+            with _STATE_LOCK:
+                brands = sorted(
+                    [v for k, v in _splash_registry.items() if k.startswith("brand:")],
+                    key=lambda m: m["name"],
+                )
+                concepts = sorted(
+                    [v for k, v in _splash_registry.items() if k.startswith("concept:")],
+                    key=lambda m: m["name"],
+                )
+                city_brand_snapshot = dict(_city_brand)
             self._send_json({
                 "brands":   brands,
                 "concepts": concepts,
-                "cityBrand": dict(_city_brand),  # current city → brand mapping
+                "cityBrand": city_brand_snapshot,  # current city → brand mapping
             })
             return
 
@@ -4097,6 +4113,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if target.get("role") == "owner" and actor["id"] != target["id"]:
             self._send_json({"error": "owner_locked"}, status=403); return
 
+        # SECURITY: you can only edit a user you strictly out-rank. Without
+        # this, an admin (has users.edit) could disable or demote a
+        # super_admin — role_can_be_assigned_by only validates the *new* role,
+        # not the target's current rank. Editing yourself is always allowed
+        # (the field-level guards below still apply).
+        if actor["id"] != target["id"] and not auth.actor_outranks(actor["role"], target.get("role") or ""):
+            self._send_json({"error": "cannot_edit_peer"}, status=403); return
+
         patch: dict = {}
         if "displayName" in body:
             name = (body.get("displayName") or "").strip()
@@ -4454,8 +4478,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     end = int(m.group(2))
                 end = min(end, size - 1)
                 if start > end:
-                    self.send_error(416, "Requested range not satisfiable")
+                    # Past-EOF range: emit a proper 416 WITH Content-Range so
+                    # the client learns the real size and re-requests (tablet
+                    # self-heal). Can't use send_error() — it flushes
+                    # end_headers() before we can add Content-Range, so the
+                    # header was silently dropped. Mirrors the Drive path.
+                    self.send_response(416)
                     self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
                     return
                 partial = True
 
