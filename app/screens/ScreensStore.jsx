@@ -136,7 +136,8 @@ const ScreenRow = ({ s, selected, onToggle, onOpen }) => {
 };
 
 const ScreensStoreView = ({ storeId }) => {
-  const baseStore = MOCK_STORES.find(s => s.id === storeId) || MOCK_STORES[0];
+  const stores = allStores();
+  const baseStore = stores.find(s => s.id === storeId) || stores[0];
   const screens = useScreensInStore(baseStore.id);
   const live = useLiveScreens();
   const fleetLoading = !!live.loading;
@@ -351,7 +352,7 @@ const ScreensStoreView = ({ storeId }) => {
 const StoresIndex = () => {
   const fleet = useFleet();
   const live = useLiveScreens();
-  const stores = MOCK_STORES.map((s) => {
+  const stores = allStores().map((s) => {
     const inStore = fleet.filter(x => x.storeId === s.id);
     const online = inStore.filter(x => x.status === 'online').length;
     const offline = inStore.filter(x => x.status === 'offline').length;

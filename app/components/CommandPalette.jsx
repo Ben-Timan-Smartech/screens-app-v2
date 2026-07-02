@@ -178,7 +178,7 @@ const buildCommands = () => [
     perm: 'screens.view',
     needs: { type: 'screen', label: 'Which screen?',
              hint: 'Pick a registered tablet from the fleet.' },
-    run: (s) => navigate(`/screens/${encodeURIComponent(s.deviceId)}`),
+    run: (s) => navigate(`/screens/${encodeURIComponent(s.location?.storeId || 'unassigned')}/${encodeURIComponent(s.deviceId)}`),
   },
   {
     id: 'open.video',

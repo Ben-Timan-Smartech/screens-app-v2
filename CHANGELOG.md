@@ -27,6 +27,13 @@ Reliability + hardening pass (from a full-project review).
   editing an equal-or-higher-ranked account; hardened the Splashes API against a
   rare crash under concurrent edits; media range-requests past end-of-file now
   return a proper 416 so screens self-correct.
+- **CMS bug-fix sweep.** A dropped/expired session no longer blanks the whole
+  fleet to "No screens registered"; opening a screen from search or Sync groups
+  now lands on the right screen (not a store page); screens on added/custom
+  stores (incl. Test) are now listed and included in "push to all"; the Content
+  library no longer white-screens if a brand disappears mid-sync; the Users page
+  and Add-content preview recover cleanly from errors/Esc; and a renamed screen
+  can't get stuck showing a stale name.
 
 ## v0.1.82
 

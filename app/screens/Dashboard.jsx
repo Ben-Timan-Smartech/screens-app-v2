@@ -23,7 +23,7 @@ const DashStat = ({ label, value, sub, tone, lastInRow }) => (
 );
 
 const StoreHealthRow = ({ store }) => {
-  const onlineRatio = store.online / store.total;
+  const onlineRatio = store.total > 0 ? store.online / store.total : 0;
   const health = store.offline > 0 ? 'err' : store.warn > 0 ? 'warn' : 'ok';
   return (
     <button onClick={() => navigate(`/screens/${store.id}`)} style={{

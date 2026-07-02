@@ -252,10 +252,17 @@ const AddContentModal = ({ targetDeviceId, targetName, onClose }) => {
   };
 
   React.useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(false); };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      // A preview is layered on top — let PreviewModal's own Escape handler
+      // close just the preview. Closing the whole Add-content modal here
+      // would throw away the operator's in-progress selection.
+      if (previewVideo) return;
+      onClose(false);
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, previewVideo]);
 
   const confirm = async () => {
     if (selected.size === 0 || busy) return;
@@ -1162,6 +1169,12 @@ const ContentLibrary = () => {
   // v0.1.64: switching brand clears the product filter + selection so
   // we don't carry one brand's product line / ticks into another.
   React.useEffect(() => { setActiveProduct(null); setSelected(new Set()); }, [activeBrand]);
+  // If the active brand vanishes from MOCK_BRANDS (a Drive rescan via
+  // useLibrary rewrites the array each poll), fall back to 'all' rather
+  // than dereferencing an undefined brand and whitescreening.
+  React.useEffect(() => {
+    if (!isAll && !brand) setActiveBrand('all');
+  }, [isAll, brand]);
 
   const totalPages = Math.max(1, Math.ceil(visibleVideos.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
@@ -1172,8 +1185,8 @@ const ContentLibrary = () => {
   return (
     <AppShell current="library">
       <PageHeader
-        crumbs={isAll ? ['Content library', 'All brands'] : ['Content library', brand.name]}
-        title={isAll ? 'All brands' : brand.name}
+        crumbs={isAll ? ['Content library', 'All brands'] : ['Content library', brand?.name || activeBrand]}
+        title={isAll ? 'All brands' : (brand?.name || activeBrand)}
         actions={
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--ink-4)', marginRight: 6 }}>
@@ -1322,7 +1335,7 @@ const ContentLibrary = () => {
                   cursor: 'pointer',
                 }}>
                 <Icon.library size={13} />
-                <span>{isAll ? 'All brands' : brand.name}</span>
+                <span>{isAll ? 'All brands' : (brand?.name || activeBrand)}</span>
                 <Icon.chevD size={11} />
               </button>
             )}

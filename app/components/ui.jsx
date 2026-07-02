@@ -167,8 +167,10 @@ const useLiveScreens = () => {
     const tick = async () => {
       try {
         const res = await fetch('/api/screens', { cache: 'no-store' });
+        if (!res.ok) throw new Error('http ' + res.status);
         const body = await res.json();
         const stateRes = await fetch('/api/state', { cache: 'no-store' });
+        if (!stateRes.ok) throw new Error('http ' + stateRes.status);
         const stateBody = await stateRes.json();
         if (cancelled) return;
         const fresh = {
@@ -212,6 +214,7 @@ const useActivity = () => {
     const tick = async () => {
       try {
         const res = await fetch('/api/activity', { cache: 'no-store' });
+        if (!res.ok) throw new Error('http ' + res.status);
         const body = await res.json();
         if (!cancelled) {
           // Decorate with a relative time string using the server's `at`
@@ -260,6 +263,7 @@ const useLibrary = () => {
         // 304 means the library is unchanged since the last successful
         // fetch — fast-path out, no parse, no rerender.
         if (res.status === 304) return;
+        if (!res.ok) throw new Error('http ' + res.status);
         const newEtag = res.headers.get('ETag');
         if (newEtag) etagRef.current = newEtag;
         const body = await res.json();
@@ -345,6 +349,7 @@ const useLibraryCount = () => {
     const tick = async () => {
       try {
         const r = await fetch('/api/library', { cache: 'no-store' });
+        if (!r.ok) throw new Error('http ' + r.status);
         const data = await r.json();
         if (!cancelled) setCount((data.videos || []).length);
       } catch (_) { /* keep last */ }
@@ -677,8 +682,12 @@ const PushPicker = ({ videos, onClose }) => {
     });
     const out = [];
     // Keep the canonical store order; show stores even if they have no
-    // screens, so the user can see where everything lives.
-    MOCK_STORES.forEach((store) => {
+    // screens, so the user can see where everything lives. Includes any
+    // custom (server-added) stores via allStores() so their screens are
+    // both listed and selectable.
+    const stores = allStores();
+    const knownIds = new Set(stores.map(s => s.id));
+    stores.forEach((store) => {
       out.push({ kind: 'header', id: store.id, name: store.name });
       const inStore = byStore.get(store.id) || [];
       if (inStore.length === 0) {
@@ -692,8 +701,13 @@ const PushPicker = ({ videos, onClose }) => {
         });
       }
     });
-    // Anything registered against an unknown storeId.
-    const orphans = byStore.get('unassigned') || [];
+    // Anything registered against a storeId that isn't a known store
+    // (literal 'unassigned' or a stale/unknown id) — bucket under
+    // "Unassigned" so it stays selectable and "push to all" reaches it.
+    const orphans = [];
+    byStore.forEach((list, key) => {
+      if (!knownIds.has(key)) orphans.push(...list);
+    });
     if (orphans.length > 0) {
       out.push({ kind: 'header', id: 'unassigned', name: 'Unassigned' });
       orphans.forEach((s) => {

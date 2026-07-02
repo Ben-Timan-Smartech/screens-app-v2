@@ -131,7 +131,7 @@ const SyncGroups = () => {
                 {g.members[0] && (
                   <Button
                     variant="ghost" size="sm"
-                    onClick={() => navigate(`/screens/${encodeURIComponent(g.members[0].deviceId)}`)}>
+                    onClick={() => navigate(`/screens/${encodeURIComponent(g.members[0].location?.storeId || 'unassigned')}/${encodeURIComponent(g.members[0].deviceId)}`)}>
                     Open first member
                   </Button>
                 )}
@@ -145,7 +145,7 @@ const SyncGroups = () => {
                 return (
                   <div
                     key={m.deviceId}
-                    onClick={() => navigate(`/screens/${encodeURIComponent(m.deviceId)}`)}
+                    onClick={() => navigate(`/screens/${encodeURIComponent(m.location?.storeId || 'unassigned')}/${encodeURIComponent(m.deviceId)}`)}
                     style={{
                       display: 'flex', alignItems: 'center', gap: 10,
                       padding: '8px 10px',
@@ -190,7 +190,7 @@ const SyncGroups = () => {
                 return (
                   <div
                     key={m.deviceId}
-                    onClick={() => navigate(`/screens/${encodeURIComponent(m.deviceId)}`)}
+                    onClick={() => navigate(`/screens/${encodeURIComponent(m.location?.storeId || 'unassigned')}/${encodeURIComponent(m.deviceId)}`)}
                     style={{
                       display: 'flex', alignItems: 'center', gap: 10,
                       padding: '8px 10px',
