@@ -18,6 +18,17 @@ Rules:
 
 ---
 
+## v0.1.85
+
+- **Offline-screen alerts.** The server now watches the fleet and, when a screen
+  that was online drops offline for more than a few minutes, records it in the
+  activity feed and — if an alert webhook is configured — pushes a notification
+  to Slack/Teams/Discord (and a "back online" notice when it recovers). Set the
+  webhook URL in `SCREENS_ALERT_WEBHOOK` to turn on push notifications; without
+  it you still get the activity-log entries. Tunable grace via
+  `SCREENS_ALERT_OFFLINE_AFTER_SEC` (default 5 min). No more finding out a store
+  screen has been dark for hours.
+
 ## v0.1.84
 
 Security + a round of polish.
