@@ -124,6 +124,22 @@ def has_permission(user: dict | None, perm: str) -> bool:
     return user.get("role") in allowed
 
 
+def role_rank(role: str) -> int:
+    """Lower number = higher privilege (owner=0). Unknown roles sort last."""
+    try:
+        return ROLES.index(role)
+    except ValueError:
+        return len(ROLES)
+
+
+def actor_outranks(actor_role: str, target_role: str) -> bool:
+    """True when actor_role is strictly more privileged than target_role.
+    Used to stop a lower/equal-ranked user editing (demoting, disabling,
+    re-PINning) a higher-or-equal peer — role_can_be_assigned_by only checks
+    the *new* role, not the target's current one."""
+    return role_rank(actor_role) < role_rank(target_role)
+
+
 def role_can_be_assigned_by(actor_role: str, target_role: str) -> bool:
     """Owners can assign anything. Super-admins can't create Owners.
     Admins can only assign at-or-below their own level. Nobody can

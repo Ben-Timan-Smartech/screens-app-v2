@@ -18,6 +18,16 @@ Rules:
 
 ---
 
+## v0.1.83
+
+Reliability + hardening pass (from a full-project review).
+
+- **Security hardening (server).** Tightened static-file serving so a crafted
+  URL can't reach anything outside the app folder; user management now blocks
+  editing an equal-or-higher-ranked account; hardened the Splashes API against a
+  rare crash under concurrent edits; media range-requests past end-of-file now
+  return a proper 416 so screens self-correct.
+
 ## v0.1.82
 
 - **"Restart app" on the main staff overlay.** The Restart app button — relaunch
