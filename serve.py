@@ -1136,6 +1136,78 @@ def _presence(last_heartbeat: float | None, poll_mode: str | None,
     return (age < _live_threshold_sec(poll_mode),
             age < _online_threshold_sec(poll_mode))
 
+
+# ── Offline-screen alerting ──────────────────────────────────────────
+def _alert_label(s: dict) -> str:
+    name = s.get("name") or s.get("deviceId") or "?"
+    store = (s.get("location") or {}).get("storeId")
+    return f"{name} ({store})" if store else name
+
+
+def _send_alert(text: str) -> None:
+    """Post an alert to the configured webhook. Slack/Discord/Mattermost
+    incoming webhooks all accept {"text": ...}. No-op when the webhook isn't
+    configured (the event is still in the activity log). Never raises."""
+    if not ALERT_WEBHOOK:
+        return
+    try:
+        data = json.dumps({"text": text}).encode("utf-8")
+        req = urllib.request.Request(
+            ALERT_WEBHOOK, data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "screens-app-v2"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            resp.read()
+    except Exception as e:
+        print(f"[alerts] webhook post failed: {e}", file=sys.stderr)
+
+
+def _offline_monitor_loop() -> None:
+    """Watch for screens going offline / recovering and alert once per
+    transition. A screen is alerted as down only after (a) it was seen online
+    at least once this run — so stale rows don't alert on boot — and (b) it's
+    been offline past its normal online threshold + ALERT_OFFLINE_AFTER_SEC,
+    which debounces flapping."""
+    print(f"[alerts] offline monitor started (webhook {'on' if ALERT_WEBHOOK else 'off'})",
+          file=sys.stderr)
+    while True:
+        time.sleep(60)
+        try:
+            now = time.time()
+            downs: list[tuple[str, str]] = []
+            ups: list[tuple[str, str]] = []
+            with _STATE_LOCK:
+                for device_id, s in _screens.items():
+                    last = s.get("lastHeartbeat") or 0
+                    pm = (_per_screen.get(device_id) or {}).get("pollMode", DEFAULT_POLL_MODE)
+                    _, online = _presence(last, pm, now)
+                    if online:
+                        _ever_online.add(device_id)
+                        if device_id in _alerted_offline:
+                            _alerted_offline.discard(device_id)
+                            ups.append((_alert_label(s), device_id))
+                        continue
+                    if device_id not in _ever_online:
+                        continue  # never connected this run — don't alert
+                    down_for = (now - last) if last else None
+                    threshold = _online_threshold_sec(pm) + ALERT_OFFLINE_AFTER_SEC
+                    if (down_for is not None and down_for >= threshold
+                            and device_id not in _alerted_offline):
+                        _alerted_offline.add(device_id)
+                        downs.append((f"{_alert_label(s)} · ~{int(down_for // 60)} min", device_id))
+            # Log + notify outside the lock — the webhook does network I/O.
+            for label, dev in downs:
+                _log_activity(kind="offline", text=f"{label} went offline",
+                              icon="offline", tone="err", target=dev)
+                _send_alert(f"🔴 Screen {label} went offline")
+            for label, dev in ups:
+                _log_activity(kind="back", text=f"{label} is back online",
+                              icon="check", tone="ok", target=dev)
+                _send_alert(f"🟢 Screen {label} is back online")
+        except Exception as e:
+            print(f"[alerts] monitor iteration failed: {e}", file=sys.stderr)
+
+
 def _ensure_screen_state(device_id: str) -> dict:
     """Lazily create a per-screen state record. Caller must hold _STATE_LOCK."""
     s = _per_screen.get(device_id)
@@ -1483,6 +1555,18 @@ SELF_EDIT_ACTIONS = (
     "sync-group", "display-mode",
 )
 ENFORCE_DEVICE_SECRET = os.environ.get("SCREENS_ENFORCE_DEVICE_SECRET", "0") == "1"
+
+# v0.1.85: offline-screen alerting. When a screen that was online drops offline
+# past a grace window it's logged to the activity feed and (if a webhook is
+# configured) pushed to Slack/Discord/Mattermost; a recovery notice fires when
+# it comes back. Webhook is optional — unset means activity-log only.
+ALERT_WEBHOOK = os.environ.get("SCREENS_ALERT_WEBHOOK", "").strip()
+try:
+    ALERT_OFFLINE_AFTER_SEC = int(os.environ.get("SCREENS_ALERT_OFFLINE_AFTER_SEC", "300"))
+except ValueError:
+    ALERT_OFFLINE_AFTER_SEC = 300
+_alerted_offline: set[str] = set()   # deviceIds we've already flagged as down
+_ever_online: set[str] = set()       # deviceIds seen online at least once this run
 # v0.1.58: integration secrets, {name: {value, updatedAt, updatedBy}}.
 # Currently holds the Brand Asset Manager API key; structured as a dict
 # so adding more keys later doesn't require an endpoint change. Only the
@@ -4812,6 +4896,8 @@ def main() -> None:
     # existing library.json from the last run is used; Drive Sync UI lets
     # the user trigger an on-demand scan if needed.
     threading.Thread(target=daily_sync_loop, daemon=True).start()
+    # v0.1.85: watch for screens dropping offline and alert (webhook + activity).
+    threading.Thread(target=_offline_monitor_loop, daemon=True).start()
     # Initial scan if the library is missing or empty. Triggers
     # automatically on fresh deploys so the CMS doesn't show "no
     # content" for up to 24 hours while waiting for the daily timer.
