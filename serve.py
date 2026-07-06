@@ -4499,34 +4499,51 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # flaky wifi. Both the asset API and the public download URL 302 to a
         # CDN that honours Range; urllib carries the header across the redirect.
         client_range = self.headers.get("Range")
-        try:
+        if not asset_id and not tag:
+            self.send_error(404, f"No {flavor} APK in latest release"); return
+
+        def _open_upstream(range_val):
+            """Open the upstream APK byte stream, optionally with a Range.
+              • asset_id set → authed/asset API (private repos + exact bytes).
+              • else tag → the PUBLIC release-download URL (works with a
+                dead/absent token — avoids the rate-limited asset API).
+            Both 302 to a CDN that honours Range; urllib carries the header
+            across the redirect. _github_urlopen retries anonymously if a
+            stale token is rejected (repo is public)."""
             if asset_id:
-                # Authed/asset path (works for private repos + exact bytes).
-                # urllib follows the 302 from the asset API to the CDN; the
-                # resulting stream is the binary, which we relay.
-                # _github_urlopen retries anonymously if a stale token is
-                # rejected (repo is public).
                 api_url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/assets/{asset_id}"
-                upstream = _github_urlopen(
+                return _github_urlopen(
                     api_url, accept="application/octet-stream", timeout=30,
-                    extra_headers=({"Range": client_range} if client_range else None),
+                    extra_headers=({"Range": range_val} if range_val else None),
                 )
-            elif tag:
-                # Token-free path (atom fallback gave us only the tag): the
-                # PUBLIC release-download URL. github.com 302s to the CDN and
-                # urllib follows it — avoids the rate-limited asset API
-                # entirely, so downloads work with a dead/absent token.
-                name = f"screens-player-{flavor}-{tag}.apk"
-                pub_url = f"https://github.com/{GITHUB_RELEASES_REPO}/releases/download/{tag}/{name}"
-                req_headers = {"User-Agent": "screens-app-v2-server"}
-                if client_range:
-                    req_headers["Range"] = client_range
-                upstream = urllib.request.urlopen(
-                    urllib.request.Request(pub_url, headers=req_headers),
-                    timeout=30,
-                )
-            else:
-                self.send_error(404, f"No {flavor} APK in latest release"); return
+            name = f"screens-player-{flavor}-{tag}.apk"
+            pub_url = f"https://github.com/{GITHUB_RELEASES_REPO}/releases/download/{tag}/{name}"
+            req_headers = {"User-Agent": "screens-app-v2-server"}
+            if range_val:
+                req_headers["Range"] = range_val
+            return urllib.request.urlopen(
+                urllib.request.Request(pub_url, headers=req_headers), timeout=30,
+            )
+
+        try:
+            try:
+                upstream = _open_upstream(client_range)
+            except urllib.error.HTTPError as e:
+                # v0.1.87: a stale/oversized `.part` on the tablet makes its
+                # resumable Updater send `Range: bytes=<n>-` with n >= the
+                # current APK size, so GitHub answers 416 Range Not Satisfiable.
+                # We used to relay that as a 502 — but the Updater treats 502 as
+                # a generic error and retries with the SAME range, so legacy
+                # tablets loop on 502 and never update. On a 416, refetch the
+                # whole file (no Range) and serve it as a plain 200: the
+                # Updater's 200 branch truncates its `.part` and restarts from 0,
+                # self-healing. (Twin of the media-proxy past-EOF 416 fix.)
+                if e.code == 416 and client_range:
+                    print("[release-download] upstream 416 (stale client range); refetching full file", file=sys.stderr)
+                    client_range = None
+                    upstream = _open_upstream(None)
+                else:
+                    raise
         except urllib.error.HTTPError as e:
             print(f"[release-download] upstream HTTP {e.code}: {e.reason}", file=sys.stderr)
             self.send_error(502, f"Upstream fetch failed ({e.code})")
