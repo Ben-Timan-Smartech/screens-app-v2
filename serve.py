@@ -413,14 +413,26 @@ _screens: dict[str, dict] = {}      # deviceId -> registry (last heartbeat, devi
 # v0.1.38: keyed by slug id. {id, name, address, city}
 _custom_stores: dict[str, dict] = {}
 
+# v0.1.88: heartbeats persist screens.json, but the FUSE-mounted bucket is
+# GCS-backed and GCS caps mutations on a single object at ~1/sec. The fleet
+# beats every few seconds, so saving on *every* beat blew past that cap and
+# triggered a sustained 429 retry storm — and because the write runs under
+# _STATE_LOCK, the retries stalled every screen's heartbeat / live-state poll
+# (tablets logged "Heartbeat failed: timeout"). We coalesce heartbeat-driven
+# saves to at most one per this interval. See the heartbeat handler.
+_HEARTBEAT_SAVE_INTERVAL_SEC = 30
+_last_heartbeat_save = 0.0
+
 
 # ── State persistence ────────────────────────────────────────────────
-# Both dicts get atomically written to disk on every mutation. On Cloud
-# Run the env-var-overridden paths land on the FUSE-mounted bucket so a
-# redeploy (container restart) doesn't wipe playlists, registrations,
-# or per-screen audio/splash flags. For ~50 tablets the files are <100kB
-# each so writing on every heartbeat is fine. Atomic write = write to
-# .tmp then rename; readers always see a complete file.
+# Both dicts get atomically written to disk on every meaningful mutation
+# (register, rename, operator edits, commands). On Cloud Run the env-var-
+# overridden paths land on the FUSE-mounted bucket so a redeploy (container
+# restart) doesn't wipe playlists, registrations, or per-screen audio/splash
+# flags. The files are small (<100kB for ~50 tablets), but GCS rate-limits
+# object mutations, so the high-frequency heartbeat path throttles its saves
+# (see _HEARTBEAT_SAVE_INTERVAL_SEC). Atomic write = write to .tmp then
+# rename; readers always see a complete file.
 
 def _slug(s: str) -> str:
     """ASCII slug for filenames + library ids. Strips punctuation, joins
@@ -3446,6 +3458,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             device_id = body.get("deviceId") or "unknown"
             with _STATE_LOCK:
                 s = _screens.get(device_id)
+                is_new_screen = s is None
                 if not s:
                     s = {
                         "deviceId": device_id,
@@ -3505,7 +3518,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state["pollMode"] = "slow"
                     state["lowDataMode"] = True
                     _save_per_screen()
-                _save_screens()
+                # v0.1.88: coalesce heartbeat-driven persistence. Beats recur
+                # every few seconds per screen; writing screens.json on each
+                # one exceeded GCS's ~1 mutation/sec/object cap and produced a
+                # 429 storm that stalled the fleet (the write runs under
+                # _STATE_LOCK). The heartbeat payload is ephemeral —
+                # lastHeartbeat/status/cache stats are re-sent next tick — so a
+                # brand-new screen row is persisted immediately (so it survives
+                # a restart) while steady-state beats save at most once per
+                # _HEARTBEAT_SAVE_INTERVAL_SEC.
+                global _last_heartbeat_save
+                now = time.time()
+                if is_new_screen or (now - _last_heartbeat_save) >= _HEARTBEAT_SAVE_INTERVAL_SEC:
+                    _save_screens()
+                    _last_heartbeat_save = now
             self._send_json({
                 "ok":          True,
                 "revision":    state["revision"],

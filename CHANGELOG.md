@@ -18,6 +18,18 @@ Rules:
 
 ---
 
+## v0.1.88
+
+- **Screens stop timing out on the server.** Every heartbeat a tablet sent was
+  making the server rewrite its whole screen-registry file, and with the fleet
+  checking in every few seconds that hammered Google's storage past its rate
+  limit — so the server would stall and tablets logged "Heartbeat failed" /
+  "Live state fetch failed" and were slow to pick up newly pushed content. The
+  server now saves that file at most once every 30 seconds from heartbeats
+  (brand-new screens are still saved immediately), which clears the storm and
+  keeps status and content updates snappy. No app update needed — it's a
+  server-side fix.
+
 ## v0.1.85
 
 - **Offline-screen alerts.** The server now watches the fleet and, when a screen
