@@ -1028,6 +1028,12 @@ const ContentLibrary = () => {
   const [activeProduct, setActiveProduct] = React.useState(null);
   const [selected, setSelected] = React.useState(new Set());
   const [uploadOpen, setUploadOpen] = React.useState(false);
+  // v0.1.86: the server upload endpoint requires library.edit, so only show
+  // "Upload content" to users who actually have it — a viewer used to see the
+  // button and hit a 403. Everyone from `user` up (owner/super_admin/admin/
+  // manager/user/brand_partner) can upload; viewers can't.
+  const auth = useAuth();
+  const canUpload = can(auth.user || { permissions: [] }, 'library.edit');
   // v0.1.27: command palette can fire `open-upload-panel` to pop
   // the panel from anywhere — registered here because the panel
   // state lives in this component. Listener only attaches while
@@ -1218,7 +1224,9 @@ const ContentLibrary = () => {
             {/* Filters button removed in v0.1.6 — filtering wasn't wired up
                 and was confusing users. Restore when there's real filter
                 logic to expose. */}
-            <Button variant="primary" size="sm" icon={<Icon.upload size={13} />} onClick={() => setUploadOpen(true)}>Upload content</Button>
+            {canUpload && (
+              <Button variant="primary" size="sm" icon={<Icon.upload size={13} />} onClick={() => setUploadOpen(true)}>Upload content</Button>
+            )}
           </>
         }
       />
