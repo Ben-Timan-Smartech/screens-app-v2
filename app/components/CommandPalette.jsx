@@ -205,7 +205,9 @@ const buildCommands = () => [
     hint: 'Open the upload panel',
     description: 'Opens the Content Library upload panel — pick a file from your desktop, choose a brand, click Upload. The new video appears in the grid the instant the progress bar finishes.',
     keywords: 'add new content desktop file',
-    perm: 'library.sync',
+    // v0.1.86: upload is a content-edit action (matches the server gate),
+    // so managers/users see it too — not just Drive-sync admins.
+    perm: 'library.edit',
     run: () => {
       navigate('/library');
       // Defer one tick so ContentLibrary has mounted + attached its
