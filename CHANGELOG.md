@@ -18,6 +18,15 @@ Rules:
 
 ---
 
+## v0.1.87
+
+- **Fixed: legacy screens stuck unable to update.** Some tablets (mostly the
+  older/legacy boxes) could get wedged repeatedly failing to download a player
+  update — the server was answering their resume request with an error it kept
+  retrying forever. The download proxy now detects that case and cleanly serves
+  the whole file instead, so the tablet restarts the download and updates
+  normally. Server-only fix; screens self-heal on their next update attempt.
+
 ## v0.1.86
 
 - **Staff can upload content again.** The "Upload content" button in the Content
