@@ -2376,7 +2376,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         to library.json, returns the new entry. No transcoding — the
         uploaded file is what plays back.
         """
-        if self._require_perm("library.sync") is None:
+        # v0.1.86: uploading a single asset is a content-EDIT action, not a
+        # Drive-SYNC action. It was gated on "library.sync" (owner/super_admin/
+        # admin only), so the `manager`, `user` and `brand_partner` roles saw
+        # the Upload button but got a 403 — "users can't upload." Gate on
+        # "library.edit" (everyone except read-only viewers) to match; the
+        # heavy global Drive-sync trigger keeps its stricter library.sync.
+        if self._require_perm("library.edit") is None:
             return
 
         ctype = self.headers.get("Content-Type", "")

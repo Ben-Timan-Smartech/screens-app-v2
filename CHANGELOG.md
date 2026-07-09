@@ -27,6 +27,16 @@ Rules:
   the whole file instead, so the tablet restarts the download and updates
   normally. Server-only fix; screens self-heal on their next update attempt.
 
+## v0.1.86
+
+- **Staff can upload content again.** The "Upload content" button in the Content
+  Library was only ever going to work for owners and admins — everyone else
+  (managers, standard users, brand partners) saw the button but got a silent
+  "forbidden" error when they tried to upload. Uploading a video is now treated
+  as a normal content edit, so anyone with content-editing access can do it.
+  Read-only viewers no longer see the button at all (it never worked for them).
+  Kicking off a full Google Drive re-sync stays admin-only, as before.
+
 ## v0.1.85
 
 - **Offline-screen alerts.** The server now watches the fleet and, when a screen
