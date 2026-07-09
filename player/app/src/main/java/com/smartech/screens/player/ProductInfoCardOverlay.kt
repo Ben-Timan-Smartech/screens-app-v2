@@ -38,6 +38,13 @@ import com.smartech.screens.data.VideoItem
 import com.smartech.screens.util.InputMode
 import kotlinx.coroutines.delay
 
+/** v0.1.90: how long an expanded card stays open on a touch device before
+ *  auto-collapsing back to compact. Long enough to read a short product
+ *  description, short enough that the card resets for the next shopper if
+ *  someone taps and walks away. Non-touch devices ignore this — they run
+ *  the fixed 6s/6s auto-cycle instead. */
+private const val EXPANDED_AUTO_COLLAPSE_MS = 15_000L
+
 /**
  * Shopper-facing product-info card.
  *
@@ -52,7 +59,9 @@ import kotlinx.coroutines.delay
  *  - expanded — image + name + price + the full description, plus a
  *               close affordance on touch devices.
  *
- * On touch devices the shopper taps to toggle compact/expanded. On
+ * On touch devices the shopper taps to toggle compact/expanded; an
+ * expanded card auto-collapses back to compact after
+ * [EXPANDED_AUTO_COLLAPSE_MS] so it never sits open indefinitely. On
  * TV-class / no-touch devices taps are ignored and the card auto-cycles
  * between the two states on a fixed ticker so the description still gets
  * airtime unattended.
@@ -92,6 +101,20 @@ fun ProductInfoCardOverlay(
             while (true) {
                 delay(6_000L)
                 expanded = !expanded
+            }
+        }
+    } else {
+        // v0.1.90: touch devices — auto-collapse an expanded card after a
+        // timeout so a shopper who taps for details and walks away doesn't
+        // leave the description covering the video indefinitely. The effect
+        // re-arms every time the card (re-)expands; a manual second tap
+        // collapses it earlier by flipping `expanded`, which restarts this
+        // effect with expanded=false (a no-op). Item change resets to
+        // compact via the item.id-keyed remember above.
+        LaunchedEffect(item.id, expanded) {
+            if (expanded) {
+                delay(EXPANDED_AUTO_COLLAPSE_MS)
+                expanded = false
             }
         }
     }
