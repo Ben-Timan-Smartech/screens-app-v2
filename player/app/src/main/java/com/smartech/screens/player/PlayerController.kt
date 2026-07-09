@@ -13,6 +13,9 @@ import com.smartech.screens.R
 import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.util.DeviceInfo
 import com.smartech.screens.util.LogBuffer
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.abs
 
 /**
@@ -60,6 +63,13 @@ class PlayerController(context: Context) {
         // overrides the silent default on individual items.
         volume = 0f
     }
+
+    /** Media id of the item currently on screen. Observed by the product-
+     *  info-card overlay so it can render the playing item's info. The
+     *  bundled splash uses the [Source.SPLASH] sentinel; the card treats
+     *  that as "no card". */
+    private val _currentMediaId = MutableStateFlow<String?>(null)
+    val currentMediaIdFlow: StateFlow<String?> = _currentMediaId.asStateFlow()
 
     /** Global "unmute everything" flag pushed from the server/staff overlay. */
     private var audioOn: Boolean = false
@@ -172,6 +182,7 @@ class PlayerController(context: Context) {
         // items (i.e. visible jumps become invisible).
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                _currentMediaId.value = player.currentMediaItem?.mediaId
                 applyVolumeForCurrentItem()
                 snapToGroupExpectedItem()
                 // Reset the playback rate at every transition. Drift
@@ -293,6 +304,9 @@ class PlayerController(context: Context) {
         // onMediaItemTransition fires asynchronously; apply now so the very
         // first item doesn't briefly play at the previous loop's volume.
         applyVolumeForCurrentItem()
+        // Same reasoning for the current-item id the card overlay reads —
+        // seed it now rather than waiting for the first transition.
+        _currentMediaId.value = player.currentMediaItem?.mediaId
     }
 
     /**

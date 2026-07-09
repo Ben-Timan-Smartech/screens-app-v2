@@ -49,6 +49,26 @@ data class VideoItem(
      *  Set per-video from the CMS Content Library; flows through here so
      *  the player can apply the right volume on each item transition. */
     @SerialName("defaultUnmute") val defaultUnmute: Boolean = false,
+    /** Shopper-facing product-info-card fields. Populated per playlist item
+     *  by the server; rendered as an on-screen card when the screen's
+     *  top-level `productCard` flag is on. All optional — the card degrades
+     *  gracefully when any are absent. */
+    val description: String? = null,
+    val descriptionLong: String? = null,
+    val prices: Prices? = null,
+    val packshotUrl: String? = null,
+    val brandLogoUrl: String? = null,
+)
+
+/** Region-keyed prices for the product-info card. Every field optional;
+ *  the card resolves one by the screen's city (see ProductInfoCardOverlay). */
+@Serializable
+data class Prices(
+    val gbp: Double? = null,
+    val usd: Double? = null,
+    val eur: Double? = null,
+    val berlinEur: Double? = null,
+    val romeEur: Double? = null,
 )
 
 /** Response of GET /device/playlist. Server resolves schedules before returning. */

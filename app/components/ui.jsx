@@ -432,6 +432,20 @@ const setMixSplash = async (deviceId, mixSplash) => {
   return res.json();
 };
 
+// setScreenProductCard — POST /api/screens/<id>/product-card to flip the
+// shopper-facing on-screen product info card (product description + region
+// price, tap to expand). Off by default; only renders for videos whose tm:rw
+// product has price/description data.
+const setScreenProductCard = async (deviceId, productCard) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/product-card`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ productCard }),
+  });
+  if (!res.ok) throw new Error(`product-card failed: ${res.status}`);
+  return res.json();
+};
+
 // setScreenAudio — POST /api/screens/<id>/audio to flip the global "play
 // with sound" flag on a screen. When off (the default), individual
 // videos can still play with sound if their library entry has
@@ -1519,6 +1533,7 @@ Object.assign(window, {
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
+  setScreenProductCard,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,
   addStore, deleteStore, refreshStoresFromServer,

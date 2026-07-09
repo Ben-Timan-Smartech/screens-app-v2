@@ -648,6 +648,35 @@ def _drive_thumb_url(file_path: str | None) -> str | None:
     return file_path if file_path.startswith("http") else None
 
 
+# v0.1.86: per-currency prices for the shopper-facing product card. The tm:rw
+# API exposes region-specific price fields (priceGbp/rrpGbp = GBP/London,
+# rrpBerlinEur = Berlin, rrpRomeEur = Rome, priceUsd = NYC, priceEur). Read
+# defensively — the schema uses additionalProperties and a given row may carry
+# only some. Returns {gbp,usd,eur,berlinEur,romeEur} with the values present,
+# or None if there's no price at all. The player picks the field for its store's
+# region.
+_PRICE_FIELDS = {
+    "gbp":       ("priceGbp", "rrpGbp"),
+    "usd":       ("priceUsd",),
+    "eur":       ("priceEur",),
+    "berlinEur": ("rrpBerlinEur",),
+    "romeEur":   ("rrpRomeEur",),
+}
+
+
+def _extract_prices(row: dict) -> dict | None:
+    if not isinstance(row, dict):
+        return None
+    out: dict = {}
+    for cur, fields in _PRICE_FIELDS.items():
+        for f in fields:
+            val = row.get(f)
+            if val not in (None, "", 0):
+                out[cur] = val
+                break
+    return out or None
+
+
 def _tmrw_videos_map() -> dict:
     """Return {brandLower: {"display": <brand>, "videos": {fileNameLower:
     {fileName, productName, active, orientation, resolution, sku, scope}}}}.
@@ -696,7 +725,8 @@ def _tmrw_videos_map() -> dict:
 
     def _product_detail(sku: str) -> dict:
         if sku not in _sku_detail:
-            d: dict = {"brand": None, "packshot": None}
+            d: dict = {"brand": None, "packshot": None,
+                       "descShort": None, "descLong": None, "prices": None}
             try:
                 preq = urllib.request.Request(
                     f"{BRAND_API_BASE}/product?sku={urllib.parse.quote(sku)}",
@@ -704,7 +734,11 @@ def _tmrw_videos_map() -> dict:
                 )
                 with urllib.request.urlopen(preq, timeout=6) as presp:
                     pdata = json.loads(presp.read().decode("utf-8") or "{}")
-                d["brand"] = ((pdata.get("product") or {}).get("brand") or "").strip() or None
+                prod = pdata.get("product") or {}
+                d["brand"] = (prod.get("brand") or "").strip() or None
+                # v0.1.86: per-currency prices may ride on the product record
+                # (the caller also checks the /videos row as a fallback).
+                d["prices"] = _extract_prices(prod)
                 imagery = pdata.get("imagery") or []
                 main = next((im for im in imagery
                              if (im.get("role") or "").lower() == "main"), None) \
@@ -718,6 +752,20 @@ def _tmrw_videos_map() -> dict:
                     d["packshot"] = _drive_thumb_url(main.get("driveUrl") or main.get("filePath"))
             except Exception as e:
                 print(f"[tmrwvideos] product lookup for sku {sku} failed: {e}", file=sys.stderr)
+            # v0.1.86: short/long marketing copy for the product card, from the
+            # dedicated /description endpoint. Separate best-effort call so a
+            # description miss never loses the packshot/brand fetched above.
+            try:
+                dreq = urllib.request.Request(
+                    f"{BRAND_API_BASE}/description?sku={urllib.parse.quote(sku)}",
+                    headers={"X-API-Key": key, "Accept": "application/json"},
+                )
+                with urllib.request.urlopen(dreq, timeout=6) as dresp:
+                    ddata = json.loads(dresp.read().decode("utf-8") or "{}")
+                d["descShort"] = (ddata.get("short") or "").strip() or None
+                d["descLong"] = (ddata.get("long") or "").strip() or None
+            except Exception as e:
+                print(f"[tmrwvideos] description lookup for sku {sku} failed: {e}", file=sys.stderr)
             _sku_detail[sku] = d
         return _sku_detail[sku]
 
@@ -769,13 +817,19 @@ def _tmrw_videos_map() -> dict:
             # product → main image; brand/family rows stay null and fall
             # back to the generated thumbnail / brand logo.
             "packshotUrl": (_product_detail(sku_val)["packshot"] if sku_val else None),
+            # v0.1.86: product-card fields — short/long description (tm:rw
+            # /description) + per-currency prices (row first, product fallback).
+            "description": (_product_detail(sku_val)["descShort"] if sku_val else None),
+            "descriptionLong": (_product_detail(sku_val)["descLong"] if sku_val else None),
+            "prices": (_extract_prices(r) or (_product_detail(sku_val)["prices"] if sku_val else None)),
         }
     import hashlib
     # v0.1.77: fold the packshot URL into the hash (not just the file set)
     # so a newly-resolved product image busts the /api/library ETag and
     # reaches clients instead of serving a stale, packshot-less 304.
     new_hash = hashlib.sha1(
-        json.dumps({k: [(fk, vv.get("packshotUrl")) for fk, vv in sorted(v["videos"].items())]
+        json.dumps({k: [(fk, vv.get("packshotUrl"), vv.get("description"), vv.get("prices"))
+                    for fk, vv in sorted(v["videos"].items())]
                     for k, v in by_brand.items()}, sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
     _TMRW_VIDEOS_CACHE.update({"byBrand": by_brand, "fetchedAt": now, "hash": new_hash})
@@ -840,6 +894,13 @@ def _library_with_logos() -> tuple[dict, str]:
                 # v0.1.77: product packshot thumbnail for the Content Library.
                 if row.get("packshotUrl"):
                     nv["packshotUrl"] = row["packshotUrl"]
+                # v0.1.86: product-card fields (shopper-facing card).
+                if row.get("description"):
+                    nv["description"] = row["description"]
+                if row.get("descriptionLong"):
+                    nv["descriptionLong"] = row["descriptionLong"]
+                if row.get("prices"):
+                    nv["prices"] = row["prices"]
                 new_videos.append(nv)
             else:
                 new_videos.append({**v, "tmrwAssigned": False, "tmrwActive": False})
@@ -878,6 +939,9 @@ def _library_with_logos() -> tuple[dict, str]:
                     "tmrwOrientation": row.get("orientation"),
                     "tmrwResolution": row.get("resolution"),
                     "packshotUrl": row.get("packshotUrl"),  # v0.1.77
+                    "description": row.get("description"),        # v0.1.86
+                    "descriptionLong": row.get("descriptionLong"),
+                    "prices": row.get("prices"),
                     "pendingSync": True,
                     "source": "tmrw",
                 })
@@ -907,6 +971,43 @@ def _library_with_logos() -> tuple[dict, str]:
         f'-{_BRAND_LOGO_CACHE["hash"]}-{_TMRW_VIDEOS_CACHE["hash"]}"'
     )
     return out, etag
+
+
+# v0.1.86: card data for the shopper-facing product card, keyed by the playing
+# item's library id — the tm:rw-enriched description + per-currency prices +
+# packshot, plus the brand logo (for the image fallback: packshot → brand logo
+# → nothing). Cached by the library ETag so /api/state polls don't rebuild the
+# index each time; only screens with the productCard toggle on ever call this.
+_ENRICHED_CARD_CACHE: dict = {"etag": None, "byId": {}}
+
+
+def _product_card_for(video_id: str) -> dict | None:
+    if not video_id:
+        return None
+    data, etag = _library_with_logos()
+    if _ENRICHED_CARD_CACHE["etag"] != etag:
+        logos = _brand_logo_map()
+        by_id: dict[str, dict] = {}
+        for v in data.get("videos") or []:
+            vid = v.get("id")
+            if not vid:
+                continue
+            card: dict = {}
+            if v.get("description"):
+                card["description"] = v["description"]
+            if v.get("descriptionLong"):
+                card["descriptionLong"] = v["descriptionLong"]
+            if v.get("prices"):
+                card["prices"] = v["prices"]
+            if v.get("packshotUrl"):
+                card["packshotUrl"] = v["packshotUrl"]
+            blogo = logos.get((v.get("brand") or "").lower())
+            if blogo:
+                card["brandLogoUrl"] = blogo
+            if card:
+                by_id[vid] = card
+        _ENRICHED_CARD_CACHE.update({"etag": etag, "byId": by_id})
+    return _ENRICHED_CARD_CACHE["byId"].get(video_id)
 
 
 def _test_brand_api_key() -> dict:
@@ -1217,6 +1318,7 @@ def _ensure_screen_state(device_id: str) -> dict:
             "items": [],
             "pushedAt": None,
             "mixSplash": True,                    # bundled splash mixed in by default
+            "productCard": False,                 # v0.1.86: shopper-facing product info card — opt-in per screen via /api/screens/<id>/product-card
             "audioOn": False,                     # screen-wide audio is muted by default — see /api/screens/<id>/audio
             "pollMode": DEFAULT_POLL_MODE,        # "fast" | "normal" | "slow" — see /api/screens/<id>/poll-mode
             "syncGroup": None,                    # see _compute_playback / /api/screens/<id>/sync-group
@@ -2717,10 +2819,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # per screen (a handful at most) so the lookup is
                     # cheap.
                     enriched_items = []
+                    want_card = bool(s.get("productCard"))
                     for it in s["items"]:
                         lib = _library_lookup_by_id(it.get("id") or "")
                         merged = dict(it)
                         merged["defaultUnmute"] = bool((lib or {}).get("defaultUnmute"))
+                        # v0.1.86: only screens with the product-card toggle on
+                        # get the description / per-currency prices / packshot +
+                        # brand logo for the on-screen card. Keeps the payload
+                        # lean and the enriched-library lookup off the hot path
+                        # for every other screen.
+                        if want_card:
+                            card = _product_card_for(it.get("id") or "")
+                            if card:
+                                merged.update(card)
                         enriched_items.append(merged)
                     # Sync-group playback hint. When the screen has a
                     # syncGroup set, compute "what every screen in this
@@ -2806,6 +2918,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # tell the tablet so it doesn't mix splash
                         # while it's a group member.
                         "mixSplash":   False if sync_group_id else s["mixSplash"],
+                        "productCard": bool(s.get("productCard")),   # v0.1.86: on-screen product info card
                         "audioOn":     s.get("audioOn", False),
                         "pollMode":    poll_mode,
                         # lowDataMode kept in the payload for old tablets
@@ -2891,6 +3004,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "currentRevision":       state.get("revision", 0),
                         "currentItems":          state.get("items", []),
                         "mixSplash":             state.get("mixSplash", True),
+                        "productCard":           bool(state.get("productCard")),   # v0.1.86
                         "audioOn":               state.get("audioOn", False),
                         "pollMode":              pm,
                         "lowDataMode":           pm == "slow",
@@ -3752,6 +3866,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/command         { command: "reboot"|"clearCache"|"unregister"|"update"|"refresh" }
         # POST /api/screens/<deviceId>/playlist        { items: [...], mode: "replace"|"append" }
         # POST /api/screens/<deviceId>/mix-splash      { mixSplash: bool }
+        # POST /api/screens/<deviceId>/product-card    { productCard: bool }
         # POST /api/screens/<deviceId>/audio           { audioOn: bool }
         # POST /api/screens/<deviceId>/poll-mode       { pollMode: "fast"|"normal"|"slow" }
         # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }   (legacy — writes pollMode)
@@ -3759,7 +3874,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/display-mode    { displayMode: int | null }
         # POST /api/screens/<deviceId>/name            { name: string }
         # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|audio|poll-mode|low-data-mode|sync-group|display-mode|name|location)$", path)
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|audio|poll-mode|low-data-mode|sync-group|display-mode|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -3940,6 +4055,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state["revision"] += 1                  # bump so player picks up flag change
                     _save_per_screen()
                     self._send_json({"ok": True, "mixSplash": state["mixSplash"]})
+                    return
+                if action == "product-card":
+                    # v0.1.86: toggle the shopper-facing product info card for
+                    # this screen. Bump revision so the tablet re-polls and
+                    # starts / stops rendering the card on its next tick.
+                    state = _ensure_screen_state(device_id)
+                    state["productCard"] = bool(body.get("productCard", False))
+                    state["revision"] += 1
+                    _save_per_screen()
+                    self._send_json({"ok": True, "productCard": state["productCard"]})
                     return
                 if action == "audio":
                     state = _ensure_screen_state(device_id)

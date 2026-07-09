@@ -36,6 +36,11 @@ fun PlayerScreen(
     val intendedPlaylist by repository.intendedPlaylist.collectAsState()
     val downloads by repository.downloads.collectAsState()
     val mixSplash by repository.mixSplashFlow.collectAsState()
+    // Product-info-card state: the screen-wide toggle, the id of the item
+    // currently on screen, and the screen's city (for region pricing).
+    val productCard by repository.productCardFlow.collectAsState()
+    val currentMediaId by controller.currentMediaIdFlow.collectAsState()
+    val city by repository.store.locCity.collectAsState(initial = null)
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
@@ -124,6 +129,20 @@ fun PlayerScreen(
             isPlaying = state is PlayerRepository.State.Playing,
             intendedItemCount = intendedPlaylist.size,
             downloads = downloads,
+        )
+
+        // Shopper-facing product-info card. Resolves the currently-playing
+        // item from the live queue by media id, then renders its info over
+        // the video — but only when the server has turned productCard on.
+        // The overlay itself no-ops when the item has no card data or the
+        // current id is the splash sentinel (not in the playlist).
+        val playingItems = (state as? PlayerRepository.State.Playing)
+            ?.items?.map { it.item } ?: emptyList()
+        val currentItem = currentMediaId?.let { id -> playingItems.firstOrNull { it.id == id } }
+        ProductInfoCardOverlay(
+            enabled = productCard,
+            item = currentItem,
+            city = city,
         )
     }
 }
