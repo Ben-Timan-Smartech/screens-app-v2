@@ -80,6 +80,11 @@ fun PlaylistView(
 ) {
     val mixSplash by repository.mixSplashFlow.collectAsState()
     val audioOn by repository.audioOnFlow.collectAsState()
+    // v0.1.89: product info card (price + description) on/off, same
+    // per-screen flag the CMS ScreenDetail exposes. Sits above Mix splash
+    // in the rail. Unlike Mix splash it's timing-neutral, so there's no
+    // sync-group lock — it stays tappable in a group.
+    val productCard by repository.productCardFlow.collectAsState()
     val pollMode by repository.pollModeFlow.collectAsState()
     // v0.1.33: read sync-group membership so the Mix splash toggle
     // can grey out + explain itself when the screen is in a group.
@@ -176,6 +181,37 @@ fun PlaylistView(
                 )
 
                 Spacer(Modifier.weight(1f))
+
+                // Product info card toggle — shows the price + short
+                // description over each product's video. Timing-neutral,
+                // so (unlike Mix splash) it's never locked by a sync group.
+                // Only actually renders for items that have price/description
+                // in the tm:rw catalogue; the server attaches those to
+                // /api/state when this is on.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Pricing & description", color = Bone, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            if (productCard)
+                                "Shows a product card (price + description) over each product video."
+                            else
+                                "Product videos play with no price/description overlay.",
+                            color = Color(0x99FFFFFF), fontSize = 12.sp,
+                        )
+                    }
+                    DarkToggle(
+                        on = productCard,
+                        onChange = { value ->
+                            LogBuffer.i("PlaylistView", "Product card tapped → $value")
+                            scope.launch {
+                                repository.setProductCardOnServer(value)
+                            }
+                        },
+                        enabled = true,
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
 
                 // Splash mix toggle in the rail (high contrast).
                 // v0.1.33: locked off when the screen is in a sync

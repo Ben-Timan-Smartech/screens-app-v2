@@ -18,6 +18,14 @@ Rules:
 
 ---
 
+## v0.1.89
+
+- **Turn the product card on/off from the screen itself.** The **Pricing &
+  description** toggle now lives on the tablet's own staff screen (tap through the
+  PIN → "What's on this screen"), right above **Mix splash** — so a store person can
+  switch the on-screen price/description card on or off without opening the CMS. It
+  stays in sync with the same toggle on the screen's page in the web admin.
+
 ## v0.1.88
 
 - **Product info card on screen.** Screens can now show a product's **price and

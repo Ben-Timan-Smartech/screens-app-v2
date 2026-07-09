@@ -1653,8 +1653,8 @@ _city_brand: dict = {}          # mutable copy of DEFAULT_CITY_BRAND
 # tablet (no header) is grace-allowed (and logged); a *wrong* secret is always
 # rejected.
 SELF_EDIT_ACTIONS = (
-    "playlist", "mix-splash", "audio", "poll-mode", "low-data-mode",
-    "sync-group", "display-mode",
+    "playlist", "mix-splash", "product-card", "audio", "poll-mode",
+    "low-data-mode", "sync-group", "display-mode",
 )
 ENFORCE_DEVICE_SECRET = os.environ.get("SCREENS_ENFORCE_DEVICE_SECRET", "0") == "1"
 
