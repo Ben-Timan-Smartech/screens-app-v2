@@ -18,6 +18,19 @@ Rules:
 
 ---
 
+## v0.1.89
+
+- **Turn the product card on/off from the screen itself.** The **Pricing &
+  description** toggle now lives on the tablet's own staff screen (tap through the
+  PIN → "What's on this screen"), right above **Mix splash** — so a store person can
+  switch the on-screen price/description card on or off without opening the CMS. It
+  stays in sync with the same toggle on the screen's page in the web admin.
+- **Fixed: "tap for details" on the product card did nothing.** The hidden
+  staff-unlock layer (the four-corner tap) was sitting over the whole screen and
+  eating every tap, so tapping the product card never expanded it. Taps now pass
+  through to the card unless they're part of the staff-unlock corner sequence, so
+  tap-to-expand works on touch screens again.
+
 ## v0.1.88
 
 - **Product info card on screen.** Screens can now show a product's **price and

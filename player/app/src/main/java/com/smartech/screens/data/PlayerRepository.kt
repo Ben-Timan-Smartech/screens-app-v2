@@ -1344,6 +1344,42 @@ class PlayerRepository(
         }
     }
 
+    /** Toggle the per-screen product-info-card flag on the server. When on,
+     *  /api/state enriches the playing item with its price + description so
+     *  the on-screen card can render. Same write-through path as the CMS
+     *  ScreenDetail toggle — the next poll pulls the enriched item back. */
+    suspend fun setProductCardOnServer(value: Boolean) {
+        LogBuffer.i(TAG, "setProductCardOnServer → $value")
+        // Optimistic local flip so the toggle + overlay gate react instantly.
+        // The card's price/description only arrive once the server sees the
+        // flag on (they're attached in /api/state), so force a re-fetch below.
+        _productCard.value = value
+
+        val base = store.liveServerUrl.first()?.trimEnd('/')
+        if (base.isNullOrBlank()) {
+            LogBuffer.w(TAG, "setProductCardOnServer skipped — no liveServerUrl set")
+            return
+        }
+        val deviceId = store.ensureDeviceId()
+        val body = """{"productCard":$value}"""
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/screens/${urlEncode(deviceId)}/product-card")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .withDeviceSecret()
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) LogBuffer.w(TAG, "setProductCardOnServer HTTP ${r.code}")
+                    else LogBuffer.i(TAG, "setProductCardOnServer OK")
+                }
+                lastLiveRevision = -1
+            }.onFailure {
+                LogBuffer.w(TAG, "setProductCardOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
+            }
+        }
+    }
+
     /** Toggle the per-screen audio mute/unmute flag on the server. The
      *  global flag overrides "default to mute"; if it's off the player
      *  falls back to the per-video defaultUnmute setting from the
