@@ -18,6 +18,17 @@ Rules:
 
 ---
 
+## v0.1.88
+
+- **Product info card on screen.** Screens can now show a product's **price and
+  description** over its video — a card the customer can **tap to see the full
+  details** (on touch screens; TV displays cycle it automatically). Prices show in
+  the store's own currency (£/$/€), pulled from the tm:rw catalogue, and the card's
+  image falls back product image → brand logo → nothing. Turn it on per screen from
+  **Display & playback** on the screen's page in the CMS; it only appears for
+  products that actually have price/description data in the catalogue. Off by
+  default.
+
 ## v0.1.85
 
 - **Offline-screen alerts.** The server now watches the fleet and, when a screen

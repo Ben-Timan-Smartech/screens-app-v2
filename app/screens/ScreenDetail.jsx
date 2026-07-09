@@ -1127,6 +1127,21 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
+  const handleProductCardToggle = async (next) => {
+    if (!targetDeviceId) return;
+    try {
+      await setScreenProductCard(targetDeviceId, next);
+      showToast(
+        isLive
+          ? (next ? 'Product info card on' : 'Product info card off')
+          : (next ? 'Product card will turn on when the tablet reconnects' : 'Product card will turn off when the tablet reconnects'),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
   const handlePollModeChange = async (mode) => {
     if (!targetDeviceId) return;
     try {
@@ -1637,6 +1652,17 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                   : 'Off by default; videos can opt in via the Content Library.'}
                 value={hasHistory ? !!lastKnown.audioOn : false}
                 onChange={handleAudioToggle}
+                disabled={!canEdit}
+              />
+              <ToggleRow
+                label="Product info card"
+                sub={canEdit
+                  ? (isLive
+                    ? 'Shows a tappable price + description card over the video, for products that have tm:rw price/description data.'
+                    : 'Shows a price + description card over the video. Applies when the tablet reconnects.')
+                  : 'Shows a price + description card over the video for products with tm:rw data.'}
+                value={hasHistory ? !!lastKnown.productCard : false}
+                onChange={handleProductCardToggle}
                 disabled={!canEdit}
               />
               <PollModeRow
