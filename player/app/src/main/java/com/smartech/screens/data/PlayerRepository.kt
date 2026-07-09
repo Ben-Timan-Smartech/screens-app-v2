@@ -10,6 +10,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -506,6 +507,11 @@ class PlayerRepository(
         val commands: List<LiveCommand> = emptyList(),
         val splashUrl: String? = null,
         val splashName: String? = null,
+        /** Screen-wide toggle for the shopper-facing product-info card.
+         *  Default false = no card. When true the player renders a card
+         *  over the video with the currently-playing item's description,
+         *  region price, and image. */
+        val productCard: Boolean = false,
     )
 
     /** v0.1.35: a sibling in this screen's sync group. The Device
@@ -569,6 +575,12 @@ class PlayerRepository(
         /** Per-video "play with audio even if screen is muted" flag.
          *  Set in the CMS Content Library. */
         val defaultUnmute: Boolean = false,
+        /** Shopper-facing product-info-card fields (see [VideoItem]). */
+        val description: String? = null,
+        val descriptionLong: String? = null,
+        val prices: Prices? = null,
+        val packshotUrl: String? = null,
+        val brandLogoUrl: String? = null,
     )
 
     /** Latest mix-splash flag from the server. Observable so the staff UI can
@@ -584,6 +596,12 @@ class PlayerRepository(
     val audioOnFlow: StateFlow<Boolean> = _audioOn
     val audioOn: Boolean get() = _audioOn.value
     val mixSplash: Boolean get() = _mixSplash.value
+
+    /** Latest screen-wide product-info-card flag. False (default) = no card.
+     *  The player observes this and renders the currently-playing item's
+     *  info card over the video when true. */
+    private val _productCard = MutableStateFlow(false)
+    val productCardFlow: StateFlow<Boolean> = _productCard.asStateFlow()
 
     /** Poll cadence the server has assigned to this screen. The polling
      *  loop reads this on every tick. SLOW also skips the per-location
@@ -909,6 +927,14 @@ class PlayerRepository(
         if (state.audioOn != _audioOn.value) {
             _audioOn.value = state.audioOn
             LogBuffer.i(TAG, "Audio → ${if (state.audioOn) "on" else "off"}")
+        }
+
+        // Product-info-card flag. Updated silently — the card overlay
+        // observes this flow and renders/hides on the next recomposition;
+        // no re-publish needed because it doesn't affect the queue.
+        if (state.productCard != _productCard.value) {
+            _productCard.value = state.productCard
+            LogBuffer.i(TAG, "Product card → ${if (state.productCard) "on" else "off"}")
         }
 
         // Poll mode. The polling loop reads this on every tick to pick
@@ -2094,6 +2120,11 @@ class PlayerRepository(
             id = id, title = title, brand = brand, product = product,
             url = absoluteUrl, durationSec = durationSec,
             defaultUnmute = defaultUnmute,
+            description = description,
+            descriptionLong = descriptionLong,
+            prices = prices,
+            packshotUrl = packshotUrl,
+            brandLogoUrl = brandLogoUrl,
         )
     }
 
