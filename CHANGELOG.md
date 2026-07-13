@@ -18,6 +18,14 @@ Rules:
 
 ---
 
+## v0.1.90
+
+- **Product card now closes itself.** When a shopper taps a product card open to
+  read the description, it automatically collapses back to the compact price view
+  after 15 seconds — so if someone taps and walks away, the card doesn't stay open
+  over the video. Tapping it again still closes it instantly, and a new product
+  starts compact.
+
 ## v0.1.89
 
 - **Turn the product card on/off from the screen itself.** The **Pricing &
