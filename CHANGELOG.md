@@ -18,6 +18,15 @@ Rules:
 
 ---
 
+## v0.1.91
+
+- **Fixed (for real this time): tapping the product card now expands it.** The
+  earlier fix didn't work — the invisible layer that watches for the staff-unlock
+  corner taps was sitting over the whole screen and blocking every tap from
+  reaching the card underneath it. The card now sits in front of that layer, so a
+  tap opens the description as intended, while the staff four-corner unlock still
+  works. (Touch screens only; TV-style screens keep auto-cycling the card.)
+
 ## v0.1.90
 
 - **Product card now closes itself.** When a shopper taps a product card open to

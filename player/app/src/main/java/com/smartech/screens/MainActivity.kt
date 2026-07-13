@@ -18,8 +18,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
+import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.player.PlayerController
 import com.smartech.screens.player.PlayerScreen
+import com.smartech.screens.player.ProductInfoCardOverlay
 import com.smartech.screens.player.TabletCommandPalette
 import com.smartech.screens.staff.HoldProgressIndicator
 import com.smartech.screens.staff.OnboardingScreen
@@ -271,6 +273,36 @@ class MainActivity : ComponentActivity() {
                             staffOverlayVisible.value = visible
                         },
                     )
+
+                    // Shopper-facing product-info card. Deliberately composed
+                    // ABOVE StaffOverlay so it sits in front of the invisible
+                    // four-corner unlock catcher. That catcher is a full-screen
+                    // pointerInput; because Compose's
+                    // sharePointerInputWithSiblings defaults to false, a
+                    // full-screen pointer sibling swallows every tap before it
+                    // reaches a layer behind it — which is why tap-to-expand
+                    // never fired while the card lived inside PlayerScreen
+                    // (below the catcher). In front, the card's own clickable
+                    // wins taps on its bounds while corner taps outside it still
+                    // reach the catcher. Hidden while the staff overlay is up so
+                    // it never paints over the PIN / menu.
+                    val cardEnabled by repo.productCardFlow.collectAsState()
+                    val cardMediaId by controller.currentMediaIdFlow.collectAsState()
+                    val cardCity by repo.store.locCity.collectAsState(initial = null)
+                    val cardState by repo.state.collectAsState()
+                    val staffUp by staffOverlayVisible.collectAsState()
+                    if (!staffUp) {
+                        val playingItems = (cardState as? PlayerRepository.State.Playing)
+                            ?.items?.map { it.item } ?: emptyList()
+                        val currentItem = cardMediaId?.let { id ->
+                            playingItems.firstOrNull { it.id == id }
+                        }
+                        ProductInfoCardOverlay(
+                            enabled = cardEnabled,
+                            item = currentItem,
+                            city = cardCity,
+                        )
+                    }
 
                     if (!onboarded) {
                         OnboardingScreen(repository = repo, onDone = { /* state flow flips automatically */ })
