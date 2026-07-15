@@ -1319,6 +1319,13 @@ def _ensure_screen_state(device_id: str) -> dict:
             "pushedAt": None,
             "mixSplash": True,                    # bundled splash mixed in by default
             "productCard": False,                 # v0.1.86: shopper-facing product info card — opt-in per screen via /api/screens/<id>/product-card
+            # v0.1.92: guided brand experience. When set to an https URL the
+            # screen keeps playing its normal loop to attract, but shows a
+            # "tap to explore" prompt; a tap opens that URL fullscreen in a
+            # locked-down kiosk WebView, and it returns to the loop after an
+            # idle timeout. None = ordinary video-only screen. Set via
+            # /api/screens/<id>/experience.
+            "experienceUrl": None,
             "audioOn": False,                     # screen-wide audio is muted by default — see /api/screens/<id>/audio
             "pollMode": DEFAULT_POLL_MODE,        # "fast" | "normal" | "slow" — see /api/screens/<id>/poll-mode
             "syncGroup": None,                    # see _compute_playback / /api/screens/<id>/sync-group
@@ -2919,6 +2926,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # while it's a group member.
                         "mixSplash":   False if sync_group_id else s["mixSplash"],
                         "productCard": bool(s.get("productCard")),   # v0.1.86: on-screen product info card
+                        "experienceUrl": s.get("experienceUrl"),     # v0.1.92: guided brand experience (kiosk WebView), null = off
                         "audioOn":     s.get("audioOn", False),
                         "pollMode":    poll_mode,
                         # lowDataMode kept in the payload for old tablets
@@ -3005,6 +3013,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "currentItems":          state.get("items", []),
                         "mixSplash":             state.get("mixSplash", True),
                         "productCard":           bool(state.get("productCard")),   # v0.1.86
+                        "experienceUrl":         state.get("experienceUrl"),       # v0.1.92
                         "audioOn":               state.get("audioOn", False),
                         "pollMode":              pm,
                         "lowDataMode":           pm == "slow",
@@ -3867,6 +3876,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/playlist        { items: [...], mode: "replace"|"append" }
         # POST /api/screens/<deviceId>/mix-splash      { mixSplash: bool }
         # POST /api/screens/<deviceId>/product-card    { productCard: bool }
+        # POST /api/screens/<deviceId>/experience      { experienceUrl: string|null }
         # POST /api/screens/<deviceId>/audio           { audioOn: bool }
         # POST /api/screens/<deviceId>/poll-mode       { pollMode: "fast"|"normal"|"slow" }
         # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }   (legacy — writes pollMode)
@@ -3874,7 +3884,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/display-mode    { displayMode: int | null }
         # POST /api/screens/<deviceId>/name            { name: string }
         # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|audio|poll-mode|low-data-mode|sync-group|display-mode|name|location)$", path)
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|audio|poll-mode|low-data-mode|sync-group|display-mode|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -4065,6 +4075,40 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state["revision"] += 1
                     _save_per_screen()
                     self._send_json({"ok": True, "productCard": state["productCard"]})
+                    return
+                if action == "experience":
+                    # v0.1.92: point this screen at a guided brand experience
+                    # (e.g. the WHOOP demo). null/"" clears it back to a plain
+                    # video screen. Deliberately CMS-only (not in
+                    # SELF_EDIT_ACTIONS): this decides what URL a kiosk
+                    # WebView loads on a shop-floor device, so it stays behind
+                    # the screens.push permission rather than being something a
+                    # tablet can set for itself.
+                    raw = body.get("experienceUrl")
+                    url = (raw or "").strip()
+                    if url:
+                        parsed = urllib.parse.urlparse(url)
+                        # https only — the player pins navigation to this
+                        # origin, and an http page would be trivially
+                        # tamperable on store wifi.
+                        if parsed.scheme != "https" or not parsed.netloc:
+                            self.send_error(400, "experienceUrl must be an absolute https:// URL")
+                            return
+                    else:
+                        url = None
+                    state = _ensure_screen_state(device_id)
+                    state["experienceUrl"] = url
+                    state["revision"] += 1      # bump so the tablet re-polls promptly
+                    _save_per_screen()
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    _log_activity(
+                        kind="settings",
+                        text=(f"Guided experience set on {screen_name}" if url
+                              else f"Guided experience cleared on {screen_name}"),
+                        icon="settings",
+                        target=device_id,
+                    )
+                    self._send_json({"ok": True, "experienceUrl": state["experienceUrl"]})
                     return
                 if action == "audio":
                     state = _ensure_screen_state(device_id)
