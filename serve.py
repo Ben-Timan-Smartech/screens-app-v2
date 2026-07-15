@@ -50,6 +50,13 @@ import auth        # noqa: E402
 PROJECT = Path(__file__).resolve().parent
 APP_DIR = PROJECT / "app"
 BRAND_DIR = PROJECT / "brand"           # logos, favicons, wordmark
+# v0.1.92: guided brand experiences — self-contained, single-file HTML with no
+# external assets (see interactive/README.md). Served public + read-only at
+# /interactive/<name>.html; the tablet downloads one once and caches it, then
+# renders from the local copy, so the experience runs with no network. Kept in
+# the repo (not the uploads bucket) so content is versioned + code-reviewed and
+# ships on a normal server deploy — no APK release needed to change it.
+INTERACTIVE_DIR = PROJECT / "interactive"
 
 # App version, read once at module load from the VERSION file at the repo
 # root. Surfaced via /api/auth/me so the CMS sidebar can show "v0.1.2"
@@ -2301,6 +2308,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # straight to the proxy. Works on networks that block
         # GitHub's CDN host directly.
         raw_path = self.path.split("?", 1)[0].rstrip("/")
+        # v0.1.92: guided brand experiences. Public + read-only: the tablet
+        # fetches the HTML once and caches it locally (same deal as /media
+        # videos), so this must not sit behind a CMS session.
+        if raw_path.startswith("/interactive/"):
+            self._serve_interactive(raw_path); return
         if raw_path == "/apk":
             self._serve_release_download("modern"); return
         if raw_path == "/apk/legacy":
@@ -4645,6 +4657,40 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(body)
         except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
             return
+
+    def _serve_interactive(self, raw_path: str) -> None:
+        """Serve a guided-experience HTML file from INTERACTIVE_DIR.
+
+        Public + read-only. Only bare `<name>.html` inside the directory is
+        reachable: the name is matched against a strict pattern and the
+        resolved path is re-checked to be inside INTERACTIVE_DIR, so `..`
+        or an absolute path can't climb out and serve the repo (serve.py,
+        secrets.json, ...) to an anonymous caller.
+        """
+        name = urllib.parse.unquote(raw_path[len("/interactive/"):])
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}\.html", name):
+            self.send_error(404, "Not found"); return
+        target = (INTERACTIVE_DIR / name).resolve()
+        try:
+            inside = target.is_relative_to(INTERACTIVE_DIR.resolve())
+        except AttributeError:                       # py<3.9 safety net
+            inside = str(target).startswith(str(INTERACTIVE_DIR.resolve()))
+        if not inside or not target.is_file():
+            self.send_error(404, "Not found"); return
+        try:
+            body = target.read_bytes()
+        except OSError as e:
+            print(f"[interactive] read failed for {name}: {e}", file=sys.stderr)
+            self.send_error(404, "Not found"); return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        # Always revalidate: the tablet caches its own copy anyway, and this
+        # way a redeploy of the experience reaches devices on their next pull.
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _serve_release_download(self, flavor: str) -> None:
         """Stream the latest release's modern or legacy APK to the client.
