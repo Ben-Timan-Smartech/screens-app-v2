@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -31,6 +32,7 @@ import com.smartech.screens.update.UpdaterOverlay
 import com.smartech.screens.util.DisplayModes
 import com.smartech.screens.util.InputMode
 import com.smartech.screens.util.LogBuffer
+import com.smartech.screens.util.cornerZoneDp
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -110,6 +112,35 @@ class MainActivity : ComponentActivity() {
 
     /** True between unlock-firing and the matching ACTION_UP. */
     private var unlockFiredThisHold = false
+
+    // ── Four-corner staff unlock (touch) ─────────────────────────────
+    //
+    // v0.2.7: detected HERE, at the Activity, instead of by an overlay of
+    // pointer-input Boxes sitting in the four corners.
+    //
+    // The overlay approach had to block to observe. Compose's
+    // sharePointerInputWithSiblings defaults to false, so a Box with
+    // pointerInput swallows every touch in its bounds before anything behind it
+    // is even hit-tested — not-consuming doesn't help. So the four corners of
+    // the screen became dead to whatever was underneath. That's fine over a bare
+    // video, and actively wrong over interactive content: the WHOOP deck keeps
+    // its chapter pips in the top-right and its Back/Next buttons in the bottom
+    // corners, and the catcher ate all of them. Every future experience would
+    // hit the same thing, because corners are where UI naturally goes.
+    //
+    // dispatchTouchEvent sees every touch BEFORE the view hierarchy does, and
+    // passing it straight to super means we observe without taking anything: the
+    // WebView, the product card and the Next control all still get their taps.
+    // It also reaches into the WebView, which a Compose overlay never could —
+    // that's a native View, so Compose's pointer input can't see inside it
+    // regardless of z-order.
+    //
+    // Same shape as the hold-OK gesture below: the Activity watches the raw
+    // input stream and emits on [unlockBus]; StaffOverlay just collects it.
+    private var cornerStep = 0
+    private var lastCornerTapAtMs = 0L
+    /** Cached in onCreate — a TV has no touchscreen, so it uses hold-OK instead. */
+    private var isTvLike = false
 
     /** The keycode that started the current hold; 0 when no hold in progress. */
     private var holdKeyCode = 0
@@ -225,6 +256,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val tvLike = InputMode.isTvLike(this)
+        isTvLike = tvLike
         Log.i(
             TAG,
             "Input mode: tvLike=$tvLike hasTouch=${InputMode.hasTouch(this)} " +
@@ -265,7 +297,6 @@ class MainActivity : ComponentActivity() {
                     StaffOverlay(
                         repository = repo,
                         onPickVideo = onPick,
-                        tvLike = tvLike,
                         externalUnlock = unlockBus,
                         // Track overlay visibility so dispatchKeyEvent can
                         // gate the hold-OK detection — see the property
@@ -381,6 +412,78 @@ class MainActivity : ComponentActivity() {
      *     button under the cursor would activate the moment the user lets
      *     go.
      */
+    /**
+     * Watch every touch for the four-corner staff unlock — and take none of them.
+     *
+     * ALWAYS returns super.dispatchTouchEvent(ev). This method observes; it never
+     * consumes. That's the whole point: the corners stay live for whatever is
+     * underneath (an experience's own buttons, the product card, Next), while the
+     * unlock sequence is still recognised. See the field declarations up top for
+     * why the previous overlay couldn't do both.
+     */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN &&
+            !isTvLike &&                       // TVs unlock by holding OK
+            !staffOverlayVisible.value          // don't re-arm inside the staff UI
+        ) {
+            noteCornerTap(ev.x, ev.y)
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    /**
+     * Advance the top-left → top-right → bottom-right → bottom-left sequence.
+     *
+     * A tap outside every corner is IGNORED rather than treated as a reset: the
+     * middle of the screen belongs to the content, and a customer poking a video
+     * shouldn't quietly break a staff member's sequence. A tap on the WRONG
+     * corner does reset (tapping top-left always restarts), and the sequence
+     * expires after [CORNER_TIMEOUT_MS] of no corner taps — so stray corner
+     * presses hours apart can never add up to an unlock.
+     */
+    private fun noteCornerTap(x: Float, y: Float) {
+        val w = window.decorView.width.toFloat()
+        val h = window.decorView.height.toFloat()
+        if (w <= 0f || h <= 0f) return          // not laid out yet
+
+        val size = cornerSizePx(w, h)
+        val left = x <= size
+        val right = x >= w - size
+        val top = y <= size
+        val bottom = y >= h - size
+        val index = when {
+            top && left -> 0
+            top && right -> 1
+            bottom && right -> 2
+            bottom && left -> 3
+            else -> return                       // content's touch, not ours
+        }
+
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastCornerTapAtMs > CORNER_TIMEOUT_MS) cornerStep = 0
+        lastCornerTapAtMs = now
+        when {
+            index == cornerStep -> {
+                cornerStep++
+                if (cornerStep == 4) {
+                    cornerStep = 0
+                    Log.i(TAG, "Four-corner staff unlock fired")
+                    LogBuffer.i(TAG, "Four-corner staff unlock fired")
+                    unlockBus.tryEmit(Unit)
+                }
+            }
+            index == 0 -> cornerStep = 1         // top-left always restarts
+            else -> cornerStep = 0
+        }
+    }
+
+    /** Edge length of each corner zone in px — see [cornerZoneDp] for the rule. */
+    private fun cornerSizePx(w: Float, h: Float): Float {
+        val density = resources.displayMetrics.density
+        val shorterDp = (if (w < h) w else h) / density
+        return cornerZoneDp(shorterDp) * density
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val k = event.keyCode
         // v0.1.29: USB-keyboard `/` opens the tablet-side command
@@ -479,6 +582,15 @@ class MainActivity : ComponentActivity() {
          * members won't dismiss it as broken.
          */
         const val HOLD_THRESHOLD_MS = 1_500L
+
+        /**
+         * How long a partial corner sequence stays alive, in ms.
+         *
+         * Matches the timeout the old overlay used. Without it, four corner
+         * taps spread across a whole day would eventually add up to an unlock;
+         * with it, the taps have to look deliberate.
+         */
+        const val CORNER_TIMEOUT_MS = 4_000L
 
         /**
          * Every keycode we treat as "OK / Select" across the various TV

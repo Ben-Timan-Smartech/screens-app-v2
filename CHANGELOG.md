@@ -18,6 +18,29 @@ Rules:
 
 ---
 
+## v0.2.7
+
+- **The staff unlock no longer blocks the four corners of the screen.** To
+  notice the four-corner tap, the app used to put an invisible catcher over each
+  corner — and anything sitting under a catcher never got the tap at all. So the
+  corners were dead to everything else. That's why the WHOOP deck's own buttons
+  wouldn't respond: its chapter dots sit top-right and its Back/Next buttons sit
+  in the bottom corners, right under the catchers.
+
+  The app now watches for the corner taps at the window instead, and passes
+  every tap straight through to whatever is underneath. The whole screen is live
+  again — an experience's own buttons work wherever it puts them, including in
+  the corners.
+
+  Nothing changes about how you get in: same four corners, same order
+  (top-left → top-right → bottom-right → bottom-left), same 4-second window, and
+  on the retail tablets the corners are exactly the size they were. TV screens
+  are unaffected — they still unlock by holding OK.
+
+  **Needs the v0.2.7 APK on the screen.** This one is worth verifying on a real
+  screen after installing: it changes how touches are handled, which is not
+  something we can fully check before it's on a device.
+
 ## v0.2.6
 
 - **Uploading an experience now warns you if it won't work on the older
