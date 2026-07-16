@@ -1043,6 +1043,7 @@ const ExperiencesPane = ({ canManage, isMobile }) => {
   const { experiences, loading, error, reload } = useExperiences();
   const [busy, setBusy] = React.useState(false);
   const [uploadErr, setUploadErr] = React.useState(null);
+  const [uploadWarn, setUploadWarn] = React.useState(null);
   const fileRef = React.useRef(null);
 
   const onPick = async (e) => {
@@ -1053,6 +1054,15 @@ const ExperiencesPane = ({ canManage, isMobile }) => {
     setBusy(true);
     try {
       const res = await uploadExperience({ file, name: file.name.replace(/\.html?$/i, '') });
+      // v0.2.6: the upload succeeded, but the page may use CSS the oldest
+      // screens can't render. Inline and persistent, like the reject above —
+      // a toast would vanish, and vanishing is how this class of bug gets
+      // discovered from a shop floor instead of from here.
+      setUploadWarn(
+        (res.warnings && res.warnings.length)
+          ? { name: res.experience?.name || file.name, list: res.warnings, chrome: res.legacyChrome }
+          : null
+      );
       showToast(`Uploaded “${res.experience?.name || file.name}”`, 'ok');
       reload();
     } catch (err) {
@@ -1114,6 +1124,32 @@ const ExperiencesPane = ({ canManage, isMobile }) => {
           <div style={{ color: 'var(--ink-3)' }}>{uploadErr}</div>
           <div style={{ marginTop: 8 }}>
             <Button variant="ghost" size="sm" onClick={() => setUploadErr(null)}>Dismiss</Button>
+          </div>
+        </div>
+      )}
+
+      {/* v0.2.6: uploaded fine, but won't render right on the oldest screens.
+          Amber not red — the file is in the library and usable; this is a
+          "know before you put it on a legacy box" notice, not a failure. */}
+      {uploadWarn && (
+        <div style={{
+          border: '1px solid var(--warn, #e8a33d)', borderRadius: 8,
+          background: 'var(--ink-9)', padding: '12px 14px', marginBottom: 16,
+          fontSize: 12, color: 'var(--ink-1)', lineHeight: 1.5,
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            “{uploadWarn.name}” uploaded — but it won’t render correctly on your oldest screens
+          </div>
+          <div style={{ color: 'var(--ink-3)', marginBottom: 6 }}>
+            Those run Chrome {uploadWarn.chrome}, which silently ignores newer CSS: the rule is
+            dropped, nothing errors, and the layout just breaks on the screen. Modern screens are
+            unaffected.
+          </div>
+          <ul style={{ margin: '0 0 0 16px', padding: 0, color: 'var(--ink-3)' }}>
+            {uploadWarn.list.map((w, i) => <li key={i} style={{ marginBottom: 4 }}>{w}</li>)}
+          </ul>
+          <div style={{ marginTop: 8 }}>
+            <Button variant="ghost" size="sm" onClick={() => setUploadWarn(null)}>Dismiss</Button>
           </div>
         </div>
       )}

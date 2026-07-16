@@ -18,6 +18,20 @@ Rules:
 
 ---
 
+## v0.2.6
+
+- **Uploading an experience now warns you if it won't work on the older
+  screens.** The oldest screens on the fleet run a 2020-era browser that
+  silently ignores newer CSS — the styling is simply dropped, nothing reports
+  an error, and the layout breaks only once it's on a screen in front of a
+  customer. That's exactly how the WHOOP deck came out small: one line that
+  makes it fill the screen was too new for those boxes, so it did nothing.
+
+  The upload now checks for that and tells you plainly — which features, how
+  many times each, and what to use instead. It's a **warning, not a rejection**:
+  the file still uploads and is fine on modern screens. It just means you find
+  out here, in a second, rather than from a shop floor.
+
 ## v0.2.5
 
 - **Deleting a guided experience now actually removes it from your screens.**
