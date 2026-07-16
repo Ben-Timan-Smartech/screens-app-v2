@@ -38,6 +38,8 @@ fun PlayerScreen(
     val mixSplash by repository.mixSplashFlow.collectAsState()
     // v0.1.92: guided brand experience for this screen (null = plain video).
     val experienceUrl by repository.experienceUrlFlow.collectAsState()
+    // v0.1.95: where its attract prompt sits — "top" (default) or "bottom".
+    val experiencePromptPos by repository.experiencePromptPosFlow.collectAsState()
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
@@ -142,6 +144,9 @@ fun PlayerScreen(
         // corners-only (see CornerUnlockOverlay), so the four corners still
         // reach staff unlock while the rest of the screen drives the
         // experience. No-ops when the screen has no experienceUrl set.
-        ExperienceOverlay(experienceUrl = experienceUrl)
+        ExperienceOverlay(
+            experienceUrl = experienceUrl,
+            promptPosition = experiencePromptPos,
+        )
     }
 }

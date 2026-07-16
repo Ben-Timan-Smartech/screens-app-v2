@@ -450,11 +450,17 @@ const setScreenProductCard = async (deviceId, productCard) => {
 // a guided brand experience (an interactive HTML page the tablet caches +
 // runs offline in a kiosk WebView). Pass a bare https URL to set it, or null /
 // '' to clear it back to a plain video screen. Server enforces https + absolute.
-const setScreenExperience = async (deviceId, experienceUrl) => {
+// v0.1.95: partial update — pass only the fields you want to change, so the
+// prompt can be moved without re-sending the URL. promptPosition: 'top'|'bottom'.
+const setScreenExperience = async (deviceId, patch) => {
+  // Back-compat: older callers passed the URL (or null) directly.
+  const body = (patch && typeof patch === 'object')
+    ? patch
+    : { experienceUrl: patch || null };
   const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/experience`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ experienceUrl: experienceUrl || null }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     let msg = `experience failed: ${res.status}`;

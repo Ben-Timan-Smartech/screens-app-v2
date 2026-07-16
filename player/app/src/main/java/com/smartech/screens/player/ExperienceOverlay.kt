@@ -70,6 +70,8 @@ import java.io.File
 @Composable
 fun ExperienceOverlay(
     experienceUrl: String?,
+    /** v0.1.95: "top" (default) or "bottom" — operator-selectable per screen. */
+    promptPosition: String = "top",
 ) {
     if (experienceUrl.isNullOrBlank()) return
 
@@ -109,17 +111,19 @@ fun ExperienceOverlay(
         ExperienceWebView(
             file = file,
             onInteraction = { interactionTick++ },
+            onExit = { launched = false },
         )
     } else if (!launched && file != null) {
-        // Attract prompt — centred, well clear of the corners.
-        AttractPrompt(onLaunch = { launched = true })
+        // Attract prompt — top or bottom, always clear of the corners.
+        AttractPrompt(position = promptPosition, onLaunch = { launched = true })
     }
     // file == null: still fetching (or offline first-run with no cache) — show
     // nothing and let the video attract loop play until the cache lands.
 }
 
 @Composable
-private fun AttractPrompt(onLaunch: () -> Unit) {
+private fun AttractPrompt(position: String, onLaunch: () -> Unit) {
+    val atBottom = position.equals("bottom", ignoreCase = true)
     val pulse = rememberInfiniteTransition(label = "attractPulse")
     val glow by pulse.animateFloat(
         initialValue = 0.72f,
@@ -133,14 +137,14 @@ private fun AttractPrompt(onLaunch: () -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
-            .padding(top = 24.dp),
-        contentAlignment = Alignment.TopCenter,
+            .padding(top = if (atBottom) 0.dp else 24.dp, bottom = if (atBottom) 24.dp else 0.dp),
+        contentAlignment = if (atBottom) Alignment.BottomCenter else Alignment.TopCenter,
     ) {
-        // A small pill at the top — deliberately NOT in a corner: all four
-        // corners are the staff-unlock zones (see CornerUnlockOverlay, 180dp
-        // each), and a tap landing in one would drive the unlock sequence
+        // A small pill at the top or bottom — deliberately NOT in a corner: all
+        // four corners are the staff-unlock zones (see CornerUnlockOverlay,
+        // 180dp each), and a tap landing in one would drive the unlock sequence
         // instead of opening the experience. Horizontally centring the pill
-        // keeps it clear of the top-left/top-right zones at any sane screen
+        // keeps it clear of those zones at either edge, at any sane screen
         // width, while leaving the video attract loop almost fully visible.
         Text(
             "TAP TO EXPLORE",
@@ -167,6 +171,7 @@ private fun AttractPrompt(onLaunch: () -> Unit) {
 private fun ExperienceWebView(
     file: File,
     onInteraction: () -> Unit,
+    onExit: () -> Unit,
 ) {
     val fileUrl = remember(file) { "file://${file.absolutePath}" }
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -213,6 +218,35 @@ private fun ExperienceWebView(
                 wv.loadUrl("about:blank")
                 wv.destroy()
             },
+        )
+
+        // Exit chrome — drawn by the PLAYER over the WebView, not by the
+        // experience itself, so every experience (including ones uploaded
+        // later) gets a way out for free and no brand has to remember to build
+        // one. Without this a customer's only exits are the idle timeout or a
+        // Back button a touch screen doesn't have.
+        //
+        // Top-centre: clear of the four corner staff-unlock zones (a tap there
+        // would drive the unlock sequence instead of exiting). Composed after
+        // the AndroidView so it sits in front of the WebView and wins the tap.
+        Text(
+            "← BACK TO VIDEO",
+            color = Color(0xFFF7F6F2),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 1.6.sp,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 12.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(Color(0xCC101010))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { onExit() }
+                // ~40dp tall — a deliberate, easy target without stealing much
+                // of the experience's own header area.
+                .padding(horizontal = 20.dp, vertical = 12.dp),
         )
     }
 }
