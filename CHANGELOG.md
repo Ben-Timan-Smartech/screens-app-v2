@@ -18,6 +18,16 @@ Rules:
 
 ---
 
+## v0.2.4
+
+- **Fixed: an uploaded experience never appeared in the "Guided experience"
+  dropdown.** You could upload an interactive experience and see it in the
+  Content library, but the only place that puts one on a screen was reading
+  from a fixed list of one — so there was no way to actually use anything you
+  uploaded. The dropdown now lists everything in the library: the built-in
+  experiences and your uploads, marked "(uploaded)". It also now shows the
+  second built-in, which had been missing for the same reason.
+
 ## v0.2.3
 
 - **Fixed: a rejected experience upload took the whole CMS down.** If you

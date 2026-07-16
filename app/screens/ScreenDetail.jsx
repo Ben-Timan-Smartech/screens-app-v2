@@ -600,18 +600,27 @@ const ToggleRow = ({ label, sub, value, onChange, disabled }) => (
 // v0.1.92: known guided experiences (self-contained interactive HTML served
 // from the CMS at /interactive/<name>.html and cached on the tablet). Add a
 // row here when a new brand experience is vendored into interactive/.
-const KNOWN_EXPERIENCES = [
-  { path: '/interactive/whoop-demo.html', label: 'WHOOP — Guided demo' },
-];
-
 // Experience picker — points a screen at a guided brand experience (offline
 // interactive HTML) or clears it back to a plain video screen. A tap on the
-// screen opens it; it idles back to the video loop. Absolute https URL is
-// built from the CMS origin so the tablet fetches it from the same host.
+// screen opens it; it idles back to the video loop.
+//
+// v0.2.4: the options come from /api/experiences (the same list the Content
+// library's Experiences pane shows), not a hard-coded array. This used to be a
+// literal `KNOWN_EXPERIENCES = [{ whoop-demo }]`, which meant the upload
+// feature shipped in v0.1.96 was only half-connected: you could upload an
+// experience and see it in the library, but it could never appear here, so
+// there was no way to actually put it on a screen short of pasting a URL. It
+// didn't even list the second built-in.
 const ExperienceRow = ({ value, onChange, position, onPositionChange, disabled, isLive }) => {
+  const { experiences, loading: expLoading } = useExperiences();
   const current = value || '';
-  const known = KNOWN_EXPERIENCES.find((e) => current.endsWith(e.path));
-  const selectVal = current === '' ? '' : (known ? known.path : '__custom__');
+  // Match on the absolute URL the server reports. While the list is still
+  // loading we can't know whether `current` is a known experience, so hold the
+  // select on the current value rather than briefly flashing "Custom:".
+  const known = experiences.find((e) => e.url === current);
+  const selectVal = current === ''
+    ? ''
+    : (known ? known.url : (expLoading ? current : '__custom__'));
   // v0.1.95: top/bottom only — a corner would sit under the staff-unlock zones
   // and swallow the customer's tap, so those aren't offered.
   const pos = position === 'bottom' ? 'bottom' : 'top';
@@ -639,7 +648,9 @@ const ExperienceRow = ({ value, onChange, position, onPositionChange, disabled, 
           onChange={(e) => {
             const v = e.target.value;
             if (v === '') { onChange(null); return; }
-            onChange(`${window.location.origin}${v}`);
+            // The API already reports an absolute URL on this origin, so it
+            // goes to the tablet as-is.
+            onChange(v);
           }}
           style={{
             fontSize: 12, padding: '6px 8px', borderRadius: 6,
@@ -647,9 +658,16 @@ const ExperienceRow = ({ value, onChange, position, onPositionChange, disabled, 
             opacity: disabled ? 0.5 : 1, maxWidth: 200,
           }}>
           <option value="">Off (plain video)</option>
-          {KNOWN_EXPERIENCES.map((e) => (
-            <option key={e.path} value={e.path}>{e.label}</option>
+          {experiences.map((e) => (
+            <option key={e.id} value={e.url}>
+              {e.name}{e.builtin ? '' : ' (uploaded)'}
+            </option>
           ))}
+          {/* Keep the current value selectable while the list loads, so the
+              picker never momentarily reads as though nothing is set. */}
+          {expLoading && current !== '' && !known && (
+            <option value={current}>{current.split('/').pop()}</option>
+          )}
           {selectVal === '__custom__' && <option value="__custom__">Custom: {current}</option>}
         </select>
       </div>
