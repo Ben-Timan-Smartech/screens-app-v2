@@ -3,8 +3,6 @@ package com.smartech.screens.staff
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +36,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.smartech.screens.data.PlayerRepository
@@ -210,21 +209,32 @@ fun PlaylistView(
         rail = {
             Column(Modifier.fillMaxSize()) {
                 Text("Now playing".uppercase(), color = Color(0x73FFFFFF), fontSize = 11.sp, letterSpacing = 1.6.sp)
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(if (compact) 8.dp else 14.dp))
+                // v0.2.0 shipped this still at 30.sp: the shared Rail in
+                // StaffScreens got compact type, but this screen has its own
+                // inline rail and was missed. Stacked as a header on a phone
+                // the heading and its blurb ate most of the band, pushing the
+                // toggles below the fold — see the Nothing Phone 1 screenshot
+                // that caught it.
                 Text(
                     "What's on this screen",
-                    color = Bone, fontSize = 30.sp, fontWeight = FontWeight.Medium,
+                    color = Bone,
+                    fontSize = if (compact) 20.sp else 30.sp,
+                    fontWeight = FontWeight.Medium,
                 )
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(if (compact) 6.dp else 14.dp))
                 Text(
-                    if (items.isEmpty())
-                        "Nothing pushed yet — splash is looping. Tap Add content to put a video on."
-                    else
-                        "Tap × to remove a video. Tap Add content to put more on. Splash mixing toggle below.",
-                    color = Color(0x99FFFFFF), fontSize = 14.sp,
+                    when {
+                        items.isEmpty() && compact -> "Nothing pushed yet — splash is looping."
+                        items.isEmpty() -> "Nothing pushed yet — splash is looping. Tap Add content to put a video on."
+                        compact -> "Tap × to remove. Add content to put more on."
+                        else -> "Tap × to remove a video. Tap Add content to put more on. Splash mixing toggle below."
+                    },
+                    color = Color(0x99FFFFFF), fontSize = if (compact) 12.sp else 14.sp,
                 )
 
                 Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(if (compact) 14.dp else 0.dp))
 
                 // Product info card toggle — shows the price + short
                 // description over each product's video. Timing-neutral,
@@ -579,18 +589,9 @@ fun PlaylistView(
             Spacer(Modifier.height(if (compact) 12.dp else 20.dp))
 
             // Footer actions — left-aligned editing actions, right-aligned
-            // navigation. Final layout:
+            // navigation. On a screen with room:
             //   [+ Add content] [Clear all]  ...  [Device admin] [Done]
-            // v0.2.0: four buttons don't fit across a phone. Scrolling the row
-            // keeps every action reachable; the weight(1f) spacer below
-            // collapses to zero once the row is scrollable, so they simply sit
-            // together in reading order rather than pushed to opposite edges.
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .then(if (compact) Modifier.horizontalScroll(rememberScrollState()) else Modifier),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            val addContentBtn: @Composable () -> Unit = {
                 // + Add content — primary edit, left-most.
                 Box(
                     Modifier
@@ -598,12 +599,13 @@ fun PlaylistView(
                         .clip(RoundedCornerShape(6.dp))
                         .background(Ink)
                         .clickable { onAddContent() }
-                        .padding(horizontal = 22.dp),
+                        .padding(horizontal = if (compact) 16.dp else 22.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text("+ Add content", color = Bone, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                 }
-                Spacer(Modifier.width(12.dp))
+            }
+            val clearAllBtn: @Composable () -> Unit = {
                 // Clear all — destructive, disabled when nothing to clear.
                 Box(
                     Modifier
@@ -612,7 +614,7 @@ fun PlaylistView(
                         .background(BoneSoft)
                         .border(1.dp, BoneLine, RoundedCornerShape(6.dp))
                         .clickable(enabled = items.isNotEmpty()) { confirmClear = true }
-                        .padding(horizontal = 18.dp),
+                        .padding(horizontal = if (compact) 14.dp else 18.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
@@ -621,21 +623,19 @@ fun PlaylistView(
                         fontSize = 15.sp, fontWeight = FontWeight.Medium,
                     )
                 }
-
-                Spacer(Modifier.weight(1f))
-
-                if (user.role == UserDirectory.Role.SUPER_ADMIN) {
-                    Text(
-                        "Device admin", color = Muted, fontSize = 16.sp,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .clickable { onOpenDeviceAdmin() }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                    )
-                    Spacer(Modifier.width(12.dp))
-                }
-                // Done — primary confirm/exit, far right. Green fill so it
-                // reads as a proper button, not a text link.
+            }
+            val deviceAdminBtn: @Composable () -> Unit = {
+                Text(
+                    "Device admin", color = Muted, fontSize = 16.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable { onOpenDeviceAdmin() }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            }
+            val doneBtn: @Composable () -> Unit = {
+                // Done — primary confirm/exit. Green fill so it reads as a
+                // proper button, not a text link.
                 Box(
                     Modifier
                         .height(48.dp)
@@ -645,12 +645,41 @@ fun PlaylistView(
                         .padding(horizontal = 22.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        "Done",
-                        color = Bone,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
+                    Text("Done", color = Bone, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                }
+            }
+
+            if (compact) {
+                // Four buttons don't fit across a phone. v0.2.0 made the row
+                // horizontally scrollable, which technically kept them all
+                // reachable — but it put **Done**, the way out of this screen,
+                // off the right edge as a green sliver you had to know to
+                // scroll to. A hidden exit isn't a working exit. Two rows
+                // instead: edits on top, navigation underneath, everything
+                // visible without scrolling.
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        addContentBtn()
+                        Spacer(Modifier.width(10.dp))
+                        clearAllBtn()
+                    }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        if (user.role == UserDirectory.Role.SUPER_ADMIN) deviceAdminBtn()
+                        Spacer(Modifier.weight(1f))
+                        doneBtn()
+                    }
+                }
+            } else {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    addContentBtn()
+                    Spacer(Modifier.width(12.dp))
+                    clearAllBtn()
+                    Spacer(Modifier.weight(1f))
+                    if (user.role == UserDirectory.Role.SUPER_ADMIN) {
+                        deviceAdminBtn()
+                        Spacer(Modifier.width(12.dp))
+                    }
+                    doneBtn()
                 }
             }
         }
@@ -695,7 +724,18 @@ private fun PlaylistRow(
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(video.title, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                // v0.2.0: unbounded. Real catalogue titles are long ("WHOOP
+                // LIFE 12 MONTH MEMBERSHIP Mg DEVICE HEALTH & FITNESS TRACKER
+                // OBSIDIAN TITANIUM Horizontal 1080p") and wrapped to six lines
+                // on a phone, so one video filled the list. Two lines is enough
+                // to tell two videos apart; the brand/product line underneath
+                // carries the rest.
+                Text(
+                    video.title,
+                    color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium,
+                    maxLines = if (compactPane()) 2 else Int.MAX_VALUE,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text(
                     listOfNotNull(
                         video.brand,
@@ -703,6 +743,8 @@ private fun PlaylistRow(
                         video.durationSec?.let { "${it}s" },
                     ).joinToString(" · "),
                     color = Muted, fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             ReorderButton(label = "▲", enabled = canMoveUp, onClick = onMoveUp)

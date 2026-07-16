@@ -18,6 +18,38 @@ Rules:
 
 ---
 
+## v0.2.2
+
+- **Fixed: the CMS could go down for a minute at a time, on its own.** Symptoms
+  were "Service unavailable", "Rate exceeded", or the whole system refusing to
+  load — and anything you were doing at the time (like uploading an experience)
+  silently failing. This was not caused by whatever you were uploading.
+
+  The screens' state is kept in two files in cloud storage, and cloud storage
+  only accepts about **one write per second to a given file**. Every screen's
+  check-in rewrote the whole screens file, and every click in the CMS rewrote
+  the whole users file. With 28 screens on the fleet that was already ~1.35
+  writes a second before anyone touched the CMS — permanently over the limit.
+  Storage then started refusing writes, the refused writes backed up, and
+  because the service runs as a single instance there was nothing else to serve
+  you: the CMS went dark until the backlog cleared.
+
+  Both files are now written at most once every few seconds instead of on every
+  check-in and every click. Nothing is lost — the data is still updated
+  instantly in memory, so screens, statuses and the UI are exactly as live as
+  before. This got worse with every screen added, so it would only have become
+  more frequent.
+
+## v0.2.1
+
+- **Phone polish, from a real phone.** v0.2.0 made the staff screens *fit* on a
+  phone; this makes them usable. On the playlist screen the heading was still
+  sized for a 10-inch tablet and ate most of the panel, pushing the toggles out
+  of sight; a long video title wrapped onto six lines and filled the list; and
+  **Done** — the way out of the screen — sat off the right edge where you had to
+  know to scroll sideways to find it. Heading and title are now sized for the
+  screen, and the buttons sit on two rows so Done is always visible.
+
 ## v0.2.0
 
 - **New: a progress bar on the video.** A screen can now show a slim bar along
