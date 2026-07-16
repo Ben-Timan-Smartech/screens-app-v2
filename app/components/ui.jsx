@@ -446,6 +446,24 @@ const setScreenProductCard = async (deviceId, productCard) => {
   return res.json();
 };
 
+// setScreenExperience — POST /api/screens/<id>/experience to point a screen at
+// a guided brand experience (an interactive HTML page the tablet caches +
+// runs offline in a kiosk WebView). Pass a bare https URL to set it, or null /
+// '' to clear it back to a plain video screen. Server enforces https + absolute.
+const setScreenExperience = async (deviceId, experienceUrl) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/experience`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ experienceUrl: experienceUrl || null }),
+  });
+  if (!res.ok) {
+    let msg = `experience failed: ${res.status}`;
+    try { const t = await res.text(); if (t) msg += ` — ${t}`; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json();
+};
+
 // setScreenAudio — POST /api/screens/<id>/audio to flip the global "play
 // with sound" flag on a screen. When off (the default), individual
 // videos can still play with sound if their library entry has
@@ -1534,6 +1552,7 @@ Object.assign(window, {
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
   setScreenProductCard,
+  setScreenExperience,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,
   addStore, deleteStore, refreshStoresFromServer,
