@@ -2613,6 +2613,52 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
+    # v0.2.3: typographic characters that show up in our own operator-facing
+    # error messages. Folded to ASCII rather than replaced with "?" so the
+    # message still reads properly in the CMS.
+    _REASON_ASCII_FOLD = str.maketrans({
+        "—": "-", "–": "-", "‘": "'", "’": "'",
+        "“": '"', "”": '"', "…": "...", " ": " ",
+    })
+
+    def send_error(self, code, message=None, explain=None):
+        """Keep non-latin-1 text out of the HTTP status line.
+
+        `http.server` drops `message` straight into the status line and encodes
+        that line as **latin-1**. A single character outside that range raises
+        UnicodeEncodeError *while the response is half-written*: the handler
+        thread dies, Cloud Run sees a malformed HTTP response and kills the
+        **instance**, and because this service runs minScale=maxScale=1 there is
+        no second instance to take over — the entire CMS goes down until it is
+        redeployed, and does not recover on its own.
+
+        That is not hypothetical. An **em dash in our own upload-rejection
+        message** ("references something off-device — an external src/href")
+        took production offline every single time an operator uploaded an
+        experience that failed validation. The status line is a place for a
+        short ASCII reason, and nothing else.
+
+        So: fold typography to ASCII, flatten newlines (which would also break
+        the status line, or worse, inject headers), and move the full original
+        text to `explain`, which lands in the response BODY — built via
+        `error_message_format` and encoded UTF-8, so it can safely carry
+        anything. The CMS reads its message out of that body (see
+        `uploadExperience` in ui.jsx), so operators still get the real reason.
+
+        Applied here, on the Handler, rather than at each call site: there are
+        ~18 `send_error` calls that interpolate a filename, brand, Drive error
+        or validation message, any of which can carry a non-ASCII character. A
+        guard at the boundary can't be forgotten by the next one.
+        """
+        if message is not None:
+            flat = " ".join(str(message).split())          # no CR/LF/tabs
+            safe = (flat.translate(self._REASON_ASCII_FOLD)
+                        .encode("ascii", "replace").decode("ascii"))
+            if explain is None and safe != flat:
+                explain = flat                             # true text -> body
+            message = safe
+        super().send_error(code, message, explain)
+
     def _send_json(
         self,
         payload: dict,
