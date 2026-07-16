@@ -524,6 +524,11 @@ class PlayerRepository(
          *  this false for a screen in a sync group, so the player can trust
          *  it without re-checking group membership. */
         val tapNext: Boolean = false,
+        /** v0.2.0: slim playback progress bar along the bottom of the video.
+         *  Unlike [tapNext] this is NOT forced off in a sync group — it's
+         *  read-only decoration and group members share a position, so their
+         *  bars agree rather than fight. */
+        val progressBar: Boolean = false,
     )
 
     /** v0.1.35: a sibling in this screen's sync group. The Device
@@ -631,6 +636,12 @@ class PlayerRepository(
      *  sync-group-aware: the server sends false for group members. */
     private val _tapNext = MutableStateFlow(false)
     val tapNextFlow: StateFlow<Boolean> = _tapNext.asStateFlow()
+
+    /** v0.2.0: show the slim playback progress bar along the bottom of the
+     *  video. Independent of [_tapNext] — a screen can have either, both, or
+     *  neither. */
+    private val _progressBar = MutableStateFlow(false)
+    val progressBarFlow: StateFlow<Boolean> = _progressBar.asStateFlow()
 
     /** Poll cadence the server has assigned to this screen. The polling
      *  loop reads this on every tick. SLOW also skips the per-location
@@ -988,6 +999,12 @@ class PlayerRepository(
         if (state.tapNext != _tapNext.value) {
             _tapNext.value = state.tapNext
             LogBuffer.i(TAG, "Tap-next → ${if (state.tapNext) "on" else "off"}")
+        }
+
+        // v0.2.0: playback progress bar.
+        if (state.progressBar != _progressBar.value) {
+            _progressBar.value = state.progressBar
+            LogBuffer.i(TAG, "Progress bar → ${if (state.progressBar) "on" else "off"}")
         }
 
         // Poll mode. The polling loop reads this on every tick to pick
@@ -1429,6 +1446,39 @@ class PlayerRepository(
                 lastLiveRevision = -1
             }.onFailure {
                 LogBuffer.w(TAG, "setProductCardOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
+            }
+        }
+    }
+
+    /** v0.2.0: toggle the per-screen playback-progress-bar flag on the server.
+     *  Same write-through path as [setProductCardOnServer]; the bar itself
+     *  reads position straight off ExoPlayer, so nothing needs re-fetching —
+     *  the optimistic flip is all the overlay needs to appear. */
+    suspend fun setProgressBarOnServer(value: Boolean) {
+        LogBuffer.i(TAG, "setProgressBarOnServer → $value")
+        _progressBar.value = value
+
+        val base = store.liveServerUrl.first()?.trimEnd('/')
+        if (base.isNullOrBlank()) {
+            LogBuffer.w(TAG, "setProgressBarOnServer skipped — no liveServerUrl set")
+            return
+        }
+        val deviceId = store.ensureDeviceId()
+        val body = """{"progressBar":$value}"""
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/screens/${urlEncode(deviceId)}/progress-bar")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .withDeviceSecret()
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) LogBuffer.w(TAG, "setProgressBarOnServer HTTP ${r.code}")
+                    else LogBuffer.i(TAG, "setProgressBarOnServer OK")
+                }
+                lastLiveRevision = -1
+            }.onFailure {
+                LogBuffer.w(TAG, "setProgressBarOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
         }
     }

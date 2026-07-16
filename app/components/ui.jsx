@@ -511,6 +511,20 @@ const setScreenTapNext = async (deviceId, tapNext) => {
   return res.json();
 };
 
+// setScreenProgressBar — POST /api/screens/<id>/progress-bar to show/hide the
+// slim playback progress bar along the bottom of the video. Off by default.
+// Unlike tap-next this is NOT forced off in a sync group — it's read-only
+// decoration and group members share a position, so their bars agree.
+const setScreenProgressBar = async (deviceId, progressBar) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/progress-bar`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ progressBar }),
+  });
+  if (!res.ok) throw new Error(`progress-bar failed: ${res.status}`);
+  return res.json();
+};
+
 // setScreenExperience — POST /api/screens/<id>/experience to point a screen at
 // a guided brand experience (an interactive HTML page the tablet caches +
 // runs offline in a kiosk WebView). Pass a bare https URL to set it, or null /
@@ -1623,7 +1637,7 @@ Object.assign(window, {
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
   setScreenProductCard,
-  setScreenExperience, setScreenTapNext,
+  setScreenExperience, setScreenTapNext, setScreenProgressBar,
   useExperiences, uploadExperience, deleteExperience,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,

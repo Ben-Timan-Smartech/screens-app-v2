@@ -40,6 +40,8 @@ fun PlayerScreen(
     val experienceUrl by repository.experienceUrlFlow.collectAsState()
     // v0.1.95: where its attract prompt sits — "top" (default) or "bottom".
     val experiencePromptPos by repository.experiencePromptPosFlow.collectAsState()
+    // v0.2.0: slim playback progress bar along the bottom edge.
+    val progressBar by repository.progressBarFlow.collectAsState()
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
@@ -138,6 +140,18 @@ fun PlayerScreen(
         // before it can reach a layer behind it, so the card's tap-to-expand
         // never fired. The card is now composed in MainActivity ABOVE the
         // staff overlay, in front of that catcher. See MainActivity.setContent.
+
+        // v0.2.0: slim playback progress bar along the bottom of the video.
+        // Lives here rather than in MainActivity's overlay stack because it's
+        // pure decoration — no pointer input — so unlike the product card and
+        // the tap-next control it doesn't need to sit above the staff-unlock
+        // catcher to receive taps. Composed BEFORE ExperienceOverlay so an
+        // opened experience's full-screen WebView simply paints over it; during
+        // the attract loop it shows, which is right — that's still video.
+        VideoProgressBar(
+            enabled = progressBar,
+            controller = controller,
+        )
 
         // v0.1.92: guided brand experience. Sits over the video (the video is
         // the attract loop) but BELOW the staff-unlock catcher — which is now
