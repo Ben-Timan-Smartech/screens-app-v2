@@ -141,11 +141,19 @@ private fun AttractPrompt(position: String, onLaunch: () -> Unit) {
         contentAlignment = if (atBottom) Alignment.BottomCenter else Alignment.TopCenter,
     ) {
         // A small pill at the top or bottom — deliberately NOT in a corner: all
-        // four corners are the staff-unlock zones (see CornerUnlockOverlay,
-        // 180dp each), and a tap landing in one would drive the unlock sequence
-        // instead of opening the experience. Horizontally centring the pill
-        // keeps it clear of those zones at either edge, at any sane screen
-        // width, while leaving the video attract loop almost fully visible.
+        // four corners are the staff-unlock zones (see CornerUnlockOverlay),
+        // and a tap landing in one would drive the unlock sequence instead of
+        // opening the experience. Horizontally centring the pill keeps it clear
+        // of those zones at either edge while leaving the video attract loop
+        // almost fully visible.
+        //
+        // That reasoning was width-only, and the zones were a fixed 180dp — so
+        // on a 360dp phone the top-left and top-right zones met in the middle
+        // and this pill, at y≈24-68, sat inside the resulting full-width band.
+        // Every tap on "TAP TO EXPLORE" silently advanced the staff-unlock
+        // sequence instead of opening the experience. v0.2.0 derives the zones
+        // from the shorter edge so they can never tile; the vertical clearance
+        // this pill needs now actually exists.
         Text(
             "TAP TO EXPLORE",
             color = Color(0xFFE8A33D),

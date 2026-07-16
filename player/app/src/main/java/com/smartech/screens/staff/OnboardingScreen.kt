@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Box
@@ -84,15 +85,16 @@ fun OnboardingScreen(
             (!conceptRequired || !concept.isNullOrBlank()) &&
             !screenCode.isNullOrBlank()
 
-    Row(Modifier.fillMaxSize().background(Bone)) {
-        // Left rail — same dark slab the staff overlay uses.
-        Box(
-            Modifier
-                .width(420.dp)
-                .fillMaxHeight()
-                .background(Ink)
-                .padding(horizontal = 48.dp, vertical = 56.dp),
-        ) {
+    val compact = compactPane()
+
+    // v0.2.0: the worst instance of the 420dp-rail bug, because it's the first
+    // thing a fresh install shows. On a phone held upright the rail took the
+    // whole width and the form beside it was laid out at zero — a new device
+    // could not be onboarded at all, only stared at.
+    TwoPaneScaffold(
+        railColor = Ink,
+        paneColor = Bone,
+        rail = {
             Column(Modifier.fillMaxSize()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
@@ -109,7 +111,7 @@ fun OnboardingScreen(
                         Text("Smartech Group", color = Color(0x8CFFFFFF), fontSize = 13.sp)
                     }
                 }
-                Spacer(Modifier.height(48.dp))
+                Spacer(Modifier.height(if (compact) 20.dp else 48.dp))
                 Text(
                     "First-time setup".uppercase(),
                     color = Color(0x73FFFFFF), fontSize = 11.sp, letterSpacing = 1.6.sp,
@@ -117,27 +119,34 @@ fun OnboardingScreen(
                 Spacer(Modifier.height(14.dp))
                 Text(
                     "Tell us where this screen lives",
-                    color = Bone, fontSize = 30.sp, fontWeight = FontWeight.Medium,
+                    color = Bone,
+                    fontSize = if (compact) 20.sp else 30.sp,
+                    fontWeight = FontWeight.Medium,
                 )
                 Spacer(Modifier.height(14.dp))
                 Text(
                     "We need the location to register this tablet on the system. " +
                         "An admin can change any of these later from device admin.",
-                    color = Color(0x99FFFFFF), fontSize = 14.sp,
+                    color = Color(0x99FFFFFF), fontSize = if (compact) 12.sp else 14.sp,
                 )
                 Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(if (compact) 14.dp else 0.dp))
                 Text("Server", color = Color(0x66FFFFFF), fontSize = 11.sp, letterSpacing = 1.4.sp)
                 Spacer(Modifier.height(6.dp))
                 ServerStatusLine(repository, fallbackUrl = BuildConfig.API_BASE)
             }
-        }
-
+        },
+        pane = {
         // Right pane — scrollable form.
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Bone)
-                .padding(horizontal = 56.dp, vertical = 56.dp),
+                .padding(
+                    // This screen's tablet inset is 56/56 — kept exactly, so
+                    // nothing moves on the fleet; only the compact case is new.
+                    if (compact) PaddingValues(horizontal = 16.dp, vertical = 14.dp)
+                    else PaddingValues(horizontal = 56.dp, vertical = 56.dp)
+                ),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
             item {
@@ -284,7 +293,8 @@ fun OnboardingScreen(
 
             item { Spacer(Modifier.height(40.dp)) }
         }
-    }
+        },
+    )
 }
 
 /**

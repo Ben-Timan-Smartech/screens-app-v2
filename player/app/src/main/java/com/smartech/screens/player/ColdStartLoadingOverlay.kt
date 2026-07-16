@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,6 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.smartech.screens.data.PlayerRepository
+import com.smartech.screens.util.rememberScreenMetrics
 
 /**
  * Cold-start loading overlay.
@@ -65,17 +67,25 @@ fun ColdStartLoadingOverlay(
     val downloadedMb = downloadedBytes / 1_000_000.0
     val combinedMbPerSec = downloads.values.sumOf { it.bytesPerSec } / 1_000_000.0
 
+    // v0.2.0: the card needed 572dp minimum (a 420dp bar + 28dp inner + 48dp
+    // outer padding, both sides), so on a 360dp phone it was cropped from both
+    // edges — the bar's ends simply weren't on screen.
+    val metrics = rememberScreenMetrics()
+    val compact = metrics.isNarrow || metrics.isShort
     Box(
         Modifier
             .fillMaxSize()
-            .padding(48.dp),
+            .padding(if (compact) 16.dp else 48.dp),
         contentAlignment = Alignment.BottomCenter,
     ) {
         Box(
             Modifier
                 .clip(RoundedCornerShape(14.dp))
                 .background(Color(0xCC101010))
-                .padding(horizontal = 28.dp, vertical = 22.dp),
+                .padding(
+                    horizontal = if (compact) 16.dp else 28.dp,
+                    vertical = if (compact) 14.dp else 22.dp,
+                ),
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
@@ -96,14 +106,22 @@ fun ColdStartLoadingOverlay(
 
                 Spacer(Modifier.height(14.dp))
 
-                // Progress bar — 420dp wide, 6dp tall. Indeterminate-
+                // Progress bar — up to 420dp wide, 6dp tall. Indeterminate-
                 // looking fill (the bar grows continuously as bytes
                 // arrive) when totalBytes is known; falls back to a
                 // muted background-only when the server didn't send
                 // Content-Length.
+                // v0.2.0: widthIn(max) rather than a fixed width — 420dp on a
+                // 360dp phone forced the card wider than the display. Capped at
+                // the original 420dp, so on any screen with room it's unchanged.
+                // widthIn BEFORE fillMaxWidth: the cap has to narrow the
+                // incoming constraint first, so fillMaxWidth then fills to
+                // min(available, 420dp). The other order would have
+                // fillMaxWidth claim the whole screen before the cap applied.
                 Box(
                     Modifier
-                        .width(420.dp)
+                        .widthIn(max = 420.dp)
+                        .fillMaxWidth()
                         .height(6.dp)
                         .clip(RoundedCornerShape(3.dp))
                         .background(Color(0x33FFFFFF)),
@@ -120,14 +138,19 @@ fun ColdStartLoadingOverlay(
 
                 Spacer(Modifier.height(10.dp))
 
+                // v0.2.0: three monospace chunks at 14sp with 14dp gaps run past
+                // 360dp. Tighter type and spacing when compact keeps the
+                // download rate — the bit that tells you whether it's actually
+                // progressing — on screen.
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    val statSize = if (compact) 11.sp else 14.sp
                     Text(
                         if (totalBytes > 0) "${(fraction * 100).toInt()}%" else "Downloading…",
                         color = Color(0xFFE8A33D),
-                        fontSize = 14.sp,
+                        fontSize = statSize,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Medium,
                     )
@@ -135,14 +158,14 @@ fun ColdStartLoadingOverlay(
                         if (totalMb > 0) "%.1f / %.1f MB".format(downloadedMb, totalMb)
                         else "%.1f MB downloaded".format(downloadedMb),
                         color = Color(0xCCFFFFFF),
-                        fontSize = 14.sp,
+                        fontSize = statSize,
                         fontFamily = FontFamily.Monospace,
                     )
                     if (combinedMbPerSec > 0.05) {
                         Text(
                             "%.1f MB/s".format(combinedMbPerSec),
                             color = Color(0x99FFFFFF),
-                            fontSize = 14.sp,
+                            fontSize = statSize,
                             fontFamily = FontFamily.Monospace,
                         )
                     }

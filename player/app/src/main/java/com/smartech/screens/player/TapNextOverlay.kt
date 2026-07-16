@@ -35,8 +35,14 @@ import androidx.compose.ui.unit.sp
  *    would drive the unlock sequence instead of skipping).
  *  - Clear of the product-info card (bottom-start) and the guided-experience
  *    attract prompt (top/bottom centre), so the three can coexist.
- * Vertically centred means it stays clear of the 180dp corner zones on any
- * screen taller than ~360dp — i.e. all of them.
+ *
+ * This used to claim that being vertically centred cleared the 180dp corner
+ * zones "on any screen taller than ~360dp — i.e. all of them". Both halves were
+ * wrong on a phone: a landscape phone is ~360dp tall, so centre-y landed exactly
+ * on the seam where the top and bottom zones met, and horizontally the pill sat
+ * inside the right-hand zone column outright — the control was simply dead.
+ * The zones are now a quarter of the shorter edge (see CornerUnlockOverlay), so
+ * two opposing zones can never meet and the centre always falls through.
  *
  * MUST be composed ABOVE StaffOverlay (see MainActivity): the unlock catcher is
  * a full-screen pointer sibling, and anything behind it never receives taps at

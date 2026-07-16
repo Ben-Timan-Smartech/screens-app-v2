@@ -5,9 +5,11 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -43,8 +45,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.smartech.screens.util.rememberScreenMetrics
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import com.smartech.screens.ScreensApp
@@ -103,49 +107,61 @@ private fun Rail(title: String, sub: String, step: Int) {
         LocationTaxonomy.stores.firstOrNull { it.id == storeId }?.name ?: "Smartech Group"
     }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Ink)
-            .padding(horizontal = 48.dp, vertical = 56.dp)
-    ) {
-        Column(Modifier.fillMaxSize()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+    // v0.2.0: the Ink background + outer padding used to live here. They're now
+    // the scaffold's job (see [Layout] → TwoPaneScaffold), because the right
+    // padding depends on whether this is a rail beside content or a header
+    // stacked above it — and only the scaffold knows which.
+    val metrics = rememberScreenMetrics()
+    val compact = metrics.isNarrow
+
+    Column(Modifier.fillMaxSize()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Bone),
+                contentAlignment = Alignment.Center,
+            ) { Text("S", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Medium) }
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text("Screens", color = Bone, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text(storeSubtitle, color = Color(0x8CFFFFFF), fontSize = 13.sp)
+            }
+        }
+        // In a tall rail this pushes the copy down to sit against the bottom
+        // edge. Stacked or scrolling there's no spare height to push into and
+        // it resolves to zero — which is the right result there anyway, so the
+        // fixed spacer below re-supplies just enough separation.
+        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(if (compact) 16.dp else 0.dp))
+        Text(
+            "Swap what's playing".uppercase(),
+            color = Color(0x73FFFFFF),
+            fontSize = 11.sp,
+            letterSpacing = 1.6.sp,
+        )
+        Spacer(Modifier.height(if (compact) 8.dp else 14.dp))
+        // 30sp is sized to be read from across a shop floor; on a phone held at
+        // arm's length it just wraps the title onto three lines.
+        Text(
+            title,
+            color = Bone,
+            fontSize = if (compact) 20.sp else 30.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
+        Text(sub, color = Color(0x99FFFFFF), fontSize = if (compact) 12.sp else 14.sp)
+        Spacer(Modifier.height(if (compact) 14.dp else 32.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            repeat(4) { i ->
                 Box(
                     Modifier
-                        .size(44.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Bone),
-                    contentAlignment = Alignment.Center,
-                ) { Text("S", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Medium) }
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text("Screens", color = Bone, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                    Text(storeSubtitle, color = Color(0x8CFFFFFF), fontSize = 13.sp)
-                }
-            }
-            Spacer(Modifier.weight(1f))
-            Text(
-                "Swap what's playing".uppercase(),
-                color = Color(0x73FFFFFF),
-                fontSize = 11.sp,
-                letterSpacing = 1.6.sp,
-            )
-            Spacer(Modifier.height(14.dp))
-            Text(title, color = Bone, fontSize = 30.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(10.dp))
-            Text(sub, color = Color(0x99FFFFFF), fontSize = 14.sp)
-            Spacer(Modifier.height(32.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                repeat(4) { i ->
-                    Box(
-                        Modifier
-                            .height(4.dp)
-                            .weight(1f)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(if (i <= step) Bone else Color(0x2EFFFFFF))
-                    )
-                }
+                        .height(4.dp)
+                        .weight(1f)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(if (i <= step) Bone else Color(0x2EFFFFFF))
+                )
             }
         }
     }
@@ -156,11 +172,18 @@ private fun Layout(
     left: @Composable () -> Unit,
     right: @Composable () -> Unit,
 ) {
-    Row(Modifier.fillMaxSize()) {
-        Box(Modifier.width(420.dp).fillMaxSize()) { left() }
-        Box(Modifier.fillMaxSize().background(Bone)) { right() }
-    }
+    // v0.2.0: was a hard-coded 420dp rail beside the content, which on a
+    // portrait phone left the content pane exactly 0dp wide — the PIN pad,
+    // brand picker and video picker were all laid out into nothing. The
+    // scaffold shrinks the rail proportionally and stacks it below 600dp.
+    TwoPaneScaffold(
+        rail = left,
+        pane = right,
+        railColor = Ink,
+        paneColor = Bone,
+    )
 }
+
 
 // ─────────────────────────────────────────────────────────────
 // PIN
@@ -183,11 +206,23 @@ fun PinScreen(
         }
     }
 
+    // v0.2.0: the keypad is sized for the screen. At the tablet's fixed 140x90
+    // keys a row of three is 456dp wide and the stack 414dp tall — wider than a
+    // portrait phone and taller than a landscape one, so the "3/6/9/⌫" column
+    // fell off the side and Cancel off the bottom. The scroll is a backstop for
+    // the shortest screens, where even the compact keypad plus the dots and
+    // Cancel can't all fit at once.
+    val metrics = rememberScreenMetrics()
+    val compactPad = metrics.isNarrow || metrics.isShort
+
     Layout(
         left = { Rail("Tap in your PIN", "Last 4 of your staff ID. Session ends automatically.", 0) },
         right = {
             Column(
-                Modifier.fillMaxSize(),
+                Modifier
+                    .fillMaxSize()
+                    .then(if (compactPad) Modifier.verticalScroll(rememberScrollState()) else Modifier)
+                    .padding(vertical = 16.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -225,6 +260,7 @@ fun PinScreen(
                 )
                 Spacer(Modifier.height(16.dp))
                 Numpad(
+                    compact = compactPad,
                     onKey = { k ->
                         if (error) return@Numpad
                         pin = when {
@@ -257,20 +293,26 @@ fun PinScreen(
 }
 
 @Composable
-private fun Numpad(onKey: (Int) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+private fun Numpad(compact: Boolean, onKey: (Int) -> Unit) {
+    // Compact keys are still ~84x56dp — well above the 48dp minimum touch
+    // target, so they stay tappable with a thumb; they just stop being sized
+    // to be hit from a step back off a shop floor.
+    val keyW = if (compact) COMPACT_KEY_W else KEY_W
+    val keyH = if (compact) COMPACT_KEY_H else KEY_H
+    val gap = if (compact) 10.dp else 18.dp
+    Column(verticalArrangement = Arrangement.spacedBy(gap)) {
         listOf(
             listOf(1, 2, 3),
             listOf(4, 5, 6),
             listOf(7, 8, 9),
             listOf(0, 0, -1),
         ).forEachIndexed { rowIdx, row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
                 row.forEachIndexed { colIdx, n ->
                     if (rowIdx == 3 && colIdx == 0) {
-                        Spacer(Modifier.size(140.dp, 90.dp))
+                        Spacer(Modifier.size(keyW, keyH))
                     } else {
-                        NumpadKey(n, onClick = { onKey(n) })
+                        NumpadKey(n, keyW, keyH, compact, onClick = { onKey(n) })
                     }
                 }
             }
@@ -279,10 +321,10 @@ private fun Numpad(onKey: (Int) -> Unit) {
 }
 
 @Composable
-private fun NumpadKey(n: Int, onClick: () -> Unit) {
+private fun NumpadKey(n: Int, keyW: Dp, keyH: Dp, compact: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
-            .size(140.dp, 90.dp)
+            .size(keyW, keyH)
             .clip(RoundedCornerShape(16.dp))
             .then(
                 if (n == -1) Modifier
@@ -295,12 +337,20 @@ private fun NumpadKey(n: Int, onClick: () -> Unit) {
     ) {
         Text(
             if (n == -1) "⌫" else n.toString(),
-            fontSize = 32.sp,
+            fontSize = if (compact) 22.sp else 32.sp,
             fontWeight = FontWeight.Medium,
             color = Ink,
         )
     }
 }
+
+// Tablet: sized to be read and hit from across a shop floor. A row of three is
+// 456dp wide and the four rows 414dp tall — fine on 1280x800, impossible on a
+// phone in either orientation.
+private val KEY_W = 140.dp
+private val KEY_H = 90.dp
+private val COMPACT_KEY_W = 84.dp
+private val COMPACT_KEY_H = 56.dp
 
 // ─────────────────────────────────────────────────────────────
 // Brand picker
@@ -330,13 +380,18 @@ fun BrandPickerScreen(
     Layout(
         left = { Rail("Which brand?", "Search or tap a brand. Tap back to re-enter PIN.", 1) },
         right = {
-            Column(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 56.dp)) {
+            Column(Modifier.fillMaxSize().padding(paneInset())) {
                 SearchBar(query, onQueryChange = { query = it }, placeholder = "Search brands")
-                Spacer(Modifier.height(28.dp))
+                Spacer(Modifier.height(if (compactPane()) 14.dp else 28.dp))
                 // v0.1.53: bound the grid so the bottom row stays
                 // on-screen if the brand list grows past one screen.
+                // v0.2.0: Adaptive, not Fixed(4). Four columns assumed a wide
+                // pane; in a narrow one each cell fell to ~49dp — narrower than
+                // a BrandCard's own padding, so the 72dp logo and the name were
+                // both crushed. Adaptive fits as many 132dp columns as there's
+                // room for and no fewer than one.
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
+                    columns = GridCells.Adaptive(minSize = 132.dp),
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                     modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -560,7 +615,8 @@ fun VideoPickerScreen(
             2,
         ) },
         right = {
-            Column(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 56.dp)) {
+            val compact = compactPane()
+            Column(Modifier.fillMaxSize().padding(paneInset())) {
                 SearchBar(query, onQueryChange = { query = it }, placeholder = "Search $brand videos")
                 // v0.1.71: four filters — All · Products · Brand videos ·
                 // Orphans (Unassigned). Only shown when tm:rw has section
@@ -583,12 +639,19 @@ fun VideoPickerScreen(
                         }
                     }
                 }
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(if (compact) 12.dp else 20.dp))
                 // v0.1.71: list view with columns — Product Name · Size ·
                 // Length · Orientation · Resolution · SKU Name. weight(1f)
                 // keeps the Add row below on-screen with 30+ videos.
-                VideoListHeader()
-                Spacer(Modifier.height(4.dp))
+                // v0.2.0: six weighted columns need a wide pane to mean
+                // anything. Narrow, they divide down to ~30dp each — every
+                // heading truncated, the title left with a few dp beside its
+                // packshot. So on a compact pane the header goes and each row
+                // stacks its metadata instead (see VideoListRow).
+                if (!compact) {
+                    VideoListHeader()
+                    Spacer(Modifier.height(4.dp))
+                }
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -597,6 +660,7 @@ fun VideoPickerScreen(
                         VideoListRow(
                             video = v,
                             selected = v.item.id in selectedIds,
+                            compact = compact,
                             onClick = {
                                 // Pending videos can't be pushed (no
                                 // streamable file yet) — ignore taps.
@@ -662,7 +726,12 @@ private fun VideoListHeader() {
 // videos are dimmed + badged (can't be pushed); orphans are badged but
 // still pushable.
 @Composable
-private fun VideoListRow(video: PickerVideo, selected: Boolean, onClick: () -> Unit) {
+private fun VideoListRow(
+    video: PickerVideo,
+    selected: Boolean,
+    compact: Boolean,
+    onClick: () -> Unit,
+) {
     val productName = video.productName()
     val subtitle = if (video.item.title != productName) video.item.title else null
     Row(
@@ -676,7 +745,10 @@ private fun VideoListRow(video: PickerVideo, selected: Boolean, onClick: () -> U
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(Modifier.weight(3f), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.weight(if (compact) 1f else 3f),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             // v0.1.77: product packshot (tm:rw main image). Coil loads the
             // small public Drive thumbnail; nothing renders while loading or
             // on error, so brand/orphan videos with no image just show text.
@@ -692,7 +764,7 @@ private fun VideoListRow(video: PickerVideo, selected: Boolean, onClick: () -> U
                     loading = {},
                     error = {},
                 )
-                Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(if (compact) 10.dp else 12.dp))
             }
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -722,13 +794,31 @@ private fun VideoListRow(video: PickerVideo, selected: Boolean, onClick: () -> U
                 if (subtitle != null) {
                     Text(subtitle, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
+                // v0.2.0: compact has no columns to line up with, so the same
+                // facts fold into one dot-separated line under the title. The
+                // SKU is dropped rather than truncated — it's the least useful
+                // of the six when you're picking a video by sight.
+                if (compact) {
+                    Text(
+                        listOf(
+                            video.sizeLabel(),
+                            video.lengthLabel(),
+                            video.orientationLabel(),
+                            video.resolutionLabel(),
+                        ).filter { it.isNotBlank() }.joinToString(" · "),
+                        color = Muted, fontSize = 11.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
-        Text(video.sizeLabel(), Modifier.weight(1f), color = Muted, fontSize = 13.sp)
-        Text(video.lengthLabel(), Modifier.weight(1f), color = Muted, fontSize = 13.sp)
-        Text(video.orientationLabel(), Modifier.weight(1.4f), color = Muted, fontSize = 13.sp)
-        Text(video.resolutionLabel(), Modifier.weight(1.4f), color = Muted, fontSize = 13.sp)
-        Text(video.sku ?: "—", Modifier.weight(2f), color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (!compact) {
+            Text(video.sizeLabel(), Modifier.weight(1f), color = Muted, fontSize = 13.sp)
+            Text(video.lengthLabel(), Modifier.weight(1f), color = Muted, fontSize = 13.sp)
+            Text(video.orientationLabel(), Modifier.weight(1.4f), color = Muted, fontSize = 13.sp)
+            Text(video.resolutionLabel(), Modifier.weight(1.4f), color = Muted, fontSize = 13.sp)
+            Text(video.sku ?: "—", Modifier.weight(2f), color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
         Box(Modifier.width(40.dp), contentAlignment = Alignment.CenterEnd) {
             if (selected) {
                 Box(
