@@ -699,6 +699,31 @@ class PlayerController(context: Context) {
         player.seekTo(targetQueueIndex, positionInItem)
     }
 
+    /**
+     * v0.1.98: skip to the next item in the queue — the customer-facing
+     * "next video" control.
+     *
+     * Only ever called when the screen is NOT in a sync group (the server
+     * forces tapNext off for group members, and the UI hides the control):
+     * a group plays off shared loop math, so a lone skip would both break
+     * the lockstep and get yanked back by the next sync tick.
+     *
+     * ExoPlayer is single-threaded — this must be called from the main
+     * thread, which is where the Compose click lands.
+     */
+    fun skipToNext() {
+        if (player.mediaItemCount <= 1) return          // nothing to skip to
+        if (player.hasNextMediaItem()) {
+            player.seekToNextMediaItem()
+        } else {
+            // End of a non-wrapping queue: loop back to the top rather than
+            // dead-end on the last frame.
+            player.seekTo(0, 0L)
+        }
+        player.play()   // a skip should never leave the screen paused
+        LogBuffer.i("PlayerController", "Tap-next → ${player.currentMediaItem?.mediaId ?: "?"}")
+    }
+
     /** True when the current queue item is the bundled / remote splash
      *  rather than a real playlist video. Used by [PlaybackWatchdog]
      *  to scope recovery actions: a hiccup during splash never

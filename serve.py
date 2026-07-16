@@ -1479,6 +1479,13 @@ def _ensure_screen_state(device_id: str) -> dict:
             # "top" (default) or "bottom". Never a corner: those are the
             # staff-unlock zones. Set via /api/screens/<id>/experience.
             "experiencePromptPos": "top",
+            # v0.1.98: customer-facing "next video" control on the screen.
+            # Off by default — it puts a visible tappable arrow on a
+            # shop-floor screen, so it's opt-in per screen like productCard
+            # rather than a fleet-wide change. Forced off in a sync group
+            # (see /api/state): skipping one member alone would visibly break
+            # the lockstep the group exists to provide.
+            "tapNext": False,
             "audioOn": False,                     # screen-wide audio is muted by default — see /api/screens/<id>/audio
             "pollMode": DEFAULT_POLL_MODE,        # "fast" | "normal" | "slow" — see /api/screens/<id>/poll-mode
             "syncGroup": None,                    # see _compute_playback / /api/screens/<id>/sync-group
@@ -1813,7 +1820,7 @@ _city_brand: dict = {}          # mutable copy of DEFAULT_CITY_BRAND
 # tablet (no header) is grace-allowed (and logged); a *wrong* secret is always
 # rejected.
 SELF_EDIT_ACTIONS = (
-    "playlist", "mix-splash", "product-card", "audio", "poll-mode",
+    "playlist", "mix-splash", "product-card", "tap-next", "audio", "poll-mode",
     "low-data-mode", "sync-group", "display-mode",
 )
 ENFORCE_DEVICE_SECRET = os.environ.get("SCREENS_ENFORCE_DEVICE_SECRET", "0") == "1"
@@ -3192,6 +3199,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "productCard": bool(s.get("productCard")),   # v0.1.86: on-screen product info card
                         "experienceUrl": s.get("experienceUrl"),     # v0.1.92: guided brand experience (kiosk WebView), null = off
                         "experiencePromptPos": s.get("experiencePromptPos") or "top",   # v0.1.95: "top" | "bottom"
+                        # v0.1.98: tap-to-skip. Forced OFF for a screen in a
+                        # sync group, the same way mixSplash is: the group
+                        # plays in lockstep off shared loop math, and letting
+                        # one screen jump ahead would visibly break it (and the
+                        # next sync tick would yank it back mid-video anyway).
+                        # Enforced here, not just hidden in the UI, so an older
+                        # tablet can't skip either. Stored value is preserved,
+                        # so leaving the group restores the operator's choice.
+                        "tapNext":     False if sync_group_id else bool(s.get("tapNext")),
                         "audioOn":     s.get("audioOn", False),
                         "pollMode":    poll_mode,
                         # lowDataMode kept in the payload for old tablets
@@ -3280,6 +3296,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "productCard":           bool(state.get("productCard")),   # v0.1.86
                         "experienceUrl":         state.get("experienceUrl"),       # v0.1.92
                         "experiencePromptPos":   state.get("experiencePromptPos") or "top",   # v0.1.95
+                        # Raw stored value (NOT the sync-group-forced one) so the
+                        # CMS toggle shows what the operator actually chose and
+                        # can explain why it's locked.
+                        "tapNext":               bool(state.get("tapNext")),        # v0.1.98
                         "audioOn":               state.get("audioOn", False),
                         "pollMode":              pm,
                         "lowDataMode":           pm == "slow",
@@ -4152,6 +4172,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/mix-splash      { mixSplash: bool }
         # POST /api/screens/<deviceId>/product-card    { productCard: bool }
         # POST /api/screens/<deviceId>/experience      { experienceUrl?: string|null, promptPosition?: "top"|"bottom" }
+        # POST /api/screens/<deviceId>/tap-next        { tapNext: bool }
         # POST /api/screens/<deviceId>/audio           { audioOn: bool }
         # POST /api/screens/<deviceId>/poll-mode       { pollMode: "fast"|"normal"|"slow" }
         # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }   (legacy — writes pollMode)
@@ -4159,7 +4180,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/display-mode    { displayMode: int | null }
         # POST /api/screens/<deviceId>/name            { name: string }
         # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|audio|poll-mode|low-data-mode|sync-group|display-mode|name|location)$", path)
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|audio|poll-mode|low-data-mode|sync-group|display-mode|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -4404,6 +4425,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "experienceUrl": state["experienceUrl"],
                         "promptPosition": state.get("experiencePromptPos") or "top",
                     })
+                    return
+                if action == "tap-next":
+                    # v0.1.98: customer-facing "next video" control. Bump the
+                    # revision so the tablet re-polls and shows/hides it.
+                    state = _ensure_screen_state(device_id)
+                    state["tapNext"] = bool(body.get("tapNext", False))
+                    state["revision"] += 1
+                    _save_per_screen()
+                    self._send_json({"ok": True, "tapNext": state["tapNext"]})
                     return
                 if action == "audio":
                     state = _ensure_screen_state(device_id)
