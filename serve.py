@@ -4945,14 +4945,53 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # Index is already updated; a stray file is harmless
                         # (it stops being advertised) but worth a log line.
                         print(f"[experiences] unlink {target} failed: {e}", file=sys.stderr)
+            # v0.2.5: clear it off every screen that was showing it.
+            #
+            # This used to reason: "screens still pointed at it fall back to
+            # their video loop — the player treats a failed fetch with NO CACHE
+            # as no experience." The "no cache" is what made that wrong. The
+            # whole point of an experience is that the tablet caches the file
+            # and runs it offline forever, so a screen that already had it
+            # **kept showing the deleted experience indefinitely** — deleting
+            # from the library did nothing to the screens actually running it.
+            #
+            # It also stranded the CMS: the screen kept a URL that no longer
+            # resolves to anything in the library, which the picker could only
+            # show as an unknown "Custom:" value.
+            #
+            # So deleting now means deleting: any screen pointed at this
+            # experience is reset to plain video, and the revision bump makes
+            # the tablet pick that up on its next poll and drop the WebView.
+            cleared: list[str] = []
+            if fn:
+                # Match on the PATH, not the full URL. A screen's stored
+                # experienceUrl is absolute, and _experience_public_url builds
+                # it from auth.PUBLIC_URL — so an exact-URL compare silently
+                # matches nothing if a screen was pointed at this file when
+                # PUBLIC_URL was a different origin (or unset). Then the delete
+                # would look like it worked and leave the screen running the
+                # experience forever, which is the exact bug being fixed. The
+                # uploads dir is flat, so a "/interactive/<file>" suffix can
+                # only ever mean this one file.
+                suffix = f"/interactive/{fn}"
+                deleted_url = _experience_public_url(fn)
+                with _STATE_LOCK:
+                    for device_id, state in _per_screen.items():
+                        u = state.get("experienceUrl") or ""
+                        if u and (u == deleted_url or u.split("?")[0].endswith(suffix)):
+                            state["experienceUrl"] = None
+                            state["revision"] += 1
+                            cleared.append(device_id)
+                    if cleared:
+                        _save_per_screen()
             _log_activity(
                 kind="library",
-                text=f"Deleted guided experience “{entry.get('name') or exp_id}”",
+                text=f"Deleted guided experience “{entry.get('name') or exp_id}”"
+                     + (f" — reset {len(cleared)} screen{'' if len(cleared) == 1 else 's'} to plain video"
+                        if cleared else ""),
                 icon="trash",
             )
-            # Screens still pointed at it fall back to their video loop: the
-            # player treats a failed fetch with no cache as "no experience".
-            self._send_json({"ok": True, "id": exp_id})
+            self._send_json({"ok": True, "id": exp_id, "screensReset": len(cleared)})
             return
         # v0.1.38: DELETE /api/stores/<id> removes a custom store.
         # Built-ins (defined in data.jsx + LocationTaxonomy.kt) can't
