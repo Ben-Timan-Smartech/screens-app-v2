@@ -517,6 +517,9 @@ class PlayerRepository(
          *  renders in a kiosk WebView (tap the attract prompt to open it,
          *  idle-returns to the video loop). Null = plain video screen. */
         val experienceUrl: String? = null,
+        /** v0.1.95: where the attract prompt sits — "top" (default) or
+         *  "bottom". Never a corner: those are the staff-unlock zones. */
+        val experiencePromptPos: String = "top",
     )
 
     /** v0.1.35: a sibling in this screen's sync group. The Device
@@ -614,6 +617,11 @@ class PlayerRepository(
      *  the cached experience in a kiosk WebView. */
     private val _experienceUrl = MutableStateFlow<String?>(null)
     val experienceUrlFlow: StateFlow<String?> = _experienceUrl.asStateFlow()
+
+    /** v0.1.95: attract-prompt placement for the guided experience —
+     *  "top" (default) or "bottom". Operator-selectable per screen. */
+    private val _experiencePromptPos = MutableStateFlow("top")
+    val experiencePromptPosFlow: StateFlow<String> = _experiencePromptPos.asStateFlow()
 
     /** Poll cadence the server has assigned to this screen. The polling
      *  loop reads this on every tick. SLOW also skips the per-location
@@ -956,6 +964,13 @@ class PlayerRepository(
         if (state.experienceUrl != _experienceUrl.value) {
             _experienceUrl.value = state.experienceUrl
             LogBuffer.i(TAG, "Guided experience → ${state.experienceUrl ?: "off"}")
+        }
+        // v0.1.95: attract-prompt placement. Defensive: an unexpected value from
+        // an older/newer server falls back to "top" rather than breaking layout.
+        val pos = if (state.experiencePromptPos.lowercase() == "bottom") "bottom" else "top"
+        if (pos != _experiencePromptPos.value) {
+            _experiencePromptPos.value = pos
+            LogBuffer.i(TAG, "Experience prompt position → $pos")
         }
 
         // Poll mode. The polling loop reads this on every tick to pick

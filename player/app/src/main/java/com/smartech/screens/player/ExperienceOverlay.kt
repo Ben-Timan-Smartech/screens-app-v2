@@ -70,6 +70,8 @@ import java.io.File
 @Composable
 fun ExperienceOverlay(
     experienceUrl: String?,
+    /** v0.1.95: "top" (default) or "bottom" — operator-selectable per screen. */
+    promptPosition: String = "top",
 ) {
     if (experienceUrl.isNullOrBlank()) return
 
@@ -111,15 +113,16 @@ fun ExperienceOverlay(
             onInteraction = { interactionTick++ },
         )
     } else if (!launched && file != null) {
-        // Attract prompt — centred, well clear of the corners.
-        AttractPrompt(onLaunch = { launched = true })
+        // Attract prompt — top or bottom, always clear of the corners.
+        AttractPrompt(position = promptPosition, onLaunch = { launched = true })
     }
     // file == null: still fetching (or offline first-run with no cache) — show
     // nothing and let the video attract loop play until the cache lands.
 }
 
 @Composable
-private fun AttractPrompt(onLaunch: () -> Unit) {
+private fun AttractPrompt(position: String, onLaunch: () -> Unit) {
+    val atBottom = position.equals("bottom", ignoreCase = true)
     val pulse = rememberInfiniteTransition(label = "attractPulse")
     val glow by pulse.animateFloat(
         initialValue = 0.72f,
@@ -133,14 +136,14 @@ private fun AttractPrompt(onLaunch: () -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
-            .padding(top = 24.dp),
-        contentAlignment = Alignment.TopCenter,
+            .padding(top = if (atBottom) 0.dp else 24.dp, bottom = if (atBottom) 24.dp else 0.dp),
+        contentAlignment = if (atBottom) Alignment.BottomCenter else Alignment.TopCenter,
     ) {
-        // A small pill at the top — deliberately NOT in a corner: all four
-        // corners are the staff-unlock zones (see CornerUnlockOverlay, 180dp
-        // each), and a tap landing in one would drive the unlock sequence
+        // A small pill at the top or bottom — deliberately NOT in a corner: all
+        // four corners are the staff-unlock zones (see CornerUnlockOverlay,
+        // 180dp each), and a tap landing in one would drive the unlock sequence
         // instead of opening the experience. Horizontally centring the pill
-        // keeps it clear of the top-left/top-right zones at any sane screen
+        // keeps it clear of those zones at either edge, at any sane screen
         // width, while leaving the video attract loop almost fully visible.
         Text(
             "TAP TO EXPLORE",

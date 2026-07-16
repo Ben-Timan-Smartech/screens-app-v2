@@ -18,6 +18,14 @@ Rules:
 
 ---
 
+## v0.1.95
+
+- **Choose where the "Tap to explore" prompt sits.** On a screen running a guided
+  experience you can now put the prompt at the **top or the bottom** — pick it on
+  the screen's page under **Display & playback → Guided experience**. It stays
+  centred left-to-right either way, because the screen corners are reserved for
+  the staff unlock gesture.
+
 ## v0.1.94
 
 - **Smaller "Tap to explore" prompt, moved to the top.** On screens running a

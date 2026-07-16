@@ -1333,6 +1333,10 @@ def _ensure_screen_state(device_id: str) -> dict:
             # idle timeout. None = ordinary video-only screen. Set via
             # /api/screens/<id>/experience.
             "experienceUrl": None,
+            # v0.1.95: where the "tap to explore" attract prompt sits —
+            # "top" (default) or "bottom". Never a corner: those are the
+            # staff-unlock zones. Set via /api/screens/<id>/experience.
+            "experiencePromptPos": "top",
             "audioOn": False,                     # screen-wide audio is muted by default — see /api/screens/<id>/audio
             "pollMode": DEFAULT_POLL_MODE,        # "fast" | "normal" | "slow" — see /api/screens/<id>/poll-mode
             "syncGroup": None,                    # see _compute_playback / /api/screens/<id>/sync-group
@@ -2939,6 +2943,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "mixSplash":   False if sync_group_id else s["mixSplash"],
                         "productCard": bool(s.get("productCard")),   # v0.1.86: on-screen product info card
                         "experienceUrl": s.get("experienceUrl"),     # v0.1.92: guided brand experience (kiosk WebView), null = off
+                        "experiencePromptPos": s.get("experiencePromptPos") or "top",   # v0.1.95: "top" | "bottom"
                         "audioOn":     s.get("audioOn", False),
                         "pollMode":    poll_mode,
                         # lowDataMode kept in the payload for old tablets
@@ -3026,6 +3031,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "mixSplash":             state.get("mixSplash", True),
                         "productCard":           bool(state.get("productCard")),   # v0.1.86
                         "experienceUrl":         state.get("experienceUrl"),       # v0.1.92
+                        "experiencePromptPos":   state.get("experiencePromptPos") or "top",   # v0.1.95
                         "audioOn":               state.get("audioOn", False),
                         "pollMode":              pm,
                         "lowDataMode":           pm == "slow",
@@ -3888,7 +3894,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/playlist        { items: [...], mode: "replace"|"append" }
         # POST /api/screens/<deviceId>/mix-splash      { mixSplash: bool }
         # POST /api/screens/<deviceId>/product-card    { productCard: bool }
-        # POST /api/screens/<deviceId>/experience      { experienceUrl: string|null }
+        # POST /api/screens/<deviceId>/experience      { experienceUrl?: string|null, promptPosition?: "top"|"bottom" }
         # POST /api/screens/<deviceId>/audio           { audioOn: bool }
         # POST /api/screens/<deviceId>/poll-mode       { pollMode: "fast"|"normal"|"slow" }
         # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }   (legacy — writes pollMode)
@@ -4096,31 +4102,51 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # WebView loads on a shop-floor device, so it stays behind
                     # the screens.push permission rather than being something a
                     # tablet can set for itself.
-                    raw = body.get("experienceUrl")
-                    url = (raw or "").strip()
-                    if url:
-                        parsed = urllib.parse.urlparse(url)
-                        # https only — the player pins navigation to this
-                        # origin, and an http page would be trivially
-                        # tamperable on store wifi.
-                        if parsed.scheme != "https" or not parsed.netloc:
-                            self.send_error(400, "experienceUrl must be an absolute https:// URL")
-                            return
-                    else:
-                        url = None
+                    # v0.1.95: partial update — each field is only touched when
+                    # its key is present, so the CMS can move the prompt without
+                    # re-sending the URL (and vice versa).
                     state = _ensure_screen_state(device_id)
-                    state["experienceUrl"] = url
+                    touched = []
+                    if "experienceUrl" in body:
+                        url = (body.get("experienceUrl") or "").strip()
+                        if url:
+                            parsed = urllib.parse.urlparse(url)
+                            # https only — the player pins navigation to this
+                            # origin, and an http page would be trivially
+                            # tamperable on store wifi.
+                            if parsed.scheme != "https" or not parsed.netloc:
+                                self.send_error(400, "experienceUrl must be an absolute https:// URL")
+                                return
+                        else:
+                            url = None
+                        state["experienceUrl"] = url
+                        touched.append("url")
+                    if "promptPosition" in body:
+                        pos = (body.get("promptPosition") or "").strip().lower()
+                        # Only top/bottom: a corner would collide with the
+                        # staff-unlock zones and swallow the customer's tap.
+                        if pos not in ("top", "bottom"):
+                            self.send_error(400, "promptPosition must be 'top' or 'bottom'")
+                            return
+                        state["experiencePromptPos"] = pos
+                        touched.append("position")
+                    if not touched:
+                        self.send_error(400, "nothing to update — send experienceUrl and/or promptPosition")
+                        return
                     state["revision"] += 1      # bump so the tablet re-polls promptly
                     _save_per_screen()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
-                    _log_activity(
-                        kind="settings",
-                        text=(f"Guided experience set on {screen_name}" if url
-                              else f"Guided experience cleared on {screen_name}"),
-                        icon="settings",
-                        target=device_id,
-                    )
-                    self._send_json({"ok": True, "experienceUrl": state["experienceUrl"]})
+                    if "url" in touched:
+                        text = (f"Guided experience set on {screen_name}" if state["experienceUrl"]
+                                else f"Guided experience cleared on {screen_name}")
+                    else:
+                        text = f"Guided experience prompt moved to {state['experiencePromptPos']} on {screen_name}"
+                    _log_activity(kind="settings", text=text, icon="settings", target=device_id)
+                    self._send_json({
+                        "ok": True,
+                        "experienceUrl": state["experienceUrl"],
+                        "promptPosition": state.get("experiencePromptPos") or "top",
+                    })
                     return
                 if action == "audio":
                     state = _ensure_screen_state(device_id)

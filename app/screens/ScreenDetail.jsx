@@ -608,47 +608,86 @@ const KNOWN_EXPERIENCES = [
 // interactive HTML) or clears it back to a plain video screen. A tap on the
 // screen opens it; it idles back to the video loop. Absolute https URL is
 // built from the CMS origin so the tablet fetches it from the same host.
-const ExperienceRow = ({ value, onChange, disabled, isLive }) => {
+const ExperienceRow = ({ value, onChange, position, onPositionChange, disabled, isLive }) => {
   const current = value || '';
   const known = KNOWN_EXPERIENCES.find((e) => current.endsWith(e.path));
   const selectVal = current === '' ? '' : (known ? known.path : '__custom__');
+  // v0.1.95: top/bottom only — a corner would sit under the staff-unlock zones
+  // and swallow the customer's tap, so those aren't offered.
+  const pos = position === 'bottom' ? 'bottom' : 'top';
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0' }}>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Guided experience</div>
-        <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>
-          {current
-            ? 'Video plays as the attract loop; a tap opens this interactive experience, which idles back to the loop. Runs offline once cached.'
-            : 'Off — plain video screen. Set an interactive brand experience the customer can tap into.'}
-          {!isLive && ' Saves now, applies when the tablet reconnects.'}
-          {current && (
-            <>
-              {' '}
-              <a href={current} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent, #2563eb)' }}>Preview ↗</a>
-            </>
-          )}
+    <div style={{ padding: '8px 0' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Guided experience</div>
+          <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>
+            {current
+              ? 'Video plays as the attract loop; a tap opens this interactive experience, which idles back to the loop. Runs offline once cached.'
+              : 'Off — plain video screen. Set an interactive brand experience the customer can tap into.'}
+            {!isLive && ' Saves now, applies when the tablet reconnects.'}
+            {current && (
+              <>
+                {' '}
+                <a href={current} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent, #2563eb)' }}>Preview ↗</a>
+              </>
+            )}
+          </div>
         </div>
+        <select
+          value={selectVal}
+          disabled={disabled || selectVal === '__custom__'}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === '') { onChange(null); return; }
+            onChange(`${window.location.origin}${v}`);
+          }}
+          style={{
+            fontSize: 12, padding: '6px 8px', borderRadius: 6,
+            border: 'var(--border-strong)', background: 'var(--ink-10)', color: 'var(--ink-1)',
+            opacity: disabled ? 0.5 : 1, maxWidth: 200,
+          }}>
+          <option value="">Off (plain video)</option>
+          {KNOWN_EXPERIENCES.map((e) => (
+            <option key={e.path} value={e.path}>{e.label}</option>
+          ))}
+          {selectVal === '__custom__' && <option value="__custom__">Custom: {current}</option>}
+        </select>
       </div>
-      <select
-        value={selectVal}
-        disabled={disabled || selectVal === '__custom__'}
-        onChange={(e) => {
-          const v = e.target.value;
-          if (v === '') { onChange(null); return; }
-          const path = v;
-          onChange(`${window.location.origin}${path}`);
-        }}
-        style={{
-          fontSize: 12, padding: '6px 8px', borderRadius: 6,
-          border: 'var(--border-strong)', background: 'var(--ink-10)', color: 'var(--ink-1)',
-          opacity: disabled ? 0.5 : 1, maxWidth: 200,
-        }}>
-        <option value="">Off (plain video)</option>
-        {KNOWN_EXPERIENCES.map((e) => (
-          <option key={e.path} value={e.path}>{e.label}</option>
-        ))}
-        {selectVal === '__custom__' && <option value="__custom__">Custom: {current}</option>}
-      </select>
+      {current && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+          <div style={{ flex: 1, fontSize: 11, color: 'var(--ink-4)' }}>
+            Where the “Tap to explore” prompt sits over the attract video. Always
+            centred horizontally — the screen corners are reserved for the staff
+            unlock gesture.
+          </div>
+          <div style={{
+            display: 'inline-flex',
+            border: 'var(--border-strong)', borderRadius: 6, overflow: 'hidden',
+            opacity: disabled ? 0.5 : 1, flexShrink: 0,
+          }}>
+            {[{ key: 'top', label: 'Top' }, { key: 'bottom', label: 'Bottom' }].map((p, i) => {
+              const selected = pos === p.key;
+              return (
+                <button
+                  key={p.key}
+                  disabled={disabled}
+                  onClick={() => { if (!selected) onPositionChange(p.key); }}
+                  style={{
+                    padding: '6px 14px',
+                    background: selected ? 'var(--ink-0)' : 'var(--ink-10)',
+                    color: selected ? 'var(--on-accent)' : 'var(--ink-2)',
+                    fontSize: 12,
+                    fontWeight: selected ? 600 : 500,
+                    cursor: disabled ? 'not-allowed' : (selected ? 'default' : 'pointer'),
+                    borderLeft: i === 0 ? 'none' : '1px solid var(--ink-7)',
+                  }}>
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1198,11 +1237,26 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
+  // v0.1.95: move the attract prompt without touching the experience URL
+  // (the endpoint takes partial updates).
+  const handleExperiencePosition = async (pos) => {
+    if (!targetDeviceId) return;
+    try {
+      await setScreenExperience(targetDeviceId, { promptPosition: pos });
+      showToast(
+        isLive ? `Prompt moved to the ${pos}` : `Prompt will move to the ${pos} when the tablet reconnects`,
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
   // v0.1.92: point this screen at a guided brand experience, or clear it.
   const handleSetExperience = async (url) => {
     if (!targetDeviceId) return;
     try {
-      await setScreenExperience(targetDeviceId, url);
+      await setScreenExperience(targetDeviceId, { experienceUrl: url || null });
       showToast(
         url
           ? (isLive ? 'Guided experience set — tablet will cache + show it' : 'Guided experience set — applies when the tablet reconnects')
@@ -1740,6 +1794,8 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               <ExperienceRow
                 value={hasHistory ? (lastKnown.experienceUrl || '') : ''}
                 onChange={handleSetExperience}
+                position={hasHistory ? (lastKnown.experiencePromptPos || 'top') : 'top'}
+                onPositionChange={handleExperiencePosition}
                 disabled={!canEdit}
                 isLive={isLive}
               />
