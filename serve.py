@@ -548,9 +548,52 @@ def _save_per_screen() -> None:
     _atomic_write_json(PER_SCREEN_JSON, _per_screen)
 
 
+# v0.2.2: heartbeat write coalescing — see _save_screens_soon for the why.
+_screens_dirty = False
+_screens_flushed_at = 0.0
+# 10s keeps the whole fleet an order of magnitude under the GCS per-object cap
+# no matter how many screens are added, and is far below the 60s poll interval,
+# so nothing that reads lastHeartbeat off disk notices the delay.
+_SCREENS_FLUSH_SEC = 10.0
+
+
 def _save_screens() -> None:
-    """Persist _screens. Call inside _STATE_LOCK after any mutation."""
+    """Persist _screens NOW. Call inside _STATE_LOCK after any mutation.
+
+    High-frequency callers must use [_save_screens_soon] instead."""
+    global _screens_dirty, _screens_flushed_at
     _atomic_write_json(SCREENS_JSON, _screens)
+    _screens_dirty = False
+    _screens_flushed_at = time.monotonic()
+
+
+def _save_screens_soon() -> None:
+    """Persist _screens at most once per [_SCREENS_FLUSH_SEC]. Inside _STATE_LOCK.
+
+    `lastHeartbeat` changes on EVERY beat from EVERY screen, and _save_screens
+    rewrites the whole object. In prod that object lives on a gcsfuse mount, and
+    **GCS caps mutations at ~1/sec per object**. At 28 screens the fleet sustained
+    ~1.35 rewrites/sec — permanently over the cap. GCS answers 429
+    rateLimitExceeded, gcsfuse retries, the write blocks, request threads pile
+    up, and since the service runs minScale=maxScale=1 there is no second
+    instance to take over: the whole CMS goes dark until the backlog drains
+    (~a minute). It scaled linearly with the fleet, so every screen made it
+    worse — and any *other* write landing in that window (an experience upload,
+    say) got stuck behind it and lost.
+
+    Coalescing costs effectively nothing. The in-memory update already happened,
+    so /api/screens and the online/offline logic — which read `_screens`, not the
+    file — stay instantly accurate. Only the disk flush waits. And lastHeartbeat
+    is re-reported by every screen within its poll interval, so the few seconds a
+    restart could lose refill themselves faster than anyone could look.
+
+    Operator writes (register / rename / location / unregister) deliberately keep
+    calling [_save_screens] directly: they're rare, and a person is waiting."""
+    global _screens_dirty
+    _screens_dirty = True
+    if time.monotonic() - _screens_flushed_at < _SCREENS_FLUSH_SEC:
+        return
+    _save_screens()
 
 
 def _save_custom_stores() -> None:
@@ -3941,7 +3984,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state["pollMode"] = "slow"
                     state["lowDataMode"] = True
                     _save_per_screen()
-                _save_screens()
+                # Coalesced, NOT _save_screens(): this fires for every beat of
+                # every screen, and a full-object rewrite per beat put the fleet
+                # permanently over the GCS ~1/sec per-object write cap, which is
+                # what took the whole CMS down. See _save_screens_soon.
+                _save_screens_soon()
             self._send_json({
                 "ok":          True,
                 "revision":    state["revision"],

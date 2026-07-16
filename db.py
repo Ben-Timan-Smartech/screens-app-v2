@@ -191,17 +191,38 @@ def get_session(token: str) -> dict | None:
         return dict(s)
 
 
+# v0.2.2: how stale last_seen_at is allowed to get before a write is worth it.
+# Nothing enforces session expiry off this field — that's `expires_at`, fixed at
+# login — so the only cost of coarse granularity is a slightly rounded timestamp.
+_TOUCH_MIN_INTERVAL_SEC = 60
+
+
 def touch_session(token: str) -> None:
-    """Update last_seen_at. Writes the file — slightly more expensive
-    than the previous in-memory bump, but every authed request needs
-    to call get_session anyway, and write throughput on a tiny JSON
-    file is fine at our scale."""
+    """Update last_seen_at, at most once per [_TOUCH_MIN_INTERVAL_SEC].
+
+    This used to write on EVERY authenticated request. The old docstring
+    reasoned "write throughput on a tiny JSON file is fine at our scale" — true
+    on a local disk, false in prod, where USERS_PATH is a **gcsfuse-mounted GCS
+    object** and GCS caps mutations at ~1/sec PER OBJECT. Every CMS page load
+    fires several authed requests, so simply using the CMS produced a burst of
+    full-file rewrites; GCS answered 429 rateLimitExceeded (16 of them in one
+    20-minute sample), gcsfuse retried, the write blocked, and — on a service
+    pinned to minScale=maxScale=1 — the whole CMS went unavailable behind it.
+
+    The skip-if-fresh check makes this self-coalescing: a session is written at
+    most once a minute no matter how many requests it makes. That's generous
+    given that, as of writing, `last_seen_at` is **written but never read** by
+    anything in this codebase — it's kept for session auditing, so it stays,
+    just not at the cost of an object mutation per request."""
+    now = int(time.time())
     with _lock:
         data = _load_data()
         s = data["sessions"].get(token)
         if not s:
             return
-        s["last_seen_at"] = int(time.time())
+        if now - int(s.get("last_seen_at") or 0) < _TOUCH_MIN_INTERVAL_SEC:
+            return          # already fresh enough — skip the write entirely
+        s["last_seen_at"] = now
         _save_data(data)
 
 
