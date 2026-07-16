@@ -642,12 +642,20 @@ const ExperienceRow = ({ value, onChange, position, onPositionChange, disabled, 
             )}
           </div>
         </div>
+        {/* v0.2.5: NOT disabled on an unknown value. It used to be
+            `disabled || selectVal === '__custom__'`, which locked the control
+            for any URL not in the list — including one whose experience had
+            just been deleted. That left the screen stuck on a dead experience
+            with no way to change it from the CMS: the one control that could
+            fix it disabled itself precisely when it was needed. An unknown
+            value is still shown (so you can see what's set), it just no longer
+            takes the picker hostage. */}
         <select
           value={selectVal}
-          disabled={disabled || selectVal === '__custom__'}
+          disabled={disabled}
           onChange={(e) => {
             const v = e.target.value;
-            if (v === '') { onChange(null); return; }
+            if (v === '' || v === '__custom__') { if (v === '') onChange(null); return; }
             // The API already reports an absolute URL on this origin, so it
             // goes to the tablet as-is.
             onChange(v);
@@ -668,7 +676,15 @@ const ExperienceRow = ({ value, onChange, position, onPositionChange, disabled, 
           {expLoading && current !== '' && !known && (
             <option value={current}>{current.split('/').pop()}</option>
           )}
-          {selectVal === '__custom__' && <option value="__custom__">Custom: {current}</option>}
+          {/* A URL that isn't in the library: either hand-set, or one whose
+              experience has been deleted. Shown so the current state is
+              visible and pickable-away-from, and flagged as missing rather
+              than "custom" when the library has loaded and doesn't have it. */}
+          {selectVal === '__custom__' && (
+            <option value="__custom__">
+              {'⚠ Not in library: ' + current.split('/').pop()}
+            </option>
+          )}
         </select>
       </div>
       {current && (

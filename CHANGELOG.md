@@ -18,6 +18,22 @@ Rules:
 
 ---
 
+## v0.2.5
+
+- **Deleting a guided experience now actually removes it from your screens.**
+  Before, deleting one only removed it from the library: any screen already
+  running it had the file cached on the tablet, so it carried on showing the
+  deleted experience indefinitely. Deleting now resets every screen that was
+  using it back to plain video, and they pick that up on their next check-in.
+  The activity log says how many screens were reset.
+
+- **Fixed: deleting an experience could strand a screen with no way to change
+  it.** The "Guided experience" dropdown greyed itself out whenever a screen
+  pointed at something not in the library — which is exactly what a deleted
+  experience is. So the one control that could fix the problem disabled itself
+  precisely when you needed it. It stays usable now, shows the missing item as
+  "⚠ Not in library", and lets you pick anything else or switch it off.
+
 ## v0.2.4
 
 - **Fixed: an uploaded experience never appeared in the "Guided experience"
