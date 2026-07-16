@@ -512,6 +512,11 @@ class PlayerRepository(
          *  over the video with the currently-playing item's description,
          *  region price, and image. */
         val productCard: Boolean = false,
+        /** v0.1.92: guided brand experience. When non-null it's an https URL
+         *  to a self-contained interactive HTML page the player caches +
+         *  renders in a kiosk WebView (tap the attract prompt to open it,
+         *  idle-returns to the video loop). Null = plain video screen. */
+        val experienceUrl: String? = null,
     )
 
     /** v0.1.35: a sibling in this screen's sync group. The Device
@@ -602,6 +607,13 @@ class PlayerRepository(
      *  info card over the video when true. */
     private val _productCard = MutableStateFlow(false)
     val productCardFlow: StateFlow<Boolean> = _productCard.asStateFlow()
+
+    /** v0.1.92: guided-experience URL for this screen (null = plain video
+     *  screen). The player observes this: when set it caches the HTML and
+     *  shows a "tap to explore" attract prompt over the video; a tap opens
+     *  the cached experience in a kiosk WebView. */
+    private val _experienceUrl = MutableStateFlow<String?>(null)
+    val experienceUrlFlow: StateFlow<String?> = _experienceUrl.asStateFlow()
 
     /** Poll cadence the server has assigned to this screen. The polling
      *  loop reads this on every tick. SLOW also skips the per-location
@@ -935,6 +947,15 @@ class PlayerRepository(
         if (state.productCard != _productCard.value) {
             _productCard.value = state.productCard
             LogBuffer.i(TAG, "Product card → ${if (state.productCard) "on" else "off"}")
+        }
+
+        // v0.1.92: guided-experience URL. Same silent-update pattern — the
+        // experience overlay observes the flow and shows/hides itself; it
+        // doesn't touch the video queue, which keeps playing as the attract
+        // loop underneath.
+        if (state.experienceUrl != _experienceUrl.value) {
+            _experienceUrl.value = state.experienceUrl
+            LogBuffer.i(TAG, "Guided experience → ${state.experienceUrl ?: "off"}")
         }
 
         // Poll mode. The polling loop reads this on every tick to pick
