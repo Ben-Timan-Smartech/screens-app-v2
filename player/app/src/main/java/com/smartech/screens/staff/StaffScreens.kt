@@ -858,21 +858,33 @@ fun SuccessScreen(
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                val compact = compactPane()
                 Box(
                     Modifier
-                        .size(96.dp)
+                        .size(if (compact) 64.dp else 96.dp)
                         .clip(CircleShape)
                         .background(Color(0x263D8C4B)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text("✓", color = Ok, fontSize = 40.sp, fontWeight = FontWeight.Medium)
+                    Text("✓", color = Ok, fontSize = if (compact) 28.sp else 40.sp, fontWeight = FontWeight.Medium)
                 }
-                Spacer(Modifier.height(32.dp))
-                Text(headline, fontSize = 30.sp, fontWeight = FontWeight.Medium, color = Ink)
+                Spacer(Modifier.height(if (compact) 16.dp else 32.dp))
+                Text(
+                    headline,
+                    fontSize = if (compact) 20.sp else 30.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Ink,
+                    textAlign = TextAlign.Center,
+                )
                 Spacer(Modifier.height(8.dp))
-                Text(sub, fontSize = 18.sp, color = Muted, textAlign = TextAlign.Center)
+                Text(
+                    sub,
+                    fontSize = if (compact) 13.sp else 18.sp,
+                    color = Muted,
+                    textAlign = TextAlign.Center,
+                )
 
-                Spacer(Modifier.height(40.dp))
+                Spacer(Modifier.height(if (compact) 20.dp else 40.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Box(
                         Modifier

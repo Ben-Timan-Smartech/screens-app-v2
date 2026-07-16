@@ -18,6 +18,16 @@ Rules:
 
 ---
 
+## v0.2.1
+
+- **Phone polish, from a real phone.** v0.2.0 made the staff screens *fit* on a
+  phone; this makes them usable. On the playlist screen the heading was still
+  sized for a 10-inch tablet and ate most of the panel, pushing the toggles out
+  of sight; a long video title wrapped onto six lines and filled the list; and
+  **Done** — the way out of the screen — sat off the right edge where you had to
+  know to scroll sideways to find it. Heading and title are now sized for the
+  screen, and the buttons sit on two rows so Done is always visible.
+
 ## v0.2.0
 
 - **New: a progress bar on the video.** A screen can now show a slim bar along
