@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>WHOOP × tm:rw — 45s Loop</title>
+<style>
+  :root{
+    --black:#000;--white:#FFF;--accent:#8FBCB1;--grey:#888;--lgrey:#E5E5E5;
+    --w-bg:#101318;--w-card:#1A1F26;--w-green:#0EE07C;--w-yellow:#FFDE00;
+    --w-blue:#4AA8FF;--w-teal:#44D7B6;--w-purple:#9B7BFF;--w-dim:#7A828C;--w-text:#EDF1F4;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#000 !important;color-scheme:dark;overflow:hidden}
+  body{
+    color:var(--white);
+    font-family:"Neue Haas Grotesk Display Pro","Helvetica Neue",Helvetica,Arial,sans-serif;
+    cursor:none;
+  }
+
+  /* progress bar */
+  .progress{
+    position:fixed;top:0;left:0;height:3px;background:var(--accent);
+    width:0;z-index:50;
+  }
+
+  /* brand corner */
+  .brand{
+    position:fixed;top:22px;left:24px;z-index:40;
+    font-weight:700;font-size:20px;letter-spacing:-.02em;
+  }
+  .brand .colon{color:var(--accent)}
+  .brand .x{color:var(--grey);font-weight:400;margin:0 8px;font-size:15px}
+  .scene-count{
+    position:fixed;top:26px;right:24px;z-index:40;
+    font-size:10px;letter-spacing:.24em;color:var(--grey);text-transform:uppercase;
+  }
+
+  /* scenes */
+  .scene{
+    position:fixed;inset:0;
+    display:flex;flex-direction:column;justify-content:center;align-items:center;
+    padding:70px 28px 60px;text-align:center;
+    opacity:0;visibility:hidden;transform:scale(1.015);
+    transition:opacity .65s ease,transform .65s ease,visibility 0s .65s;
+  }
+  .scene.on{
+    opacity:1;visibility:visible;transform:scale(1);
+    transition:opacity .65s ease,transform .65s ease,visibility 0s;
+  }
+  .eyebrow{
+    font-size:11px;letter-spacing:.26em;text-transform:uppercase;color:var(--accent);
+    margin-bottom:18px;
+    opacity:0;transform:translateY(14px);
+  }
+  h1{
+    font-size:clamp(38px,9.5vw,88px);font-weight:700;letter-spacing:-.03em;line-height:.98;
+    margin-bottom:18px;max-width:820px;
+    opacity:0;transform:translateY(18px);
+  }
+  h1 em{font-style:normal;color:var(--accent)}
+  .sub{
+    font-size:clamp(14px,2.4vw,19px);color:var(--lgrey);max-width:480px;
+    opacity:0;transform:translateY(18px);
+  }
+  .scene.on .eyebrow{animation:up .7s .25s ease forwards}
+  .scene.on h1{animation:up .7s .4s ease forwards}
+  .scene.on .sub{animation:up .7s .55s ease forwards}
+  .scene.on .stage{animation:up .8s .6s ease forwards}
+  @keyframes up{to{opacity:1;transform:translateY(0)}}
+
+  .stage{margin-top:34px;opacity:0;transform:translateY(22px)}
+
+  /* phone-ish card */
+  .card{
+    background:var(--w-bg);border:1px solid rgba(255,255,255,.14);
+    border-radius:26px;padding:24px 26px;min-width:min(320px,84vw);
+    box-shadow:0 30px 90px rgba(0,0,0,.7);
+    color:var(--w-text);text-align:left;
+  }
+  .c-label{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--w-dim);margin-bottom:12px}
+
+  /* recovery ring */
+  .ring-box{position:relative;display:flex;justify-content:center}
+  svg.ring{transform:rotate(-90deg)}
+  .ring-track{stroke:rgba(255,255,255,.08);fill:none}
+  .ring-val{fill:none;stroke-linecap:round}
+  .scene.on .ring-val{animation:ringfill 1.8s .8s cubic-bezier(.4,0,.2,1) forwards}
+  @keyframes ringfill{to{stroke-dashoffset:var(--off)}}
+  .ring-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
+  .ring-center .big{font-size:44px;font-weight:800;line-height:1}
+  .ring-center .lbl{font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:var(--w-dim);margin-top:6px}
+
+  /* sleep bar */
+  .sleep-bar{display:flex;height:20px;border-radius:10px;overflow:hidden;margin:6px 0 12px;width:min(320px,80vw)}
+  .sleep-bar i{display:block;height:100%;width:0}
+  .scene.on .sleep-bar i{animation:grow 1.3s .9s ease forwards}
+  @keyframes grow{to{width:var(--w)}}
+  .legend{display:flex;gap:14px;font-size:11px;color:var(--w-dim);justify-content:center}
+  .legend i{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:5px}
+
+  /* strain gauge */
+  .strain-num{font-size:56px;font-weight:800;color:var(--w-blue);line-height:1}
+  .track{height:10px;background:rgba(255,255,255,.08);border-radius:5px;overflow:hidden;margin-top:16px;width:min(300px,76vw)}
+  .track i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--w-blue),var(--w-teal));border-radius:5px}
+  .scene.on .track i{animation:grow 1.4s .9s ease forwards}
+
+  /* healthspan */
+  .ages{display:flex;gap:14px;justify-content:center}
+  .age-card{background:var(--w-card);border-radius:18px;padding:20px 26px;text-align:center}
+  .age-card.good{border:1px solid rgba(68,215,182,.5)}
+  .age-num{font-size:46px;font-weight:800;line-height:1}
+  .age-num.good{color:var(--w-teal)}
+  .age-lbl{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--w-dim);margin-top:8px}
+  .pace{
+    display:inline-block;margin-top:18px;background:rgba(68,215,182,.14);color:var(--w-teal);
+    font-size:13px;font-weight:700;padding:8px 18px;border-radius:100px;
+  }
+
+  /* ecg */
+  .ecg-svg path{stroke-dasharray:1400;stroke-dashoffset:1400}
+  .scene.on .ecg-svg path{animation:draw 2.6s .8s linear forwards}
+  @keyframes draw{to{stroke-dashoffset:0}}
+
+  /* closer pulse */
+  .cta-pill{
+    display:inline-block;background:var(--accent);color:#000;
+    font-size:14px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+    padding:18px 34px;border-radius:100px;margin-top:10px;
+    animation:breathe 2.2s ease-in-out infinite;
+  }
+  @keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+
+  .stats{display:flex;gap:34px;justify-content:center;margin-top:8px}
+  .stats div b{display:block;font-size:clamp(26px,5vw,40px);font-weight:700}
+  .stats div span{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--grey)}
+
+  @media (prefers-reduced-motion:reduce){
+    .scene,.scene.on{transition:opacity .3s}
+    .eyebrow,h1,.sub,.stage{animation:none !important;opacity:1 !important;transform:none !important}
+    .ring-val{stroke-dashoffset:var(--off) !important;animation:none !important}
+    .sleep-bar i,.track i{width:var(--w) !important;animation:none !important}
+    .ecg-svg path{stroke-dashoffset:0 !important;animation:none !important}
+    .cta-pill{animation:none}
+  }
+</style>
+</head>
+<body>
+
+<div class="progress" id="prog"></div>
+<div class="brand">tm<span class="colon">:</span>rw<span class="x">×</span>WHOOP</div>
+<div class="scene-count" id="count">01 / 07</div>
+
+<!-- SCENE 1 — INTRO (7s) -->
+<div class="scene" data-t="7000">
+  <div class="eyebrow">Where Innovation Lives</div>
+  <h1>Your body,<br>finally <em>explained.</em></h1>
+  <p class="sub">A screen-free wearable. 24/7 data. One simple answer every morning.</p>
+  <div class="stage">
+    <div class="stats">
+      <div><b>24/7</b><span>Always on</span></div>
+      <div><b>14+ days</b><span>Battery</span></div>
+      <div><b>0</b><span>Screens</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- SCENE 2 — RECOVERY (7s) -->
+<div class="scene" data-t="7000">
+  <div class="eyebrow">Recovery</div>
+  <h1>Ready to push —<br>or need to rest?</h1>
+  <p class="sub">Every morning: one score from your HRV, resting heart rate and sleep.</p>
+  <div class="stage">
+    <div class="ring-box">
+      <svg class="ring" width="210" height="210" viewBox="0 0 210 210">
+        <circle class="ring-track" cx="105" cy="105" r="92" stroke-width="14"/>
+        <circle class="ring-val" cx="105" cy="105" r="92" stroke-width="14" stroke="#0EE07C"
+          stroke-dasharray="578" stroke-dashoffset="578" style="--off:69"/>
+      </svg>
+      <div class="ring-center">
+        <div class="big" style="color:var(--w-green)">88<span style="font-size:20px">%</span></div>
+        <div class="lbl">Recovered</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SCENE 3 — SLEEP (6.5s) -->
+<div class="scene" data-t="6500">
+  <div class="eyebrow">Sleep</div>
+  <h1>Lab-grade sleep,<br>on your wrist.</h1>
+  <p class="sub">All four sleep stages — and a silent alarm that wakes you at the perfect moment.</p>
+  <div class="stage">
+    <div class="sleep-bar">
+      <i style="--w:22%;background:var(--w-purple)"></i>
+      <i style="--w:24%;background:var(--w-blue)"></i>
+      <i style="--w:48%;background:#2E6FA8"></i>
+      <i style="--w:6%;background:#3A4552"></i>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--w-purple)"></i>Deep</span>
+      <span><i style="background:var(--w-blue)"></i>REM</span>
+      <span><i style="background:#2E6FA8"></i>Light</span>
+      <span><i style="background:#3A4552"></i>Awake</span>
+    </div>
+  </div>
+</div>
+
+<!-- SCENE 4 — STRAIN (6.5s) -->
+<div class="scene" data-t="6500">
+  <div class="eyebrow">Strain</div>
+  <h1>Train exactly as hard<br>as you should.</h1>
+  <p class="sub">A daily exertion target, matched to your body. No overtraining. No guesswork.</p>
+  <div class="stage">
+    <div class="strain-num">14.2<span style="font-size:20px;color:var(--w-dim)"> / 21</span></div>
+    <div class="track"><i style="--w:68%"></i></div>
+  </div>
+</div>
+
+<!-- SCENE 5 — HEALTHSPAN (7s) -->
+<div class="scene" data-t="7000">
+  <div class="eyebrow">Healthspan · New</div>
+  <h1>How fast are you<br><em>really</em> aging?</h1>
+  <p class="sub">WHOOP Age turns your daily habits into your true physiological age.</p>
+  <div class="stage">
+    <div class="ages">
+      <div class="age-card"><div class="age-num">38</div><div class="age-lbl">Actual age</div></div>
+      <div class="age-card good"><div class="age-num good">31.4</div><div class="age-lbl">WHOOP age</div></div>
+    </div>
+    <div><span class="pace">−0.4× · Aging slower</span></div>
+  </div>
+</div>
+
+<!-- SCENE 6 — HEART (6s) -->
+<div class="scene" data-t="6000">
+  <div class="eyebrow">WHOOP MG · Heart Health</div>
+  <h1>An ECG,<br>in 30 seconds.</h1>
+  <p class="sub">Plus irregular rhythm alerts and daily blood pressure insights.</p>
+  <div class="stage">
+    <div class="card" style="min-width:min(360px,86vw)">
+      <div class="c-label">ECG · Live</div>
+      <svg class="ecg-svg" width="100%" height="60" viewBox="0 0 320 60" preserveAspectRatio="none">
+        <path d="M0,34 L38,34 L46,34 L51,14 L56,52 L61,29 L66,34 L118,34 L126,34 L131,14 L136,52 L141,29 L146,34 L198,34 L206,34 L211,14 L216,52 L221,29 L226,34 L278,34 L286,34 L291,14 L296,52 L301,29 L306,34 L320,34"
+          fill="none" stroke="#0EE07C" stroke-width="2.5"/>
+      </svg>
+      <div style="font-size:12px;color:var(--w-dim);margin-top:6px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--w-green);margin-right:7px"></span>Sinus rhythm · 58 bpm</div>
+    </div>
+  </div>
+</div>
+
+<!-- SCENE 7 — CLOSER (5s) -->
+<div class="scene" data-t="5000">
+  <div class="eyebrow">Experience First</div>
+  <h1>Try it on.<br><em>Right now.</em></h1>
+  <p class="sub">Ask a tm:rw Specialist — see your own heart rate on screen in under a minute.</p>
+  <div class="stage">
+    <span class="cta-pill">Live demo at the counter</span>
+  </div>
+</div>
+
+<script>
+  var scenes = Array.prototype.slice.call(document.querySelectorAll('.scene'));
+  var prog = document.getElementById('prog');
+  var count = document.getElementById('count');
+  var total = scenes.reduce(function(s,el){return s + parseInt(el.dataset.t,10)},0); // 45000ms
+  var i = -1, elapsed = 0, startTime = null;
+
+  function next(){
+    if(i >= 0) scenes[i].classList.remove('on');
+    i = (i + 1) % scenes.length;
+    if(i === 0){ elapsed = 0; startTime = performance.now(); }
+    // force reflow so per-scene animations restart on loop
+    void scenes[i].offsetWidth;
+    scenes[i].classList.add('on');
+    count.textContent = ('0'+(i+1)).slice(-2) + ' / ' + ('0'+scenes.length).slice(-2);
+    setTimeout(next, parseInt(scenes[i].dataset.t,10));
+  }
+
+  function tick(now){
+    if(startTime !== null){
+      var pct = Math.min(((now - startTime) / total) * 100, 100);
+      prog.style.width = pct + '%';
+    }
+    requestAnimationFrame(tick);
+  }
+
+  next();
+  requestAnimationFrame(tick);
+</script>
+</body>
+</html>

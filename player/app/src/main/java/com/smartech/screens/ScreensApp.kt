@@ -27,6 +27,9 @@ class ScreensApp : Application() {
         private set
     lateinit var updater: Updater
         private set
+    /** v0.1.92: disk cache for guided-experience HTML (offline kiosk WebView). */
+    lateinit var experienceCache: com.smartech.screens.data.ExperienceCache
+        private set
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -47,6 +50,7 @@ class ScreensApp : Application() {
         )
         val client = ApiClient(tokenProvider = { store.tokenBlocking() })
         val cache = VideoCache(this, client.http)
+        experienceCache = com.smartech.screens.data.ExperienceCache(this, client.http)
         repository = PlayerRepository(this, store, client.api, cache, client.http)
         // Updater shares the OkHttp client (connection pool + interceptors
         // already configured) and asks the store for the live server URL

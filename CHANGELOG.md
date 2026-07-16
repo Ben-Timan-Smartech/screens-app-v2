@@ -18,6 +18,19 @@ Rules:
 
 ---
 
+## v0.1.92
+
+- **Guided brand experiences — interactive content on a screen.** A screen can
+  now host a full **touch-interactive** brand experience (first up: the WHOOP
+  demo) instead of only playing video. The screen's video plays as an attract
+  loop with a **"tap to explore"** prompt; a customer taps to open the
+  interactive experience full-screen, and it returns to the loop on its own
+  after a minute or so of no touch — so it resets for the next person with no
+  staff needed. It **runs offline**: the tablet downloads the experience once
+  and caches it, so a wifi drop doesn't blank the screen. Turn it on per screen
+  from **Display & playback → Guided experience** on the screen's page. Staff
+  still open the menu with the four-corner tap.
+
 ## v0.1.91
 
 - **Fixed (for real this time): tapping the product card now expands it.** The

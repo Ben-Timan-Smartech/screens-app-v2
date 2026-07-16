@@ -36,6 +36,8 @@ fun PlayerScreen(
     val intendedPlaylist by repository.intendedPlaylist.collectAsState()
     val downloads by repository.downloads.collectAsState()
     val mixSplash by repository.mixSplashFlow.collectAsState()
+    // v0.1.92: guided brand experience for this screen (null = plain video).
+    val experienceUrl by repository.experienceUrlFlow.collectAsState()
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
@@ -134,5 +136,12 @@ fun PlayerScreen(
         // before it can reach a layer behind it, so the card's tap-to-expand
         // never fired. The card is now composed in MainActivity ABOVE the
         // staff overlay, in front of that catcher. See MainActivity.setContent.
+
+        // v0.1.92: guided brand experience. Sits over the video (the video is
+        // the attract loop) but BELOW the staff-unlock catcher — which is now
+        // corners-only (see CornerUnlockOverlay), so the four corners still
+        // reach staff unlock while the rest of the screen drives the
+        // experience. No-ops when the screen has no experienceUrl set.
+        ExperienceOverlay(experienceUrl = experienceUrl)
     }
 }

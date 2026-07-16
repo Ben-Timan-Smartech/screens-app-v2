@@ -1,41 +1,35 @@
 package com.smartech.screens.staff
 
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 
 /**
- * Invisible overlay that watches for the "four corners tapped in order"
- * unlock gesture used by the on-tablet staff UI. No visual cue.
+ * Invisible staff-unlock gesture: the four screen corners tapped in order
+ * (top-left → top-right → bottom-right → bottom-left). No visual cue.
  *
- * Sequence: top-left → top-right → bottom-right → bottom-left. Any tap more
- * than [cornerDp] from the expected corner resets the sequence.
- * Time between corner taps is bounded by [timeoutMs].
+ * v0.1.92 — corners-only. Previously this was a single full-screen
+ * `pointerInput` that saw every tap. That was fine when the only thing behind
+ * it was a video, but it can't coexist with interactive content (the guided
+ * brand experience WebView): a full-screen pointer sibling swallows or contends
+ * for every touch, so the experience couldn't scroll or tap.
  *
- * v0.1.37: bumped [cornerDp] from 96 → 180. The old corner area was
- * ~24 mm wide on a 1080p TV at typical viewing distance — staff kept
- * missing the corner with a finger and resetting the sequence. 180 dp
- * gives a ~45 mm landing pad, still small enough that a stray tap on
- * the lower-third doesn't trigger.
+ * Now only four small [cornerDp] zones — one per corner — carry a tap
+ * detector; the entire middle of the screen has NO pointer input, so touches
+ * there fall straight through to whatever is beneath (the experience, the
+ * video). The four-corner sequence is unchanged for staff. The cost is four
+ * small dead zones in the very corners of any interactive content, which is
+ * why customers are pointed at a central "tap to explore" prompt.
  *
- * v0.1.89: this overlay is always mounted on touch devices and sits on
- * top of the player, so a full-screen `detectTapGestures` (which always
- * consumes) used to swallow EVERY tap — breaking the shopper product-info
- * card's tap-to-expand beneath it. We now only CLAIM (consume) a tap when
- * it lands on the corner the sequence is currently waiting for; every
- * other tap is left unconsumed so it falls through to whatever is below.
- * The four-corner unlock still works — the corner you need next (including
- * the bottom-left 4th tap, which overlaps the card) is claimed only once
- * you've hit the earlier corners in order.
+ * A tap on the wrong corner resets the sequence; tapping the top-left corner
+ * always (re)starts it. Time between corner taps is bounded by [timeoutMs].
  */
 @Composable
 fun CornerUnlockOverlay(
@@ -44,63 +38,50 @@ fun CornerUnlockOverlay(
     cornerDp: Int = 180,
     timeoutMs: Long = 4_000,
 ) {
-    val density = LocalDensity.current
-    val cornerPx = remember(cornerDp) { with(density) { cornerDp.dp.toPx() } }
-
+    // Shared, mutation-in-place sequence state so all four corner zones advance
+    // the same counter without triggering recomposition.
     val step = remember { IntArray(1) }
     val lastTap = remember { LongArray(1) }
 
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .pointerInput(Unit) {
-                awaitEachGesture {
-                    // Main-pass first-down. Being on top, we get first refusal
-                    // on every tap — but we only take the ones that matter to
-                    // the unlock sequence and leave the rest for the content
-                    // beneath (e.g. the product-info card's tap-to-expand).
-                    val down = awaitFirstDown(requireUnconsumed = true)
-                    val now = System.currentTimeMillis()
-                    if (now - lastTap[0] > timeoutMs) step[0] = 0
-                    lastTap[0] = now
-
-                    val w = size.width.toFloat()
-                    val h = size.height.toFloat()
-                    val expected = when (step[0]) {
-                        0 -> Offset(0f, 0f)
-                        1 -> Offset(w, 0f)
-                        2 -> Offset(w, h)
-                        3 -> Offset(0f, h)
-                        else -> null
-                    }
-                    if (expected == null || !down.position.isInCorner(expected, cornerPx)) {
-                        // Not the corner we're waiting for — abandon the
-                        // sequence and DON'T consume, so the tap passes
-                        // through to the card / player beneath this overlay.
-                        step[0] = 0
-                        return@awaitEachGesture
-                    }
-                    // On the expected corner: claim the whole tap so the
-                    // content beneath doesn't also react to it.
-                    down.consume()
-                    val up = waitForUpOrCancellation()
-                    if (up == null) {
-                        step[0] = 0
-                        return@awaitEachGesture
-                    }
-                    up.consume()
-                    step[0]++
-                    if (step[0] == 4) {
-                        step[0] = 0
-                        onUnlock()
-                    }
+    fun onCornerTap(index: Int) {
+        val now = System.currentTimeMillis()
+        if (now - lastTap[0] > timeoutMs) step[0] = 0
+        lastTap[0] = now
+        when {
+            index == step[0] -> {
+                step[0]++
+                if (step[0] == 4) {
+                    step[0] = 0
+                    onUnlock()
                 }
             }
-    )
+            index == 0 -> step[0] = 1   // top-left always restarts the sequence
+            else -> step[0] = 0
+        }
+    }
+
+    // Full-screen host with NO pointer input of its own (so it never blocks the
+    // content behind it); only the four corner children are touch-sensitive.
+    Box(modifier = modifier.fillMaxSize()) {
+        CornerZone(Alignment.TopStart, cornerDp) { onCornerTap(0) }
+        CornerZone(Alignment.TopEnd, cornerDp) { onCornerTap(1) }
+        CornerZone(Alignment.BottomEnd, cornerDp) { onCornerTap(2) }
+        CornerZone(Alignment.BottomStart, cornerDp) { onCornerTap(3) }
+    }
 }
 
-private fun Offset.isInCorner(corner: Offset, radius: Float): Boolean {
-    val dx = x - corner.x
-    val dy = y - corner.y
-    return dx * dx + dy * dy <= radius * radius
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.CornerZone(
+    alignment: Alignment,
+    cornerDp: Int,
+    onTap: () -> Unit,
+) {
+    Box(
+        Modifier
+            .align(alignment)
+            .size(cornerDp.dp)
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { onTap() })
+            }
+    )
 }

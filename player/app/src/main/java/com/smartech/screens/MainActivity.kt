@@ -291,7 +291,11 @@ class MainActivity : ComponentActivity() {
                     val cardCity by repo.store.locCity.collectAsState(initial = null)
                     val cardState by repo.state.collectAsState()
                     val staffUp by staffOverlayVisible.collectAsState()
-                    if (!staffUp) {
+                    // v0.1.92: a guided experience owns the whole screen (its
+                    // WebView is rendered in PlayerScreen), so suppress the card
+                    // when one is set — otherwise the card would paint over it.
+                    val experienceActive by repo.experienceUrlFlow.collectAsState()
+                    if (!staffUp && experienceActive == null) {
                         val playingItems = (cardState as? PlayerRepository.State.Playing)
                             ?.items?.map { it.item } ?: emptyList()
                         val currentItem = cardMediaId?.let { id ->
