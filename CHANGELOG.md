@@ -18,6 +18,15 @@ Rules:
 
 ---
 
+## v0.1.98
+
+- **Let customers skip to the next video.** A screen can now show a **"Next ›"**
+  button so a shopper or Specialist can move the loop on instead of waiting.
+  Turn it on per screen under **Display & playback → Next-video button** — it's
+  off by default, so nothing changes on your screens unless you switch it on.
+  It's unavailable on screens in a sync group, because those play in step with
+  each other and skipping just one would knock it out of line.
+
 ## v0.1.97
 
 - **Experiences now have their own section in the content library.** Open

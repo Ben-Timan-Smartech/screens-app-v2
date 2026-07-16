@@ -497,6 +497,20 @@ const deleteExperience = async (id) => {
   return res.json();
 };
 
+// setScreenTapNext — POST /api/screens/<id>/tap-next to show/hide the
+// customer-facing "next video" control on the screen. Off by default. The
+// server forces it off for a screen in a sync group (a lone skip would break
+// the group's lockstep), so the stored value is what the operator chose.
+const setScreenTapNext = async (deviceId, tapNext) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/tap-next`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tapNext }),
+  });
+  if (!res.ok) throw new Error(`tap-next failed: ${res.status}`);
+  return res.json();
+};
+
 // setScreenExperience — POST /api/screens/<id>/experience to point a screen at
 // a guided brand experience (an interactive HTML page the tablet caches +
 // runs offline in a kiosk WebView). Pass a bare https URL to set it, or null /
@@ -1609,7 +1623,7 @@ Object.assign(window, {
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
   setScreenProductCard,
-  setScreenExperience,
+  setScreenExperience, setScreenTapNext,
   useExperiences, uploadExperience, deleteExperience,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,

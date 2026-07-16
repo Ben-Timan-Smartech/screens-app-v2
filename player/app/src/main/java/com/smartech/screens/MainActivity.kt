@@ -23,6 +23,7 @@ import com.smartech.screens.player.PlayerController
 import com.smartech.screens.player.PlayerScreen
 import com.smartech.screens.player.ProductInfoCardOverlay
 import com.smartech.screens.player.TabletCommandPalette
+import com.smartech.screens.player.TapNextOverlay
 import com.smartech.screens.staff.HoldProgressIndicator
 import com.smartech.screens.staff.OnboardingScreen
 import com.smartech.screens.staff.StaffOverlay
@@ -305,6 +306,23 @@ class MainActivity : ComponentActivity() {
                             enabled = cardEnabled,
                             item = currentItem,
                             city = cardCity,
+                        )
+                    }
+
+                    // v0.1.98: customer-facing "next video" control. Composed
+                    // HERE (above StaffOverlay) for the same reason as the card:
+                    // the four-corner unlock catcher is a full-screen pointer
+                    // sibling, and anything behind it never receives taps.
+                    // Centre-right, so it clears the corner unlock zones, the
+                    // product card (bottom-start) and the experience prompt
+                    // (top/bottom centre). Hidden while the staff overlay is up
+                    // or a guided experience owns the screen; `tapNext` is
+                    // already false for sync-group members (server-forced).
+                    val tapNextOn by repo.tapNextFlow.collectAsState()
+                    if (!staffUp && experienceActive == null) {
+                        TapNextOverlay(
+                            enabled = tapNextOn && cardState is PlayerRepository.State.Playing,
+                            onNext = { controller.skipToNext() },
                         )
                     }
 

@@ -1237,6 +1237,22 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
+  // v0.1.98: show/hide the customer-facing "next video" control.
+  const handleTapNextToggle = async (next) => {
+    if (!targetDeviceId) return;
+    try {
+      await setScreenTapNext(targetDeviceId, next);
+      showToast(
+        isLive
+          ? (next ? 'Next-video button on' : 'Next-video button off')
+          : (next ? 'Next-video button will show when the tablet reconnects' : 'Next-video button will hide when the tablet reconnects'),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
   // v0.1.95: move the attract prompt without touching the experience URL
   // (the endpoint takes partial updates).
   const handleExperiencePosition = async (pos) => {
@@ -1791,6 +1807,28 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 onChange={handleProductCardToggle}
                 disabled={!canEdit}
               />
+              {/* v0.1.98: locked off in a sync group — the server forces it
+                  false for members, because one screen skipping ahead would
+                  visibly break the lockstep the group exists for. Same
+                  greyed-out-and-explain pattern as Mix splash above. */}
+              {(() => {
+                const inGroup = hasHistory && !!lastKnown.syncGroup;
+                return (
+                  <ToggleRow
+                    label="Next-video button"
+                    sub={inGroup
+                      ? `Disabled — screen is in sync group '${lastKnown.syncGroup}'. Skipping one screen would break the group's timing. Leave the group to use it.`
+                      : (canEdit
+                        ? (isLive
+                          ? 'Shows a tappable “Next ›” on the screen so a customer can skip to the next video.'
+                          : 'Shows a tappable “Next ›” on the screen. Applies when the tablet reconnects.')
+                        : 'Lets a customer skip to the next video from the screen.')}
+                    value={hasHistory ? (!!lastKnown.tapNext && !inGroup) : false}
+                    onChange={handleTapNextToggle}
+                    disabled={!canEdit || inGroup}
+                  />
+                );
+              })()}
               <ExperienceRow
                 value={hasHistory ? (lastKnown.experienceUrl || '') : ''}
                 onChange={handleSetExperience}

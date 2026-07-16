@@ -520,6 +520,10 @@ class PlayerRepository(
         /** v0.1.95: where the attract prompt sits — "top" (default) or
          *  "bottom". Never a corner: those are the staff-unlock zones. */
         val experiencePromptPos: String = "top",
+        /** v0.1.98: customer-facing "next video" control. The server forces
+         *  this false for a screen in a sync group, so the player can trust
+         *  it without re-checking group membership. */
+        val tapNext: Boolean = false,
     )
 
     /** v0.1.35: a sibling in this screen's sync group. The Device
@@ -622,6 +626,11 @@ class PlayerRepository(
      *  "top" (default) or "bottom". Operator-selectable per screen. */
     private val _experiencePromptPos = MutableStateFlow("top")
     val experiencePromptPosFlow: StateFlow<String> = _experiencePromptPos.asStateFlow()
+
+    /** v0.1.98: show the customer-facing "next video" control. Already
+     *  sync-group-aware: the server sends false for group members. */
+    private val _tapNext = MutableStateFlow(false)
+    val tapNextFlow: StateFlow<Boolean> = _tapNext.asStateFlow()
 
     /** Poll cadence the server has assigned to this screen. The polling
      *  loop reads this on every tick. SLOW also skips the per-location
@@ -971,6 +980,14 @@ class PlayerRepository(
         if (pos != _experiencePromptPos.value) {
             _experiencePromptPos.value = pos
             LogBuffer.i(TAG, "Experience prompt position → $pos")
+        }
+
+        // v0.1.98: customer-facing tap-to-skip control. The server already
+        // forces this false for a screen in a sync group, so no extra check
+        // here — trust the flag.
+        if (state.tapNext != _tapNext.value) {
+            _tapNext.value = state.tapNext
+            LogBuffer.i(TAG, "Tap-next → ${if (state.tapNext) "on" else "off"}")
         }
 
         // Poll mode. The polling loop reads this on every tick to pick
