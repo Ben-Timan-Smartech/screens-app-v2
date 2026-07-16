@@ -101,6 +101,15 @@ PERMISSIONS: dict[str, set[str]] = {
     "library.approve": {"owner", "super_admin", "admin"},
     "library.sync":    {"owner", "super_admin", "admin"},
 
+    # v0.1.96: guided brand experiences (interactive HTML run fullscreen on a
+    # shop-floor screen). Deliberately TIGHTER than library.edit: an experience
+    # is arbitrary HTML+JS on a customer-facing screen — a much bigger blast
+    # radius than a video — so only admins and above may add or remove one.
+    # Viewing is broad so the screen-detail picker and the tablet's Add-content
+    # section can list them.
+    "experiences.view": {"owner", "super_admin", "admin", "manager", "user", "viewer"},
+    "experiences.edit": {"owner", "super_admin", "admin"},
+
     "screens.view":    {"owner", "super_admin", "admin", "manager", "user", "viewer"},
     "screens.push":    {"owner", "super_admin", "admin", "manager", "user"},
     "screens.command": {"owner", "super_admin", "admin", "manager"},

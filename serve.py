@@ -345,6 +345,14 @@ UPLOADS_DIR = Path(os.environ.get(
 # round-trip and no APK release.
 SPLASH_UPLOADS_DIR = UPLOADS_DIR / "splashes"
 
+# v0.1.96: CMS-uploaded guided experiences. Lives under the persistent uploads
+# dir (NOT baked into the container image like interactive/ — that's exactly the
+# trap that made v0.1.92's vendored content 404 in prod), so an admin can add a
+# brand experience with no deploy and it survives redeploys. Served by the same
+# public /interactive/<name>.html route the vendored ones use, so the tablet
+# caches uploaded and built-in experiences identically.
+EXPERIENCE_UPLOADS_DIR = UPLOADS_DIR / "experiences"
+
 # v0.1.21: where tablet crash reports land. One JSON file per crash,
 # named `<deviceId>-<crashTimeMs>.json` so listings sort by tablet
 # then by time. Same FUSE-mount lineage so we don't lose evidence
@@ -383,6 +391,14 @@ CUSTOM_STORES_JSON = Path(os.environ.get(
     "SCREENS_CUSTOM_STORES_PATH",
     _state_path_default("custom_stores.json"),
 ))
+# v0.1.96: index of CMS-uploaded guided experiences. One entry per uploaded
+# file: {id, name, brand, filename, sizeBytes, uploadedAt, uploadedBy}. The
+# vendored interactive/*.html are listed alongside these at runtime (see
+# _list_experiences) but aren't in this file — they ship with the code.
+EXPERIENCES_JSON = Path(os.environ.get(
+    "SCREENS_EXPERIENCES_PATH",
+    _state_path_default("experiences.json"),
+))
 # v0.1.56: city → brand splash mapping. The dict is mutated by the
 # Settings → Splashes UI; pre-v0.1.56 it lived only in memory, so any
 # Cloud Run redeploy silently reset it to defaults. Now persisted
@@ -419,6 +435,10 @@ _per_screen: dict[str, dict] = {}   # deviceId -> {revision, items, pushedAt, mi
 _screens: dict[str, dict] = {}      # deviceId -> registry (last heartbeat, device info, etc.)
 # v0.1.38: keyed by slug id. {id, name, address, city}
 _custom_stores: dict[str, dict] = {}
+# v0.1.96: uploaded guided experiences (the vendored interactive/*.html aren't
+# in here — see _list_experiences). {id, name, brand, filename, sizeBytes,
+# uploadedAt, uploadedBy}
+_experiences: list[dict] = []
 
 
 # ── State persistence ────────────────────────────────────────────────
@@ -541,6 +561,114 @@ def _save_custom_stores() -> None:
 def _save_city_brand() -> None:
     """Persist _city_brand. Call inside _STATE_LOCK after any mutation."""
     _atomic_write_json(CITY_BRAND_JSON, dict(_city_brand))
+
+
+def _save_experiences() -> None:
+    """Persist _experiences. Call inside _STATE_LOCK after any mutation."""
+    _atomic_write_json(EXPERIENCES_JSON, _experiences)
+
+
+# v0.1.96 — the self-containment check. This is the rule that makes a guided
+# experience work OFFLINE: the tablet caches ONE html file, so anything the page
+# pulls from the network at render time is a blank box on a shop-floor screen
+# the moment wifi blips. A README can't enforce that; this does, at upload.
+#
+# Deliberately conservative — we reject rather than try to rewrite/inline. A
+# false reject costs the uploader an inline-your-assets pass; a false accept
+# costs a dead screen in front of a customer.
+_EXTERNAL_REF_PATTERNS = [
+    # <script src="…">, <link href="…">, <img src="…">, <iframe src="…">, …
+    (re.compile(r"""<[^>]+\b(?:src|href)\s*=\s*["']\s*(?:https?:)?//""", re.I),
+     "an external src/href (script, link, image, iframe...)"),
+    # CSS @import url(…) and url(…) pointing off-box
+    (re.compile(r"""@import\s+(?:url\()?\s*["']?\s*(?:https?:)?//""", re.I),
+     "an external CSS @import"),
+    (re.compile(r"""url\(\s*["']?\s*(?:https?:)?//""", re.I),
+     "an external url() (font or image)"),
+    # fetch()/XHR to an absolute URL — the page would hang offline
+    (re.compile(r"""\b(?:fetch|XMLHttpRequest|importScripts)\b[^;\n]{0,80}["']\s*(?:https?:)?//""", re.I),
+     "a network call (fetch/XHR) to an external URL"),
+]
+
+# A guided experience is text; 5 MB is already enormous for inline HTML+CSS+SVG
+# and keeps a bad upload from filling the state bucket.
+_EXPERIENCE_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _validate_experience_html(raw: bytes) -> tuple[str | None, str | None]:
+    """Return (text, error). `error` non-None means reject the upload."""
+    if not raw:
+        return None, "File is empty."
+    if len(raw) > _EXPERIENCE_MAX_BYTES:
+        return None, f"File is too large ({len(raw)} bytes; cap {_EXPERIENCE_MAX_BYTES})."
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, "File must be UTF-8 HTML."
+    low = text.lower()
+    if "<html" not in low and "<!doctype html" not in low and "<body" not in low:
+        return None, "That doesn't look like an HTML page."
+    for pattern, what in _EXTERNAL_REF_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            snippet = text[m.start():m.start() + 70].replace("\n", " ").strip()
+            return None, (
+                f"Rejected: the page references something off-device — {what}. "
+                f"Found near: “{snippet}…”. A guided experience must be fully "
+                "self-contained (everything inline) so it keeps working when the "
+                "screen has no network."
+            )
+    return text, None
+
+
+def _experience_public_url(filename: str) -> str:
+    public = (auth.PUBLIC_URL or "").rstrip("/")
+    path = f"/interactive/{filename}"
+    return f"{public}{path}" if public else path
+
+
+def _list_experiences() -> list[dict]:
+    """Every guided experience the CMS/tablet can choose from: the vendored
+    interactive/*.html that ship with the code, plus anything uploaded.
+
+    `builtin` marks the vendored ones — they can't be deleted from the CMS
+    because they're part of the repo, not the uploads bucket.
+    """
+    out: list[dict] = []
+    try:
+        for f in sorted(INTERACTIVE_DIR.glob("*.html")):
+            out.append({
+                "id": f.stem,
+                "name": f.stem.replace("-", " ").replace("_", " ").title(),
+                "brand": None,
+                "filename": f.name,
+                "url": _experience_public_url(f.name),
+                "sizeBytes": f.stat().st_size,
+                "builtin": True,
+                "uploadedAt": None,
+                "uploadedBy": None,
+            })
+    except OSError:
+        pass
+    with _STATE_LOCK:
+        uploaded = list(_experiences)
+    for e in uploaded:
+        fn = e.get("filename") or ""
+        path = EXPERIENCE_UPLOADS_DIR / fn
+        if not path.is_file():
+            continue    # index/file drifted — don't advertise a 404
+        out.append({
+            "id": e.get("id"),
+            "name": e.get("name") or fn,
+            "brand": e.get("brand"),
+            "filename": fn,
+            "url": _experience_public_url(fn),
+            "sizeBytes": e.get("sizeBytes") or path.stat().st_size,
+            "builtin": False,
+            "uploadedAt": e.get("uploadedAt"),
+            "uploadedBy": e.get("uploadedBy"),
+        })
+    return out
 
 
 def _save_secrets() -> None:
@@ -1144,6 +1272,20 @@ def _load_state_from_disk() -> None:
                 print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
             except Exception as e:
                 print(f"[state] load {path} failed: {e}", file=sys.stderr)
+
+        # v0.1.96: the experiences index is a LIST, so it can't ride the
+        # dict-only loop above.
+        global _experiences
+        if EXPERIENCES_JSON.is_file():
+            try:
+                raw = json.loads(EXPERIENCES_JSON.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    _experiences = raw
+                    print(f"[state] loaded {len(raw)} experiences from {EXPERIENCES_JSON}", file=sys.stderr)
+                else:
+                    print(f"[state] {EXPERIENCES_JSON}: top-level isn't a list, skipping", file=sys.stderr)
+            except Exception as e:
+                print(f"[state] load {EXPERIENCES_JSON} failed: {e}", file=sys.stderr)
 
 
 # ── Activity log ─────────────────────────────────────────────────────
@@ -2351,6 +2493,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path.split("?", 1)[0] == "/api/splashes/upload":
             self._serve_api_splash_upload()
             return
+        if self.path.split("?", 1)[0] == "/api/experiences/upload":
+            self._serve_api_experience_upload()
+            return
         if self.path.startswith("/api/"):
             self._serve_api_post()
             return
@@ -2487,6 +2632,109 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # Cloud Run's per-instance memory ceiling is 4 GiB and we share
     # it with library cache + state JSON + Python overhead.
     _UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
+
+    def _serve_api_experience_upload(self) -> None:
+        """POST /api/experiences/upload — multipart/form-data:
+          file   the .html bytes (required)
+          name   human-readable label (optional; defaults to the filename)
+          brand  brand id/label (optional)
+
+        Admin+ only: an experience is arbitrary HTML+JS rendered fullscreen on
+        a customer-facing screen, a far bigger blast radius than a video.
+
+        The upload is REJECTED unless the page is fully self-contained (no
+        external scripts/styles/images/fonts/fetches) — that's what lets the
+        tablet cache one file and keep running with no network. Stored in the
+        persistent uploads bucket, so it needs no deploy and survives redeploys.
+        """
+        if self._require_perm("experiences.edit") is None:
+            return
+
+        ctype = self.headers.get("Content-Type", "")
+        if not ctype.lower().startswith("multipart/form-data"):
+            self.send_error(415, "Expected multipart/form-data"); return
+        boundary = None
+        for piece in ctype.split(";"):
+            piece = piece.strip()
+            if piece.lower().startswith("boundary="):
+                boundary = piece[len("boundary="):].strip().strip('"')
+                break
+        if not boundary:
+            self.send_error(400, "Missing multipart boundary"); return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.send_error(411, "Content-Length required"); return
+        if length <= 0:
+            self.send_error(411, "Content-Length required"); return
+        if length > _EXPERIENCE_MAX_BYTES * 2:      # generous multipart overhead
+            self.send_error(413, "Body too large"); return
+
+        raw = self.rfile.read(length)
+        try:
+            parts = _parse_multipart(raw, boundary.encode("ascii"))
+        except Exception as exc:
+            self.send_error(400, f"Bad multipart body: {exc}"); return
+
+        file_part = next((p for p in parts if p["name"] == "file" and p.get("filename")), None)
+
+        def _field(field_name: str, default: str = "") -> str:
+            return next((p["data"].decode("utf-8", "replace").strip()
+                         for p in parts if p["name"] == field_name), default)
+
+        if file_part is None or not file_part.get("data"):
+            self.send_error(400, "Missing 'file' field"); return
+        text, err = _validate_experience_html(file_part["data"])
+        if err:
+            # 422: the request is well-formed, the *content* is unusable.
+            self.send_error(422, err); return
+
+        orig = file_part.get("filename") or "experience.html"
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(orig).stem).strip("-").lower()[:48] or "experience"
+        name = (_field("name") or Path(orig).stem).strip()[:80]
+        brand = _field("brand").strip()[:60] or None
+
+        EXPERIENCE_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        with _STATE_LOCK:
+            taken = {e.get("id") for e in _experiences}
+        # Vendored names are reachable on the same route, so avoid colliding
+        # with them too — first match wins in _serve_interactive.
+        taken |= {p.stem for p in INTERACTIVE_DIR.glob("*.html")}
+        exp_id = stem
+        n = 2
+        while exp_id in taken:
+            exp_id = f"{stem}-{n}"; n += 1
+        filename = f"{exp_id}.html"
+        try:
+            (EXPERIENCE_UPLOADS_DIR / filename).write_text(text, encoding="utf-8")
+        except OSError as e:
+            print(f"[experiences] write failed: {e}", file=sys.stderr)
+            self.send_error(500, "Could not save the experience"); return
+
+        user = self._current_user() or {}
+        entry = {
+            "id": exp_id,
+            "name": name or exp_id,
+            "brand": brand,
+            "filename": filename,
+            "sizeBytes": len(file_part["data"]),
+            # Epoch ms, matching how the rest of the state stores timestamps —
+            # avoids pulling datetime in just for this.
+            "uploadedAt": int(time.time() * 1000),
+            "uploadedBy": user.get("email") or user.get("name"),
+        }
+        with _STATE_LOCK:
+            _experiences.append(entry)
+            _save_experiences()
+        _log_activity(
+            kind="library",
+            text=f"Uploaded guided experience “{entry['name']}”",
+            icon="upload",
+        )
+        self._send_json({
+            "ok": True,
+            "experience": {**entry, "url": _experience_public_url(filename), "builtin": False},
+        })
 
     def _serve_api_library_upload(self) -> None:
         """POST /api/library/upload — multipart/form-data with fields:
@@ -3167,6 +3415,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 return
             self._send_json(data, extra_headers=[("ETag", etag)])
+            return
+
+        if path == "/api/experiences":
+            # v0.1.96: list guided experiences (vendored + uploaded). No
+            # permission gate, matching /api/library above — the tablet reads
+            # this with no CMS session to build its Add-content Experiences
+            # section, and the HTML itself is already served publicly at
+            # /interactive/. Uploading/deleting IS gated (experiences.edit).
+            self._send_json({"experiences": _list_experiences()})
             return
 
         if path == "/api/library/info":
@@ -4514,6 +4771,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _serve_api_delete(self) -> None:
         path = self.path.split("?", 1)[0]
+        # v0.1.96: DELETE /api/experiences/<id> removes an UPLOADED experience.
+        # Vendored interactive/*.html aren't in _experiences, so this 404s for
+        # them — they're part of the repo, not something the CMS can delete.
+        exp_m = re.match(r"^/api/experiences/([A-Za-z0-9_-]+)$", path)
+        if exp_m:
+            if self._require_perm("experiences.edit") is None:
+                return
+            exp_id = exp_m.group(1)
+            with _STATE_LOCK:
+                entry = next((e for e in _experiences if e.get("id") == exp_id), None)
+                if entry is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                _experiences.remove(entry)
+                _save_experiences()
+            fn = entry.get("filename") or ""
+            if fn:
+                target = (EXPERIENCE_UPLOADS_DIR / fn).resolve()
+                try:
+                    inside = target.is_relative_to(EXPERIENCE_UPLOADS_DIR.resolve())
+                except AttributeError:
+                    inside = str(target).startswith(str(EXPERIENCE_UPLOADS_DIR.resolve()))
+                if inside and target.is_file():
+                    try:
+                        target.unlink()
+                    except OSError as e:
+                        # Index is already updated; a stray file is harmless
+                        # (it stops being advertised) but worth a log line.
+                        print(f"[experiences] unlink {target} failed: {e}", file=sys.stderr)
+            _log_activity(
+                kind="library",
+                text=f"Deleted guided experience “{entry.get('name') or exp_id}”",
+                icon="trash",
+            )
+            # Screens still pointed at it fall back to their video loop: the
+            # player treats a failed fetch with no cache as "no experience".
+            self._send_json({"ok": True, "id": exp_id})
+            return
         # v0.1.38: DELETE /api/stores/<id> removes a custom store.
         # Built-ins (defined in data.jsx + LocationTaxonomy.kt) can't
         # be deleted because they're not in _custom_stores; the
@@ -4696,12 +4990,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         name = urllib.parse.unquote(raw_path[len("/interactive/"):])
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}\.html", name):
             self.send_error(404, "Not found"); return
-        target = (INTERACTIVE_DIR / name).resolve()
-        try:
-            inside = target.is_relative_to(INTERACTIVE_DIR.resolve())
-        except AttributeError:                       # py<3.9 safety net
-            inside = str(target).startswith(str(INTERACTIVE_DIR.resolve()))
-        if not inside or not target.is_file():
+        # v0.1.96: vendored experiences (shipped in the image) first, then
+        # CMS-uploaded ones (persistent uploads bucket). Same public route for
+        # both so the tablet caches them identically and doesn't care which is
+        # which. Each candidate is re-checked to be inside its own root, so a
+        # crafted name still can't climb out to serve.py / secrets.json.
+        target = None
+        for root in (INTERACTIVE_DIR, EXPERIENCE_UPLOADS_DIR):
+            cand = (root / name).resolve()
+            try:
+                inside = cand.is_relative_to(root.resolve())
+            except AttributeError:                   # py<3.9 safety net
+                inside = str(cand).startswith(str(root.resolve()))
+            if inside and cand.is_file():
+                target = cand
+                break
+        if target is None:
             self.send_error(404, "Not found"); return
         try:
             body = target.read_bytes()
