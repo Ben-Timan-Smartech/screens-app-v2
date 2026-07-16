@@ -51,10 +51,11 @@ import java.io.File
  * HTML and layers a retail flow over the video:
  *
  *   attract  — the video playlist keeps playing as the attract loop; we show a
- *              centred "tap to explore" prompt, deliberately away from the four
- *              corners (those stay reserved for the staff-unlock gesture — see
- *              [com.smartech.screens.staff.CornerUnlockOverlay], which is now
- *              corners-only so the rest of the screen is interactive).
+ *              centred "tap to explore" prompt. Since v0.2.7 the staff-unlock
+ *              gesture is detected at the activity (see
+ *              MainActivity.dispatchTouchEvent) and consumes nothing, so the
+ *              corners are no longer dead and the prompt could sit anywhere;
+ *              centred is simply where it reads best over the video.
  *   engaged  — a tap opens the cached experience fullscreen in a locked-down
  *              kiosk WebView. Navigation is pinned to the loaded file, so it
  *              can't wander to the open web.
@@ -140,20 +141,20 @@ private fun AttractPrompt(position: String, onLaunch: () -> Unit) {
             .padding(top = if (atBottom) 0.dp else 24.dp, bottom = if (atBottom) 24.dp else 0.dp),
         contentAlignment = if (atBottom) Alignment.BottomCenter else Alignment.TopCenter,
     ) {
-        // A small pill at the top or bottom — deliberately NOT in a corner: all
-        // four corners are the staff-unlock zones (see CornerUnlockOverlay),
-        // and a tap landing in one would drive the unlock sequence instead of
-        // opening the experience. Horizontally centring the pill keeps it clear
-        // of those zones at either edge while leaving the video attract loop
-        // almost fully visible.
+        // A small pill at the top or bottom, horizontally centred — placed for
+        // legibility over the attract loop, not to dodge anything.
         //
-        // That reasoning was width-only, and the zones were a fixed 180dp — so
-        // on a 360dp phone the top-left and top-right zones met in the middle
-        // and this pill, at y≈24-68, sat inside the resulting full-width band.
-        // Every tap on "TAP TO EXPLORE" silently advanced the staff-unlock
-        // sequence instead of opening the experience. v0.2.0 derives the zones
-        // from the shorter edge so they can never tile; the vertical clearance
-        // this pill needs now actually exists.
+        // It used to be a dodge. The staff-unlock catcher put pointer-input
+        // Boxes in the four corners, and a Compose sibling with pointerInput
+        // swallows every touch in its bounds, so those corners were dead to
+        // this pill. Worse, the zones were a fixed 180dp: on a 360dp-tall
+        // phone the top-left and top-right zones met in the middle, and this
+        // pill at y≈24-68 sat inside the resulting full-width band — every tap
+        // on "TAP TO EXPLORE" silently advanced the unlock sequence instead of
+        // opening the experience. v0.2.0 sized the zones off the shorter edge
+        // so two could never meet; v0.2.7 removed the catcher altogether and
+        // moved detection to MainActivity.dispatchTouchEvent, which observes
+        // without consuming. No screen region is reserved any more.
         Text(
             "TAP TO EXPLORE",
             color = Color(0xFFE8A33D),

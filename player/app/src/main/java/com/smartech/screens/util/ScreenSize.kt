@@ -69,32 +69,39 @@ data class ScreenMetrics(
     val railWidth: Dp? get() =
         if (isNarrow) null else min(RAIL_MAX_DP, (widthDp * RAIL_FRACTION).toInt()).dp
 
-    /**
-     * Edge length of each of the four staff-unlock corner zones.
-     *
-     * Capped at a quarter of the shorter edge, and that cap is the whole point:
-     * at a fixed 180dp on a 360dp-wide phone the top-left and top-right zones
-     * meet in the middle with no gap, turning "four corners" into a full-width
-     * tap-eating band — and in landscape (360dp tall) the left and right zones
-     * tile top-to-bottom, killing 45% of the screen. A quarter of the shorter
-     * edge guarantees two opposing zones can never span it: they occupy half,
-     * always leaving a live gap between them.
-     *
-     * At 800dp (tablet, shorter edge) a quarter would be 200dp, so the 180dp
-     * cap holds and the fleet's unlock gesture is untouched.
-     */
-    val cornerZone: Dp get() =
-        min(CORNER_MAX_DP, (smallestDimensionDp * CORNER_FRACTION).toInt()).dp
-
     private companion object {
         const val STACK_BELOW_DP = 600
         const val SHORT_BELOW_DP = 480
         const val RAIL_MAX_DP = 420
         const val RAIL_FRACTION = 0.42f
-        const val CORNER_MAX_DP = 180
-        const val CORNER_FRACTION = 0.25f
     }
 }
+
+/**
+ * Edge length of each of the four staff-unlock corner zones, in dp.
+ *
+ * Read by MainActivity.dispatchTouchEvent, which is where the four-corner
+ * gesture is recognised. It lives out here as a pure function of the shorter
+ * edge because the activity has no Compose scope to ask [ScreenMetrics] from —
+ * and because one definition that both sides share can't drift out of step.
+ *
+ * The quarter-of-the-shorter-edge cap is the whole point: at a fixed 180dp on a
+ * 360dp-wide phone the top-left and top-right zones meet in the middle with no
+ * gap, and in landscape (360dp tall) the left and right zones tile top-to-
+ * bottom. A quarter guarantees two opposing zones can never span the edge —
+ * they occupy half of it, always leaving a live gap between them. That matters
+ * less than it did now that the zones only observe taps instead of eating them,
+ * but a gesture that fires from a tap anywhere along a full-width band is still
+ * a gesture that fires by accident.
+ *
+ * At 800dp (tablet, shorter edge) a quarter would be 200dp, so the 180dp cap
+ * holds and the fleet's unlock gesture is unchanged.
+ */
+fun cornerZoneDp(shorterEdgeDp: Float): Float =
+    min(CORNER_MAX_DP, shorterEdgeDp * CORNER_FRACTION)
+
+private const val CORNER_MAX_DP = 180f
+private const val CORNER_FRACTION = 0.25f
 
 /** The current window's metrics; recomposes callers on rotation / resize. */
 @Composable
