@@ -18,6 +18,19 @@ Rules:
 
 ---
 
+## v0.1.96
+
+- **"Back to video" button on every guided experience.** A customer who opens an
+  experience can now close it themselves with a button at the top of the screen,
+  instead of waiting for it to time out. It's added by the app, so every
+  experience gets one automatically — brands don't have to build it in.
+- **Upload guided experiences from the CMS.** Admins can now upload an
+  experience as an HTML file instead of it needing a developer and a release.
+  The upload is **checked before it's accepted**: if the page pulls anything from
+  the internet (scripts, fonts, images) it's refused with an explanation, because
+  that's what would leave a screen blank when the shop wifi drops. Uploaded
+  experiences appear alongside the built-in ones.
+
 ## v0.1.95
 
 - **Choose where the "Tap to explore" prompt sits.** On a screen running a guided

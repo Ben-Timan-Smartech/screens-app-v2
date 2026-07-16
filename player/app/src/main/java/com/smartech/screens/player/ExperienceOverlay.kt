@@ -111,6 +111,7 @@ fun ExperienceOverlay(
         ExperienceWebView(
             file = file,
             onInteraction = { interactionTick++ },
+            onExit = { launched = false },
         )
     } else if (!launched && file != null) {
         // Attract prompt — top or bottom, always clear of the corners.
@@ -170,6 +171,7 @@ private fun AttractPrompt(position: String, onLaunch: () -> Unit) {
 private fun ExperienceWebView(
     file: File,
     onInteraction: () -> Unit,
+    onExit: () -> Unit,
 ) {
     val fileUrl = remember(file) { "file://${file.absolutePath}" }
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -216,6 +218,35 @@ private fun ExperienceWebView(
                 wv.loadUrl("about:blank")
                 wv.destroy()
             },
+        )
+
+        // Exit chrome — drawn by the PLAYER over the WebView, not by the
+        // experience itself, so every experience (including ones uploaded
+        // later) gets a way out for free and no brand has to remember to build
+        // one. Without this a customer's only exits are the idle timeout or a
+        // Back button a touch screen doesn't have.
+        //
+        // Top-centre: clear of the four corner staff-unlock zones (a tap there
+        // would drive the unlock sequence instead of exiting). Composed after
+        // the AndroidView so it sits in front of the WebView and wins the tap.
+        Text(
+            "← BACK TO VIDEO",
+            color = Color(0xFFF7F6F2),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 1.6.sp,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 12.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(Color(0xCC101010))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { onExit() }
+                // ~40dp tall — a deliberate, easy target without stealing much
+                // of the experience's own header area.
+                .padding(horizontal = 20.dp, vertical = 12.dp),
         )
     }
 }
