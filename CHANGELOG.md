@@ -18,6 +18,23 @@ Rules:
 
 ---
 
+## v0.2.3
+
+- **Fixed: a rejected experience upload took the whole CMS down.** If you
+  uploaded an HTML file that failed the self-contained check, the server didn't
+  just reject it — it crashed, and the CMS became unreachable ("Service
+  unavailable" / "Rate exceeded") until it was redeployed. It did not recover on
+  its own. Screens kept playing their cached content throughout; it was the CMS
+  that was unusable.
+
+  The cause was an em dash (—) in our own rejection message. That message was
+  being put in the HTTP status line, which can only carry a limited set of
+  characters, so writing the rejection blew up half-way through sending it and
+  took the server with it. Error messages are now made safe automatically
+  before they go on that line, and the full wording still reaches you — so a
+  bad upload now does what it always should have: shows you why, and leaves
+  everything else running.
+
 ## v0.2.2
 
 - **Fixed: the CMS could go down for a minute at a time, on its own.** Symptoms
