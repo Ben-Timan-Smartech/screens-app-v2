@@ -87,10 +87,12 @@ fun CalibrationOverlay(
     // seconds and the countdown below it have to fit too), then capped at the
     // original 220sp so the fleet's tablets render exactly as they do today.
     val metrics = rememberScreenMetrics()
-    val pad = if (metrics.isNarrow || metrics.isShort) 16.dp else 48.dp
-    val padPx = if (metrics.isNarrow || metrics.isShort) 32 else 96
+    val tight = metrics.isNarrow || metrics.isShort
+    val pad = if (tight) 16.dp else 48.dp
+    // Both sides of the padding, in dp — what the clock doesn't get to use.
+    val padBothSidesDp = if (tight) 32 else 96
     val clockSp = minOf(
-        (metrics.widthDp - padPx) / GLYPHS_EM,
+        (metrics.widthDp - padBothSidesDp) / GLYPHS_EM,
         metrics.heightDp * CLOCK_MAX_HEIGHT_FRACTION,
         CLOCK_MAX_SP,
     ).coerceAtLeast(CLOCK_MIN_SP)
