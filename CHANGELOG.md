@@ -18,6 +18,13 @@ Rules:
 
 ---
 
+## v0.1.94
+
+- **Smaller "Tap to explore" prompt, moved to the top.** On screens running a
+  guided experience, the prompt was a big block in the middle of the screen,
+  covering the video. It's now a small pill at the top — the attract video is
+  almost fully visible, and it's still an easy target to hit.
+
 ## v0.1.93
 
 - **Hotfix: guided experiences now actually load in production.** v0.1.92 shipped

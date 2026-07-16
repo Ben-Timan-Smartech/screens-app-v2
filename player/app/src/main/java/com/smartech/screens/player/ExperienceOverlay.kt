@@ -16,10 +16,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -38,7 +35,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -135,47 +131,34 @@ private fun AttractPrompt(onLaunch: () -> Unit) {
         label = "attractGlow",
     )
     Box(
-        Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center,
+        Modifier
+            .fillMaxSize()
+            .padding(top = 24.dp),
+        contentAlignment = Alignment.TopCenter,
     ) {
-        // A single, generous, centred tap target. Kept in the middle of the
-        // screen on purpose: the four corners are the staff-unlock zones, so we
-        // direct the customer to press here instead.
-        Column(
-            Modifier
-                .clip(RoundedCornerShape(22.dp))
+        // A small pill at the top — deliberately NOT in a corner: all four
+        // corners are the staff-unlock zones (see CornerUnlockOverlay, 180dp
+        // each), and a tap landing in one would drive the unlock sequence
+        // instead of opening the experience. Horizontally centring the pill
+        // keeps it clear of the top-left/top-right zones at any sane screen
+        // width, while leaving the video attract loop almost fully visible.
+        Text(
+            "TAP TO EXPLORE",
+            color = Color(0xFFE8A33D),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 2.sp,
+            modifier = Modifier
+                .clip(RoundedCornerShape(999.dp))
                 .background(Color(0xE6101010))
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                 ) { onLaunch() }
-                .padding(horizontal = 48.dp, vertical = 34.dp)
+                // ~44dp tall overall — still a comfortable touch target.
+                .padding(horizontal = 26.dp, vertical = 14.dp)
                 .alpha(glow),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                "TAP TO EXPLORE",
-                color = Color(0xFFE8A33D),
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 3.sp,
-            )
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "See your body's data,\nfinally explained.",
-                color = Color(0xFFF7F6F2),
-                fontSize = 30.sp,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.Center,
-                lineHeight = 36.sp,
-            )
-            Spacer(Modifier.height(14.dp))
-            Text(
-                "Touch here to begin",
-                color = Color(0x99FFFFFF),
-                fontSize = 14.sp,
-            )
-        }
+        )
     }
 }
 
