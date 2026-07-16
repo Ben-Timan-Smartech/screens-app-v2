@@ -18,6 +18,14 @@ Rules:
 
 ---
 
+## v0.1.97
+
+- **Experiences now have their own section in the content library.** Open
+  **Content library → Experiences** to see every guided experience, preview any
+  of them, and (admins) upload a new one or delete one you added. Built-in
+  experiences are marked and can't be deleted. If an upload is refused, the
+  reason is shown right there so you know what to fix.
+
 ## v0.1.96
 
 - **"Back to video" button on every guided experience.** A customer who opens an

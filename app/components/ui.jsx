@@ -446,6 +446,57 @@ const setScreenProductCard = async (deviceId, productCard) => {
   return res.json();
 };
 
+// v0.1.97: useExperiences — the guided-experience library (vendored + uploaded).
+// Small payload, so no ETag dance like useLibrary; refetch on demand via
+// reload(). Returns { experiences, loading, error, reload }.
+const useExperiences = () => {
+  const [state, setState] = React.useState({ experiences: [], loading: true, error: null });
+  const load = React.useCallback(async () => {
+    try {
+      const res = await fetch('/api/experiences', { cache: 'no-store' });
+      if (!res.ok) throw new Error('http ' + res.status);
+      const body = await res.json();
+      setState({ experiences: Array.isArray(body.experiences) ? body.experiences : [], loading: false, error: null });
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: e.message }));
+    }
+  }, []);
+  React.useEffect(() => { load(); }, [load]);
+  return { ...state, reload: load };
+};
+
+// uploadExperience — POST /api/experiences/upload (multipart). Admin/owner only
+// (experiences.edit). The server refuses any page that isn't fully
+// self-contained; surface its explanation verbatim, because "why was my file
+// rejected" is the whole point of that check.
+const uploadExperience = async ({ file, name, brand }) => {
+  const fd = new FormData();
+  fd.append('file', file);
+  if (name) fd.append('name', name);
+  if (brand) fd.append('brand', brand);
+  const res = await fetch('/api/experiences/upload', { method: 'POST', body: fd });
+  if (!res.ok) {
+    let msg = `Upload failed (${res.status})`;
+    try {
+      const t = await res.text();
+      // stdlib send_error returns an HTML error page; pull the message out.
+      const m = t.match(/<p>Message:\s*([^<]+)</i);
+      if (m) msg = m[1].trim();
+      else if (t && t.length < 400) msg = t.trim();
+    } catch (_) { /* keep generic */ }
+    throw new Error(msg);
+  }
+  return res.json();
+};
+
+// deleteExperience — DELETE /api/experiences/<id>. Uploaded ones only; the
+// built-in (vendored) experiences aren't deletable from the CMS.
+const deleteExperience = async (id) => {
+  const res = await fetch(`/api/experiences/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`Delete failed (${res.status})`);
+  return res.json();
+};
+
 // setScreenExperience — POST /api/screens/<id>/experience to point a screen at
 // a guided brand experience (an interactive HTML page the tablet caches +
 // runs offline in a kiosk WebView). Pass a bare https URL to set it, or null /
@@ -1559,6 +1610,7 @@ Object.assign(window, {
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
   setScreenProductCard,
   setScreenExperience,
+  useExperiences, uploadExperience, deleteExperience,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,
   addStore, deleteStore, refreshStoresFromServer,

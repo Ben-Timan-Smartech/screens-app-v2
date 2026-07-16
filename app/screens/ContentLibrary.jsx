@@ -1017,6 +1017,154 @@ const UploadPanel = ({ open, onClose }) => {
   );
 };
 
+// v0.1.97: Experiences — guided brand experiences (interactive HTML the tablet
+// caches and runs offline). Its own section in the content library because it
+// isn't a video: you don't push it to a playlist, you point a screen at it from
+// the screen's page.
+//
+// Upload is admin/owner only (experiences.edit). The server refuses any page
+// that isn't fully self-contained; we surface that refusal verbatim, because
+// "why was my file rejected" is exactly what the uploader needs to know.
+// Local size formatter — ScreenDetail's formatBytes is module-scoped there and
+// isn't on window, so it isn't reachable from this file. Experiences are tens
+// of KB, so KB/MB is all we need.
+const formatExpSize = (n) => {
+  if (n == null) return '—';
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
+};
+
+// Rail key for the Experiences pseudo-brand. Namespaced so it can't collide
+// with a real brand id from the library.
+const EXPERIENCES_KEY = '__experiences__';
+
+const ExperiencesPane = ({ canManage, isMobile }) => {
+  const { experiences, loading, error, reload } = useExperiences();
+  const [busy, setBusy] = React.useState(false);
+  const [uploadErr, setUploadErr] = React.useState(null);
+  const fileRef = React.useRef(null);
+
+  const onPick = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';              // let the same file be re-picked after a fix
+    if (!file) return;
+    setUploadErr(null);
+    setBusy(true);
+    try {
+      const res = await uploadExperience({ file, name: file.name.replace(/\.html?$/i, '') });
+      showToast(`Uploaded “${res.experience?.name || file.name}”`, 'ok');
+      reload();
+    } catch (err) {
+      setUploadErr(err.message);      // inline, not a toast — it's long + actionable
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDelete = async (exp) => {
+    if (!window.confirm(`Delete “${exp.name}”?\n\nAny screen using it falls back to its video loop.`)) return;
+    try {
+      await deleteExperience(exp.id);
+      showToast(`Deleted “${exp.name}”`, 'ok');
+      reload();
+    } catch (err) {
+      showToast(`Failed: ${err.message}`, 'err');
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>Guided experiences</div>
+          <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2, maxWidth: 560 }}>
+            Interactive pages a customer can tap through on a screen. The tablet downloads one
+            once and runs it from its own storage, so it keeps working with no wifi. Point a
+            screen at one from that screen’s page → Display &amp; playback → Guided experience.
+          </div>
+        </div>
+        {canManage && (
+          <>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".html,text/html"
+              onChange={onPick}
+              style={{ display: 'none' }}
+            />
+            <Button
+              variant="primary" size="sm"
+              icon={<Icon.upload size={13} />}
+              disabled={busy}
+              onClick={() => fileRef.current && fileRef.current.click()}>
+              {busy ? 'Uploading…' : 'Upload experience'}
+            </Button>
+          </>
+        )}
+      </div>
+
+      {uploadErr && (
+        <div style={{
+          border: '1px solid var(--err, #b3261e)', borderRadius: 8,
+          background: 'var(--ink-9)', padding: '12px 14px', marginBottom: 16,
+          fontSize: 12, color: 'var(--ink-1)', lineHeight: 1.5,
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>That file wasn’t accepted</div>
+          <div style={{ color: 'var(--ink-3)' }}>{uploadErr}</div>
+          <div style={{ marginTop: 8 }}>
+            <Button variant="ghost" size="sm" onClick={() => setUploadErr(null)}>Dismiss</Button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ padding: '40px 16px', textAlign: 'center', color: 'var(--ink-4)', fontSize: 13 }}>Loading experiences…</div>
+      ) : error ? (
+        <div style={{ padding: '40px 16px', textAlign: 'center', color: 'var(--ink-4)', fontSize: 13 }}>Couldn’t load experiences ({error}).</div>
+      ) : experiences.length === 0 ? (
+        <div style={{ padding: '40px 16px', textAlign: 'center', color: 'var(--ink-4)', fontSize: 13 }}>
+          No guided experiences yet.{canManage ? ' Upload a self-contained HTML file to add one.' : ''}
+        </div>
+      ) : (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(280px, 1fr))',
+          gap: 12,
+        }}>
+          {experiences.map((e) => (
+            <div key={e.id} style={{
+              border: 'var(--border)', borderRadius: 10, background: 'var(--ink-10)',
+              padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 8,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</div>
+                  <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>
+                    {e.brand ? `${e.brand} · ` : ''}{formatExpSize(e.sizeBytes)}
+                    {!e.builtin && e.uploadedBy ? ` · ${e.uploadedBy}` : ''}
+                  </div>
+                </div>
+                {e.builtin && (
+                  <Chip tone="outline" size="sm">Built in</Chip>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
+                <a href={e.url} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
+                  <Button variant="secondary" size="sm">Preview ↗</Button>
+                </a>
+                {canManage && !e.builtin && (
+                  <Button variant="ghost" size="sm" onClick={() => onDelete(e)}>Delete</Button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ContentLibrary = () => {
   // 'all' = show every brand. Otherwise, brand id (e.g. 'sonos').
   const [activeBrand, setActiveBrand] = React.useState('all');
@@ -1034,6 +1182,9 @@ const ContentLibrary = () => {
   // manager/user/brand_partner) can upload; viewers can't.
   const auth = useAuth();
   const canUpload = can(auth.user || { permissions: [] }, 'library.edit');
+  // v0.1.97: uploading a guided experience is admin/owner only — arbitrary
+  // HTML+JS fullscreen on a shop-floor screen, tighter than library.edit.
+  const canManageExperiences = can(auth.user || { permissions: [] }, 'experiences.edit');
   // v0.1.27: command palette can fire `open-upload-panel` to pop
   // the panel from anywhere — registered here because the panel
   // state lives in this component. Listener only attaches while
@@ -1107,7 +1258,10 @@ const ContentLibrary = () => {
   };
 
   const isAll = activeBrand === 'all';
-  const brand = isAll ? null : MOCK_BRANDS.find(b => b.id === activeBrand);
+  // v0.1.97: Experiences is a pseudo-brand in the rail — selecting it swaps the
+  // main pane for the guided-experience library instead of a video grid.
+  const isExperiences = activeBrand === EXPERIENCES_KEY;
+  const brand = (isAll || isExperiences) ? null : MOCK_BRANDS.find(b => b.id === activeBrand);
   // Videos for the current brand (or all). Product filtering applies on
   // top of this.
   const brandVideos = isAll
@@ -1213,9 +1367,14 @@ const ContentLibrary = () => {
   return (
     <AppShell current="library">
       <PageHeader
-        crumbs={isAll ? ['Content library', 'All brands'] : ['Content library', brand?.name || activeBrand]}
-        title={isAll ? 'All brands' : (brand?.name || activeBrand)}
+        crumbs={isExperiences
+          ? ['Content library', 'Experiences']
+          : isAll ? ['Content library', 'All brands'] : ['Content library', brand?.name || activeBrand]}
+        title={isExperiences ? 'Experiences' : (isAll ? 'All brands' : (brand?.name || activeBrand))}
         actions={
+          // Experiences has its own header + upload button inside the pane —
+          // the Drive-sync note and video upload don't apply to it.
+          isExperiences ? null : (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--ink-4)', marginRight: 6 }}>
               <Icon.drive size={13} />
@@ -1228,6 +1387,7 @@ const ContentLibrary = () => {
               <Button variant="primary" size="sm" icon={<Icon.upload size={13} />} onClick={() => setUploadOpen(true)}>Upload content</Button>
             )}
           </>
+          )
         }
       />
       {/* Scoped-push banner — appears only when ?target= is in the URL.
@@ -1281,6 +1441,16 @@ const ContentLibrary = () => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 16 }}>
             {!brandQuery && (
               <BrandNavRow brand={{ id: 'all', name: 'All', videos: totalCount }} active={isAll} onClick={() => { setActiveBrand('all'); setBrandsOpenMobile(false); }} />
+            )}
+            {/* v0.1.97: Experiences gets its own rail entry rather than sitting
+                among the brands — it isn't a video library, it's the set of
+                interactive pages a screen can be pointed at. */}
+            {!brandQuery && (
+              <BrandNavRow
+                brand={{ id: EXPERIENCES_KEY, name: 'Experiences' }}
+                active={isExperiences}
+                onClick={() => { setActiveBrand(EXPERIENCES_KEY); setBrandsOpenMobile(false); }}
+              />
             )}
             {filteredBrands.map(b => <BrandNavRow key={b.id} brand={b} active={b.id === activeBrand} onClick={() => { setActiveBrand(b.id); setBrandsOpenMobile(false); }} />)}
             {brandQuery && filteredBrands.length === 0 && (
@@ -1342,6 +1512,13 @@ const ContentLibrary = () => {
           flex: 1, minWidth: 0, overflow: 'auto',
           padding: isMobile ? '14px 12px 100px' : compact ? '16px 18px 100px' : '20px 24px 100px',
         }}>
+          {/* v0.1.97: Experiences owns the whole pane — it has no video grid,
+              search, or grid/list toggle, so we render it instead of the
+              video toolbar rather than trying to share one. */}
+          {isExperiences ? (
+            <ExperiencesPane canManage={canManageExperiences} isMobile={isMobile} />
+          ) : (
+          <>
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -1460,6 +1637,8 @@ const ContentLibrary = () => {
                 Next
               </Button>
             </div>
+          )}
+          </>
           )}
         </div>
 
