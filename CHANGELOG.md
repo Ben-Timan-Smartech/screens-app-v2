@@ -18,6 +18,14 @@ Rules:
 
 ---
 
+## v0.1.99
+
+- **Fixed: clicking "Experiences" in the content library did nothing.** It
+  selected, then instantly snapped back to All brands, so the section was
+  unreachable. It now opens and stays open. Also fixed the same section being a
+  dead end on phones and tablets, where the button to get back to the brand list
+  had disappeared.
+
 ## v0.1.98
 
 - **Let customers skip to the next video.** A screen can now show a **"Next ›"**
