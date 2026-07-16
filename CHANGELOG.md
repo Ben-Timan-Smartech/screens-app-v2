@@ -18,6 +18,14 @@ Rules:
 
 ---
 
+## v0.1.93
+
+- **Hotfix: guided experiences now actually load in production.** v0.1.92 shipped
+  the feature but the container image wasn't packaging the experience files, so
+  the screen couldn't fetch them. Fixed the build to include them. Also fixed the
+  server reporting its version as "dev" in the CMS sidebar (the version file was
+  likewise missing from the image) — it now shows the real release.
+
 ## v0.1.92
 
 - **Guided brand experiences — interactive content on a screen.** A screen can
