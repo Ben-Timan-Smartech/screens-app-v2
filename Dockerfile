@@ -53,6 +53,14 @@ COPY db.py           /app/db.py
 COPY auth.py         /app/auth.py
 COPY app/            /app/app/
 COPY brand/          /app/brand/
+# v0.1.92: guided-experience HTML (interactive/<name>.html), served read-only
+# at /interactive/ and cached by the tablet. Without this the route 404s in
+# prod even though serve.py handles it — the files just aren't in the image.
+COPY interactive/    /app/interactive/
+# VERSION drives serve.py's _read_version() (→ /api/auth/me → CMS sidebar).
+# It was never copied, so the running server reported its version as "dev";
+# copy it so the sidebar shows the real release.
+COPY VERSION         /app/VERSION
 
 # Cloud Run sets PORT to 8080 by default. EXPOSE is documentation only —
 # Cloud Run ignores it, but it's useful when running the container
