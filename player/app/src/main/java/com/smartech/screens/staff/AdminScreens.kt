@@ -4,6 +4,9 @@ import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -79,76 +82,92 @@ fun SuperAdminHome(
     onDeviceAdmin: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    Row(Modifier.fillMaxSize()) {
-        // Left rail
-        Box(
-            Modifier
-                .width(420.dp)
-                .fillMaxHeight()
-                .background(Ink)
-                .padding(horizontal = 48.dp, vertical = 56.dp)
-        ) {
+    val compact = compactPane()
+    // v0.2.0: 420dp rail → 0dp pane on a portrait phone; the two actions and
+    // Cancel weren't clipped, they were never laid out. See TwoPaneScaffold.
+    TwoPaneScaffold(
+        railColor = Ink,
+        paneColor = Bone,
+        rail = {
             Column {
                 Text("Super admin".uppercase(), color = Color(0x73FFFFFF), fontSize = 11.sp, letterSpacing = 1.6.sp)
                 Spacer(Modifier.height(14.dp))
-                Text("Welcome, ${user.name}", color = Bone, fontSize = 30.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "Welcome, ${user.name}",
+                    color = Bone,
+                    fontSize = if (compact) 20.sp else 30.sp,
+                    fontWeight = FontWeight.Medium,
+                )
                 Spacer(Modifier.height(10.dp))
                 Text(
                     "Pick what to do. Tap cancel to dismiss the overlay.",
                     color = Color(0x99FFFFFF), fontSize = 14.sp,
                 )
             }
-        }
-
-        // Right pane — two big actions
-        Column(
-            Modifier
-                .fillMaxSize()
-                .background(Bone)
-                .padding(horizontal = 64.dp, vertical = 56.dp),
-            verticalArrangement = Arrangement.Center,
-        ) {
-            HomeAction(
-                title = "Swap content",
-                sub = "Pick a brand and a video to play on this screen.",
-                onClick = onSwapContent,
-            )
-            Spacer(Modifier.height(20.dp))
-            HomeAction(
-                title = "Device admin",
-                sub = "See logs, change orientation, location, and cache settings.",
-                onClick = onDeviceAdmin,
-            )
-            Spacer(Modifier.height(40.dp))
-            Text(
-                "Cancel",
-                color = Muted,
-                fontSize = 16.sp,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .clickable { onCancel() }
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-            )
-        }
-    }
+        },
+        pane = {
+            // Right pane — two big actions. Scrolls when compact: two 120dp
+            // tiles plus spacing and Cancel is ~330dp, against ~250dp on a
+            // landscape phone — and centred content that overflows is clipped
+            // at BOTH ends, so the first tile's top and Cancel both vanished.
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .then(if (compact) Modifier.verticalScroll(rememberScrollState()) else Modifier)
+                    .padding(paneInset()),
+                verticalArrangement = if (compact) Arrangement.Top else Arrangement.Center,
+            ) {
+                HomeAction(
+                    title = "Swap content",
+                    sub = "Pick a brand and a video to play on this screen.",
+                    onClick = onSwapContent,
+                )
+                Spacer(Modifier.height(20.dp))
+                HomeAction(
+                    title = "Device admin",
+                    sub = "See logs, change orientation, location, and cache settings.",
+                    onClick = onDeviceAdmin,
+                )
+                Spacer(Modifier.height(if (compact) 20.dp else 40.dp))
+                Text(
+                    "Cancel",
+                    color = Muted,
+                    fontSize = 16.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable { onCancel() }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            }
+        },
+    )
 }
 
 @Composable
 private fun HomeAction(title: String, sub: String, onClick: () -> Unit) {
+    // v0.2.0: heightIn(min) rather than a fixed height — a fixed 120dp tile is
+    // both too tall for a landscape phone and, if the subtitle ever wraps to
+    // three lines on a narrow one, too short to hold its own text.
+    val compact = compactPane()
     Box(
         Modifier
             .fillMaxWidth()
-            .height(120.dp)
+            .heightIn(min = if (compact) 84.dp else 120.dp)
             .clip(RoundedCornerShape(18.dp))
             .background(BoneSoft)
             .border(1.dp, BoneLine, RoundedCornerShape(18.dp))
             .clickable { onClick() }
-            .padding(28.dp),
+            .padding(if (compact) 16.dp else 28.dp),
     ) {
         Column {
-            Text(title, color = Ink, fontSize = 24.sp, fontWeight = FontWeight.Medium)
+            Text(
+                title,
+                color = Ink,
+                fontSize = if (compact) 18.sp else 24.sp,
+                fontWeight = FontWeight.Medium,
+            )
             Spacer(Modifier.height(6.dp))
-            Text(sub, color = Muted, fontSize = 14.sp)
+            Text(sub, color = Muted, fontSize = if (compact) 12.sp else 14.sp)
         }
     }
 }
@@ -192,20 +211,24 @@ fun DeviceAdminScreen(
     // reach the Reboot / Reinitialise actions below.
     var logViewerOpen by remember { mutableStateOf(false) }
 
+    val compact = compactPane()
+
     Box(Modifier.fillMaxSize()) {
-    Row(Modifier.fillMaxSize()) {
-        // Left rail
-        Box(
-            Modifier
-                .width(420.dp)
-                .fillMaxHeight()
-                .background(Ink)
-                .padding(horizontal = 48.dp, vertical = 56.dp),
-        ) {
+    // v0.2.0: same 420dp-rail collapse as the other staff screens — on a
+    // portrait phone the pane holding every device setting was 0dp wide.
+    TwoPaneScaffold(
+        railColor = Ink,
+        paneColor = Bone,
+        rail = {
             Column {
                 Text("Device admin".uppercase(), color = Color(0x73FFFFFF), fontSize = 11.sp, letterSpacing = 1.6.sp)
                 Spacer(Modifier.height(14.dp))
-                Text("This tablet", color = Bone, fontSize = 30.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "This tablet",
+                    color = Bone,
+                    fontSize = if (compact) 20.sp else 30.sp,
+                    fontWeight = FontWeight.Medium,
+                )
                 Spacer(Modifier.height(10.dp))
                 Text(
                     "Acting as ${user.name} (${UserDirectory.roleLabel(user.role)}). " +
@@ -213,24 +236,23 @@ fun DeviceAdminScreen(
                     color = Color(0x99FFFFFF),
                     fontSize = 14.sp,
                 )
-                Spacer(Modifier.height(40.dp))
+                Spacer(Modifier.height(if (compact) 16.dp else 40.dp))
 
                 Text("Server", color = Color(0x66FFFFFF), fontSize = 11.sp, letterSpacing = 1.4.sp)
                 Spacer(Modifier.height(8.dp))
                 ServerStatusLine(repository, fallbackUrl = BuildConfig.API_BASE)
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(if (compact) 12.dp else 20.dp))
                 Text("Build", color = Color(0x66FFFFFF), fontSize = 11.sp, letterSpacing = 1.4.sp)
                 Spacer(Modifier.height(8.dp))
                 Text("v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", color = Bone, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
             }
-        }
-
+        },
+        pane = {
         // Right pane — scrollable
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Bone)
-                .padding(horizontal = 56.dp, vertical = 40.dp),
+                .padding(paneInsetSnug()),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
             item {
@@ -524,9 +546,10 @@ fun DeviceAdminScreen(
 
             item { Spacer(Modifier.height(40.dp)) }
         }
-    }
+        },
+    )
     // v0.1.22: full-screen viewer overlay, rendered as a sibling of the
-    // Row so it sits above the entire Device admin pane (including the
+    // scaffold so it sits above the entire Device admin pane (including the
     // dark left rail). Opens when LogPanel's card is clicked; Back or
     // the Close button dismisses.
     if (logViewerOpen) {
@@ -884,7 +907,13 @@ private fun LogViewerOverlay(onClose: () -> Unit) {
                 // Tappable + focusable; selected state highlights with
                 // the matching level colour so the visual mapping
                 // carries from the LogPanel preview.
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // v0.2.0: the four chips run ~400dp with their counts — wider
+                // than a phone, which silently clipped "Info". Scrolling the
+                // row keeps every filter reachable.
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     FilterChip(
                         label = "All (${entries.size})",
                         selected = filter == null,

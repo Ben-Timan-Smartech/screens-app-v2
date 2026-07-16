@@ -22,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Text
+import com.smartech.screens.util.rememberScreenMetrics
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -78,11 +79,31 @@ fun CalibrationOverlay(
     val ms = (correctedNow % 1000L).toInt().toString().padStart(3, '0')
     val remainingSec = ((calibrateUntilMs - correctedNow) / 1000).coerceAtLeast(0)
 
+    // v0.2.0: the clock is sized from the screen rather than fixed at 220sp.
+    // "HH:mm:ss" is 8 monospace glyphs at roughly 0.6em each — 1056dp of text
+    // at 220sp, which a 1280dp tablet carries and nothing else does. On a phone
+    // it ran off both sides and the digits you're supposed to compare were the
+    // first thing lost. Bounded by width (8 glyphs must fit) and by height (the
+    // seconds and the countdown below it have to fit too), then capped at the
+    // original 220sp so the fleet's tablets render exactly as they do today.
+    val metrics = rememberScreenMetrics()
+    val tight = metrics.isNarrow || metrics.isShort
+    val pad = if (tight) 16.dp else 48.dp
+    // Both sides of the padding, in dp — what the clock doesn't get to use.
+    val padBothSidesDp = if (tight) 32 else 96
+    val clockSp = minOf(
+        (metrics.widthDp - padBothSidesDp) / GLYPHS_EM,
+        metrics.heightDp * CLOCK_MAX_HEIGHT_FRACTION,
+        CLOCK_MAX_SP,
+    ).coerceAtLeast(CLOCK_MIN_SP)
+    val msSp = clockSp * MS_RATIO
+    val compact = metrics.isNarrow || metrics.isShort
+
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(Color(0xFF101010))
-            .padding(48.dp),
+            .padding(pad),
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -92,43 +113,60 @@ fun CalibrationOverlay(
             Text(
                 "CALIBRATING — SCREENS SHOULD MATCH",
                 color = Color(0xFFE8A33D),
-                fontSize = 22.sp,
+                fontSize = if (compact) 12.sp else 22.sp,
                 fontWeight = FontWeight.SemiBold,
-                letterSpacing = 4.sp,
+                letterSpacing = if (compact) 1.5.sp else 4.sp,
             )
-            Spacer(Modifier.height(40.dp))
+            Spacer(Modifier.height(if (compact) 12.dp else 40.dp))
             // Monospaced enormous digits — the actual calibration
             // signal. If two screens show the same number to the same
             // tenth of a second, clock sync is working.
             Text(
                 timeStr,
                 color = Color(0xFFF7F6F2),
-                fontSize = 220.sp,
+                fontSize = clockSp.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace,
+                maxLines = 1,
             )
             Spacer(Modifier.height(8.dp))
             Text(
                 ".$ms",
                 color = Color(0xFFE8A33D),
-                fontSize = 96.sp,
+                fontSize = msSp.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace,
+                maxLines = 1,
             )
-            Spacer(Modifier.height(40.dp))
+            Spacer(Modifier.height(if (compact) 12.dp else 40.dp))
             Text(
                 "Server-corrected time (offset ${if (serverOffsetMs >= 0) "+" else ""}${serverOffsetMs} ms)",
                 color = Color(0x99FFFFFF),
-                fontSize = 18.sp,
+                fontSize = if (compact) 11.sp else 18.sp,
                 fontFamily = FontFamily.Monospace,
             )
             Spacer(Modifier.height(8.dp))
             Text(
                 "Closing in ${remainingSec}s",
                 color = Color(0x66FFFFFF),
-                fontSize = 14.sp,
+                fontSize = if (compact) 11.sp else 14.sp,
                 fontFamily = FontFamily.Monospace,
             )
         }
     }
 }
+
+/** Monospace advance width per glyph, in em, times the 8 glyphs of "HH:mm:ss".
+ *  Divide the available width by this to get the largest font size that fits. */
+private const val GLYPHS_EM = 4.8f     // 8 glyphs x ~0.6em
+/** The clock can't own more than this share of the height — the milliseconds
+ *  and the two footer lines still have to fit under it. */
+private const val CLOCK_MAX_HEIGHT_FRACTION = 0.38f
+/** The original hard-coded size. Every fleet tablet still lands here. */
+private const val CLOCK_MAX_SP = 220f
+/** Below this the digits stop being readable across a room, which is the whole
+ *  point of the overlay — better to clip slightly than to render a clock nobody
+ *  can compare. */
+private const val CLOCK_MIN_SP = 40f
+/** Milliseconds tail, proportional to the clock (was 96sp against 220sp). */
+private const val MS_RATIO = 96f / 220f

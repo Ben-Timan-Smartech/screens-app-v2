@@ -36,6 +36,7 @@ import coil.compose.SubcomposeAsyncImage
 import com.smartech.screens.data.Prices
 import com.smartech.screens.data.VideoItem
 import com.smartech.screens.util.InputMode
+import com.smartech.screens.util.rememberScreenMetrics
 import kotlinx.coroutines.delay
 
 /** v0.1.90: how long an expanded card stays open on a touch device before
@@ -119,29 +120,43 @@ fun ProductInfoCardOverlay(
         }
     }
 
+    // v0.2.0: the width fractions are tuned for a wide screen. At 40% of a
+    // 360dp phone the card is 144dp, and once the 20dp padding and a 72dp image
+    // are taken out the name and price are left ~16dp — a character per line.
+    // Compact takes most of the width instead, and drops the image when even
+    // that isn't enough to leave the text a readable column.
+    val metrics = rememberScreenMetrics()
+    val compact = metrics.isNarrow
+    val widthFraction = when {
+        compact -> if (expanded) 0.92f else 0.78f
+        expanded -> 0.55f
+        else -> 0.40f
+    }
+    val showImage = hasImage && (!compact || metrics.widthDp * widthFraction >= IMAGE_NEEDS_DP)
     Box(
         Modifier
             .fillMaxSize()
-            .padding(32.dp),
+            .padding(if (compact || metrics.isShort) 12.dp else 32.dp),
         contentAlignment = Alignment.BottomStart,
     ) {
         Column(
             Modifier
-                .fillMaxWidth(if (expanded) 0.55f else 0.40f)
+                .fillMaxWidth(widthFraction)
                 .clip(RoundedCornerShape(16.dp))
                 .background(Color(0xCC101010))
                 .then(if (touch) Modifier.clickable { expanded = !expanded } else Modifier)
                 .animateContentSize()
-                .padding(20.dp),
+                .padding(if (compact) 14.dp else 20.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (hasImage) {
+                if (showImage) {
                     ProductImage(
                         item = item,
                         contentDescription = productName,
-                        size = if (expanded) 96.dp else 72.dp,
+                        size = if (expanded) (if (compact) 64.dp else 96.dp)
+                               else (if (compact) 48.dp else 72.dp),
                     )
-                    Spacer(Modifier.width(16.dp))
+                    Spacer(Modifier.width(if (compact) 10.dp else 16.dp))
                 }
                 Column(Modifier.weight(1f)) {
                     Text(
@@ -167,11 +182,17 @@ fun ProductInfoCardOverlay(
             if (expanded) {
                 if (!description.isNullOrBlank()) {
                     Spacer(Modifier.height(14.dp))
+                    // v0.2.0: maxLines. The card is bottom-anchored, so an
+                    // unbounded description grows it UPWARD — on a short screen
+                    // a long one pushed its own opening lines off the top of the
+                    // display, clipping from the wrong end entirely.
                     Text(
                         description,
                         color = Color(0xCCFFFFFF),
-                        fontSize = 15.sp,
-                        lineHeight = 21.sp,
+                        fontSize = if (compact) 13.sp else 15.sp,
+                        lineHeight = if (compact) 18.sp else 21.sp,
+                        maxLines = if (metrics.isShort) 4 else 8,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 if (touch) {
@@ -197,6 +218,10 @@ fun ProductInfoCardOverlay(
         }
     }
 }
+
+/** Below this the packshot leaves the name and price too little room to be
+ *  worth showing at all, so the card drops it and keeps the words. */
+private const val IMAGE_NEEDS_DP = 260
 
 /**
  * Packshot → brand-logo fallback chain. The outer image loads the

@@ -7,6 +7,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -107,19 +109,23 @@ fun NetworkTestScreen(
     // Auto-run on first paint.
     LaunchedEffect(Unit) { if (result == null && !running) runTest() }
 
-    Row(Modifier.fillMaxSize().background(Bone)) {
-        // Left rail
-        Box(
-            Modifier
-                .width(420.dp)
-                .fillMaxHeight()
-                .background(Ink)
-                .padding(horizontal = 48.dp, vertical = 56.dp),
-        ) {
+    val compact = compactPane()
+
+    // v0.2.0: 420dp rail → 0dp pane on a portrait phone. Same collapse as the
+    // other staff screens; here it hid the entire test readout.
+    TwoPaneScaffold(
+        railColor = Ink,
+        paneColor = Bone,
+        rail = {
             Column {
                 Text("Diagnostics".uppercase(), color = Color(0x73FFFFFF), fontSize = 11.sp, letterSpacing = 1.6.sp)
                 Spacer(Modifier.height(14.dp))
-                Text("Network test", color = Bone, fontSize = 30.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "Network test",
+                    color = Bone,
+                    fontSize = if (compact) 20.sp else 30.sp,
+                    fontWeight = FontWeight.Medium,
+                )
                 Spacer(Modifier.height(10.dp))
                 Text(
                     "Confirms the tablet can reach the CMS, then measures latency, " +
@@ -128,7 +134,7 @@ fun NetworkTestScreen(
                     color = Color(0x99FFFFFF), fontSize = 14.sp,
                 )
 
-                Spacer(Modifier.height(40.dp))
+                Spacer(Modifier.height(if (compact) 16.dp else 40.dp))
                 Text("Status", color = Color(0x66FFFFFF), fontSize = 11.sp, letterSpacing = 1.4.sp)
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -140,15 +146,17 @@ fun NetworkTestScreen(
                     color = Bone, fontSize = 14.sp,
                 )
             }
-        }
-
-        // Right pane
+        },
+        pane = {
+        // Right pane. v0.2.0: scrolls when compact — the panels stack to ~600dp
+        // against a landscape phone's ~380dp, which put "Run again" (the point
+        // of the screen) below the fold with no way to reach it.
         Column(
             Modifier
                 .fillMaxSize()
-                .background(Bone)
-                .padding(horizontal = 56.dp, vertical = 40.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
+                .then(if (compact) Modifier.verticalScroll(rememberScrollState()) else Modifier)
+                .padding(paneInsetSnug()),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 20.dp),
         ) {
             Row {
                 Text("Back", color = Muted, fontSize = 16.sp,
@@ -163,17 +171,27 @@ fun NetworkTestScreen(
             // doesn't tell staff anything useful if the CMS is firewalled.
             ServerPanel(result = result, running = running, phase = phase)
 
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Box(Modifier.weight(1f)) {
-                    LinkPanel(
-                        result = result,
-                        running = running,
-                        ssidPermissionMissing = result?.ssidPermissionMissing == true && !locationGranted.value,
-                        onRequestPermission = { permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) },
-                    )
-                }
-                Box(Modifier.weight(1f)) {
-                    ThroughputPanel(result = result, running = running)
+            // v0.2.0: side by side these two get ~118dp each on a phone, and a
+            // StatLine's "MAC Address / aa:bb:cc:dd:ee:ff" can't fit in that at
+            // any font size. Stacked, each gets the full width.
+            val linkPanel: @Composable () -> Unit = {
+                LinkPanel(
+                    result = result,
+                    running = running,
+                    ssidPermissionMissing = result?.ssidPermissionMissing == true && !locationGranted.value,
+                    onRequestPermission = { permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) },
+                )
+            }
+            val throughputPanel: @Composable () -> Unit = {
+                ThroughputPanel(result = result, running = running)
+            }
+            if (compact) {
+                linkPanel()
+                throughputPanel()
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Box(Modifier.weight(1f)) { linkPanel() }
+                    Box(Modifier.weight(1f)) { throughputPanel() }
                 }
             }
 
@@ -198,7 +216,8 @@ fun NetworkTestScreen(
                 }
             }
         }
-    }
+        },
+    )
 }
 
 @Composable

@@ -18,6 +18,41 @@ Rules:
 
 ---
 
+## v0.2.0
+
+- **New: a progress bar on the video.** A screen can now show a slim bar along
+  the bottom of the video showing how far through it is — so a shopper can see
+  at a glance whether it's nearly finished. Off by default; turn it on per
+  screen in the CMS (Screen → Progress bar) or on the tablet itself. It sits
+  next to the "Next ›" toggle and works with or without it. Unlike "Next ›",
+  it's still available on screens in a sync group.
+
+- **The player now works on a phone.** Installing the APK on a phone used to
+  give you a broken app: in portrait the dark panel took the whole width and
+  everything to the right of it — the PIN pad, the playlist, Add content, Done,
+  the whole first-run setup — was laid out with no room at all and simply
+  wasn't there. In landscape, controls ran off the edges. The staff screens now
+  reshape for the screen they're on: the panel shrinks, stacks above the
+  content on a narrow screen, and scrolls when there isn't the height for it.
+
+- **Fixed: the four-corner staff unlock swallowed the whole screen on a phone.**
+  The corner zones were a fixed size that assumed a 10-inch tablet. On a phone
+  they met in the middle and became one big invisible tap-catcher, which is why
+  "Tap to explore", the button to exit a guided experience, and the "Next ›"
+  button could all be dead on a small screen. The zones now scale to the
+  display, so the middle of the screen always responds.
+
+- Retail tablets and signage boxes are unaffected — every one of these changes
+  is sized so that a screen with room to spare renders exactly as it did before.
+
+## v0.1.99
+
+- **Fixed: clicking "Experiences" in the content library did nothing.** It
+  selected, then instantly snapped back to All brands, so the section was
+  unreachable. It now opens and stays open. Also fixed the same section being a
+  dead end on phones and tablets, where the button to get back to the brand list
+  had disappeared.
+
 ## v0.1.98
 
 - **Let customers skip to the next video.** A screen can now show a **"Next ›"**

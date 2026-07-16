@@ -724,6 +724,29 @@ class PlayerController(context: Context) {
         LogBuffer.i("PlayerController", "Tap-next → ${player.currentMediaItem?.mediaId ?: "?"}")
     }
 
+    /**
+     * v0.2.0: how far through the current item playback is, as 0..1 — the
+     * input to the on-screen progress bar. Null means "nothing meaningful to
+     * show", which the bar renders as nothing at all:
+     *   • on the splash (a loop, not a piece of content with a duration),
+     *   • before ExoPlayer knows the duration (C.TIME_UNSET while preparing),
+     *   • on an empty queue.
+     *
+     * Read live rather than pushed through a StateFlow: position advances
+     * continuously and the bar samples it on its own tick, so a flow would
+     * just be a second copy of the same clock.
+     *
+     * ExoPlayer is single-threaded — call from the main thread only. The
+     * bar's sampling loop is a Compose LaunchedEffect, which satisfies that.
+     */
+    fun progressFraction(): Float? {
+        if (isOnSplash()) return null
+        val duration = player.duration
+        if (duration == androidx.media3.common.C.TIME_UNSET || duration <= 0L) return null
+        val position = player.currentPosition.coerceAtLeast(0L)
+        return (position.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+    }
+
     /** True when the current queue item is the bundled / remote splash
      *  rather than a real playlist video. Used by [PlaybackWatchdog]
      *  to scope recovery actions: a hiccup during splash never

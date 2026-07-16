@@ -13,9 +13,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.focusable
 import androidx.compose.material3.Text
@@ -47,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.util.LogBuffer
+import com.smartech.screens.util.rememberScreenMetrics
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
@@ -249,10 +254,20 @@ fun TabletCommandPalette(
             .clickable(onClick = { visible = false }),
         contentAlignment = Alignment.TopCenter,
     ) {
+        // v0.2.0: the 720dp width already coerced down to the screen, so it was
+        // never the problem — the height was. A 96dp top inset is a quarter of
+        // a landscape phone's screen before the card even starts, and with 7
+        // commands the list ran ~560dp against ~360dp available, silently
+        // dropping the last few (including "Open device admin") and the
+        // keyboard-hint footer. Smaller inset, capped width, and the command
+        // list scrolls — see the Column below.
+        val metrics = rememberScreenMetrics()
+        val compact = metrics.isNarrow || metrics.isShort
         Box(
             Modifier
-                .padding(top = 96.dp)
-                .width(720.dp)
+                .padding(top = if (compact) 16.dp else 96.dp)
+                .widthIn(max = 720.dp)
+                .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
                 .background(Color(0xFFF7F6F2))
                 .border(1.dp, Color(0xFFB8B1A0), RoundedCornerShape(14.dp))
@@ -372,7 +387,20 @@ fun TabletCommandPalette(
                         modifier = Modifier.padding(12.dp),
                     )
                 } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // v0.2.0: bounded + scrollable. The list was a plain Column
+                    // in a card with no height limit, so on a short screen the
+                    // commands past the fold — and the footer hints under them
+                    // — were simply unreachable. heightIn(max) keeps the card
+                    // inside the screen and hands the overflow to the scroll.
+                    // Kept a plain Column rather than a LazyColumn: it's ~7
+                    // rows, and lazy composition here would cost more than it
+                    // saves.
+                    Column(
+                        Modifier
+                            .heightIn(max = (metrics.heightDp * COMMANDS_MAX_HEIGHT_FRACTION).dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         filtered.forEachIndexed { i, cmd ->
                             val active = i == safeIdx
                             Row(
@@ -428,17 +456,26 @@ fun TabletCommandPalette(
                 }
 
                 Spacer(Modifier.height(14.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    Text("↑ ↓ navigate", color = Color(0xFF6E6B62), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                    Text("↵ run", color = Color(0xFF6E6B62), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                    Text("esc close", color = Color(0xFF6E6B62), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                    Spacer(Modifier.weight(1f))
-                    Text("/ to open", color = Color(0xFF6E6B62), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                // Keyboard hints. Hidden on a compact screen: they describe a
+                // USB keyboard that isn't plugged into a phone, and they're the
+                // first thing worth spending the height on.
+                if (!compact) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        Text("↑ ↓ navigate", color = Color(0xFF6E6B62), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        Text("↵ run", color = Color(0xFF6E6B62), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        Text("esc close", color = Color(0xFF6E6B62), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        Spacer(Modifier.weight(1f))
+                        Text("/ to open", color = Color(0xFF6E6B62), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
                 }
             }
         }
     }
 }
+
+/** Cap the command list at half the screen so the card, its search row and its
+ *  footer always fit — the overflow scrolls instead of falling off. */
+private const val COMMANDS_MAX_HEIGHT_FRACTION = 0.5f

@@ -3,6 +3,8 @@ package com.smartech.screens.staff
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -85,6 +87,7 @@ fun PlaylistView(
     // in the rail. Unlike Mix splash it's timing-neutral, so there's no
     // sync-group lock — it stays tappable in a group.
     val productCard by repository.productCardFlow.collectAsState()
+    val progressBar by repository.progressBarFlow.collectAsState()
     val pollMode by repository.pollModeFlow.collectAsState()
     // v0.1.33: read sync-group membership so the Mix splash toggle
     // can grey out + explain itself when the screen is in a group.
@@ -155,15 +158,56 @@ fun PlaylistView(
         )
     }
 
-    Row(Modifier.fillMaxSize().background(Bone)) {
-        // Left rail
-        Box(
-            Modifier
-                .width(420.dp)
-                .fillMaxHeight()
-                .background(Ink)
-                .padding(horizontal = 48.dp, vertical = 56.dp),
-        ) {
+    val compact = compactPane()
+
+    // v0.1.36: Sync group card. When in a group it lists every member with an
+    // online dot + offers a Leave button; when independent it lists every group
+    // on the fleet so staff can join one with a single click — no CMS
+    // round-trip. Sits between the playlist and the footer actions so a staff
+    // member who's mid-edit can glance down and see who they're locked to.
+    // v0.2.0: hoisted into a value because a compact pane has to place it
+    // inside the scrolling list instead — see the two call sites below.
+    val syncCard: @Composable () -> Unit = {
+        SyncGroupCard(
+            currentGroupId = syncGroup,
+            members = syncGroupMembers,
+            availableGroups = availableSyncGroups,
+            onJoin = { gid ->
+                LogBuffer.i("PlaylistView", "Sync join tapped → $gid")
+                scope.launch {
+                    runCatching { repository.setSyncGroupOnServer(gid) }
+                        .onFailure { LogBuffer.w("PlaylistView", "Join failed: ${it.message}") }
+                    repository.refreshNow()
+                }
+            },
+            onLeave = {
+                LogBuffer.i("PlaylistView", "Sync leave tapped")
+                scope.launch {
+                    runCatching { repository.setSyncGroupOnServer(null) }
+                        .onFailure { LogBuffer.w("PlaylistView", "Leave failed: ${it.message}") }
+                    repository.refreshNow()
+                }
+            },
+            onCalibrate = {
+                LogBuffer.i("PlaylistView", "Calibrate tapped")
+                scope.launch {
+                    runCatching { repository.triggerLocalCalibration(60) }
+                        .onFailure { LogBuffer.w("PlaylistView", "Calibrate failed: ${it.message}") }
+                }
+            },
+        )
+    }
+
+    // v0.2.0: was a hard-coded 420dp rail beside the playlist. On a portrait
+    // phone that rail is wider than the display, so the pane on its right —
+    // the playlist itself, Add content, Done — was laid out at zero width and
+    // simply wasn't there. The scaffold shrinks the rail proportionally, stacks
+    // it above the pane below 600dp, and scrolls it when the screen is too
+    // short to hold it (a landscape phone has ~360dp for ~500dp of rail).
+    TwoPaneScaffold(
+        railColor = Ink,
+        paneColor = Bone,
+        rail = {
             Column(Modifier.fillMaxSize()) {
                 Text("Now playing".uppercase(), color = Color(0x73FFFFFF), fontSize = 11.sp, letterSpacing = 1.6.sp)
                 Spacer(Modifier.height(14.dp))
@@ -205,6 +249,35 @@ fun PlaylistView(
                             LogBuffer.i("PlaylistView", "Product card tapped → $value")
                             scope.launch {
                                 repository.setProductCardOnServer(value)
+                            }
+                        },
+                        enabled = true,
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // v0.2.0: playback progress bar. Like the product card above
+                // and unlike Mix splash below, it's timing-neutral, so a sync
+                // group never locks it: every member is at the same position,
+                // so their bars agree rather than fight.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Progress bar", color = Bone, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            if (progressBar)
+                                "Shows a slim bar along the bottom of the video with how far through it is."
+                            else
+                                "Videos play with no progress bar.",
+                            color = Color(0x99FFFFFF), fontSize = 12.sp,
+                        )
+                    }
+                    DarkToggle(
+                        on = progressBar,
+                        onChange = { value ->
+                            LogBuffer.i("PlaylistView", "Progress bar tapped → $value")
+                            scope.launch {
+                                repository.setProgressBarOnServer(value)
                             }
                         },
                         enabled = true,
@@ -397,14 +470,12 @@ fun PlaylistView(
                     fontFamily = FontFamily.Monospace,
                 )
             }
-        }
-
-        // Right pane
+        },
+        pane = {
         Column(
             Modifier
                 .fillMaxSize()
-                .background(Bone)
-                .padding(horizontal = 56.dp, vertical = 40.dp),
+                .padding(paneInsetSnug()),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Playlist", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Medium)
@@ -420,7 +491,13 @@ fun PlaylistView(
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .height(180.dp)
+                        // v0.2.0: fixed 180dp on a phone is 180dp the footer
+                        // below doesn't get — and being fixed, it took its
+                        // height before the Done button rather than after, so
+                        // an empty playlist in landscape pushed the only way
+                        // out off the bottom of the screen. Weighted, it takes
+                        // what's spare and nothing more.
+                        .then(if (compact) Modifier.weight(1f) else Modifier.height(180.dp))
                         .clip(RoundedCornerShape(14.dp))
                         .background(Color.White)
                         .border(1.dp, BoneLine, RoundedCornerShape(14.dp)),
@@ -475,53 +552,45 @@ fun PlaylistView(
                             },
                         )
                     }
+                    // v0.2.0: on a phone the sync card rides at the end of the
+                    // scrolling list rather than sitting in fixed space between
+                    // the list and the footer. It's ~200dp tall; against the
+                    // ~380dp a landscape phone has for the whole pane, holding
+                    // it in fixed space squeezed the playlist it sits above
+                    // down to nothing. Same card, same place in reading order —
+                    // it just scrolls now.
+                    if (compact) {
+                        item {
+                            Spacer(Modifier.height(12.dp))
+                            syncCard()
+                        }
+                    }
                 }
             }
 
-            Spacer(Modifier.height(20.dp))
+            // Fixed placement everywhere except a compact pane with a list to
+            // put it in — an empty playlist has the spare room, so the card
+            // stays put there and doesn't need the list to carry it.
+            if (!compact || items.isEmpty()) {
+                Spacer(Modifier.height(20.dp))
+                syncCard()
+            }
 
-            // v0.1.36: Sync group card on the content page. When in a
-            // group it lists every member with an online dot + offers
-            // a Leave button; when independent it lists every group on
-            // the fleet so staff can join one with a single click —
-            // no CMS round-trip. Sits between the playlist and the
-            // footer actions so a staff member who's mid-edit can
-            // glance down and see who they're locked to.
-            SyncGroupCard(
-                currentGroupId = syncGroup,
-                members = syncGroupMembers,
-                availableGroups = availableSyncGroups,
-                onJoin = { gid ->
-                    LogBuffer.i("PlaylistView", "Sync join tapped → $gid")
-                    scope.launch {
-                        runCatching { repository.setSyncGroupOnServer(gid) }
-                            .onFailure { LogBuffer.w("PlaylistView", "Join failed: ${it.message}") }
-                        repository.refreshNow()
-                    }
-                },
-                onLeave = {
-                    LogBuffer.i("PlaylistView", "Sync leave tapped")
-                    scope.launch {
-                        runCatching { repository.setSyncGroupOnServer(null) }
-                            .onFailure { LogBuffer.w("PlaylistView", "Leave failed: ${it.message}") }
-                        repository.refreshNow()
-                    }
-                },
-                onCalibrate = {
-                    LogBuffer.i("PlaylistView", "Calibrate tapped")
-                    scope.launch {
-                        runCatching { repository.triggerLocalCalibration(60) }
-                            .onFailure { LogBuffer.w("PlaylistView", "Calibrate failed: ${it.message}") }
-                    }
-                },
-            )
-
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(if (compact) 12.dp else 20.dp))
 
             // Footer actions — left-aligned editing actions, right-aligned
             // navigation. Final layout:
             //   [+ Add content] [Clear all]  ...  [Device admin] [Done]
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // v0.2.0: four buttons don't fit across a phone. Scrolling the row
+            // keeps every action reachable; the weight(1f) spacer below
+            // collapses to zero once the row is scrollable, so they simply sit
+            // together in reading order rather than pushed to opposite edges.
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .then(if (compact) Modifier.horizontalScroll(rememberScrollState()) else Modifier),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 // + Add content — primary edit, left-most.
                 Box(
                     Modifier
@@ -585,7 +654,8 @@ fun PlaylistView(
                 }
             }
         }
-    }
+        },
+    )
 }
 
 @Composable

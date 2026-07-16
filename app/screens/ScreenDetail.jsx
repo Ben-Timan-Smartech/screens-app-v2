@@ -1253,6 +1253,22 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
+  // v0.2.0: show/hide the slim playback progress bar on the video.
+  const handleProgressBarToggle = async (next) => {
+    if (!targetDeviceId) return;
+    try {
+      await setScreenProgressBar(targetDeviceId, next);
+      showToast(
+        isLive
+          ? (next ? 'Progress bar on' : 'Progress bar off')
+          : (next ? 'Progress bar will show when the tablet reconnects' : 'Progress bar will hide when the tablet reconnects'),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
   // v0.1.95: move the attract prompt without touching the experience URL
   // (the endpoint takes partial updates).
   const handleExperiencePosition = async (pos) => {
@@ -1829,6 +1845,22 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                   />
                 );
               })()}
+              {/* v0.2.0: sits directly under Next-video because the two are the
+                  screen's customer-facing playback chrome — but it's an
+                  independent flag, and deliberately NOT sync-group-locked the
+                  way Next-video is: the bar doesn't drive playback, and group
+                  members share a position, so their bars agree. */}
+              <ToggleRow
+                label="Progress bar"
+                sub={canEdit
+                  ? (isLive
+                    ? 'Shows a slim bar along the bottom of the video with how far through it is.'
+                    : 'Shows a slim bar along the bottom of the video. Applies when the tablet reconnects.')
+                  : 'Shows how far through the current video the screen is.'}
+                value={hasHistory ? !!lastKnown.progressBar : false}
+                onChange={handleProgressBarToggle}
+                disabled={!canEdit}
+              />
               <ExperienceRow
                 value={hasHistory ? (lastKnown.experienceUrl || '') : ''}
                 onChange={handleSetExperience}

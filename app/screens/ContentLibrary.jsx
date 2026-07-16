@@ -1354,9 +1354,14 @@ const ContentLibrary = () => {
   // If the active brand vanishes from MOCK_BRANDS (a Drive rescan via
   // useLibrary rewrites the array each poll), fall back to 'all' rather
   // than dereferencing an undefined brand and whitescreening.
+  //
+  // v0.1.99: Experiences is a PSEUDO-brand — it's deliberately not in
+  // MOCK_BRANDS, so `brand` is null for it by design. Without this exemption
+  // the guard fired on every click and bounced straight back to All, which
+  // read as "clicking Experiences does nothing".
   React.useEffect(() => {
-    if (!isAll && !brand) setActiveBrand('all');
-  }, [isAll, brand]);
+    if (!isAll && !isExperiences && !brand) setActiveBrand('all');
+  }, [isAll, isExperiences, brand]);
 
   const totalPages = Math.max(1, Math.ceil(visibleVideos.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
@@ -1512,6 +1517,29 @@ const ContentLibrary = () => {
           flex: 1, minWidth: 0, overflow: 'auto',
           padding: isMobile ? '14px 12px 100px' : compact ? '16px 18px 100px' : '20px 24px 100px',
         }}>
+          {/* v0.1.99: the Brands chip is the ONLY way to reopen the rail on a
+              compact viewport (the rail is hidden there), so it has to render
+              for the Experiences pane too — otherwise picking Experiences on a
+              phone/tablet strands you with no way back to the brands. Hoisted
+              out of the video-only branch below. */}
+          {compact && (
+            <div style={{ marginBottom: 12 }}>
+              <button
+                onClick={() => setBrandsOpenMobile((v) => !v)}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  height: 30, padding: '0 12px',
+                  border: 'var(--border-strong)', borderRadius: 6,
+                  background: brandsOpenMobile ? 'var(--ink-8)' : 'var(--ink-10)',
+                  color: 'var(--ink-1)', fontSize: 12, fontWeight: 500,
+                  cursor: 'pointer',
+                }}>
+                <Icon.library size={13} />
+                <span>{isExperiences ? 'Experiences' : (isAll ? 'All brands' : (brand?.name || activeBrand))}</span>
+                <Icon.chevD size={11} />
+              </button>
+            </div>
+          )}
           {/* v0.1.97: Experiences owns the whole pane — it has no video grid,
               search, or grid/list toggle, so we render it instead of the
               video toolbar rather than trying to share one. */}
@@ -1526,26 +1554,6 @@ const ContentLibrary = () => {
             gap: 10,
             marginBottom: 16,
           }}>
-            {/* Brands chip — only on compact viewports. Tapping it
-                slides the brand picker down from the top of the
-                main pane. Hidden on laptop+ where the sidebar is
-                always visible. */}
-            {compact && (
-              <button
-                onClick={() => setBrandsOpenMobile((v) => !v)}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                  height: 30, padding: '0 12px',
-                  border: 'var(--border-strong)', borderRadius: 6,
-                  background: brandsOpenMobile ? 'var(--ink-8)' : 'var(--ink-10)',
-                  color: 'var(--ink-1)', fontSize: 12, fontWeight: 500,
-                  cursor: 'pointer',
-                }}>
-                <Icon.library size={13} />
-                <span>{isAll ? 'All brands' : (brand?.name || activeBrand)}</span>
-                <Icon.chevD size={11} />
-              </button>
-            )}
             <Input placeholder={isAll ? 'Search all videos…' : `Search ${brand?.name || ''} videos…`} value={videoQuery} onChange={(e) => setVideoQuery(e.target.value)} leadingIcon={<Icon.search size={13} />} size="sm" style={{ flex: 1, minWidth: 140, maxWidth: 280 }} />
             <span style={{ flex: 1 }} className="scr-mobile-hide" />
             <span style={{ fontSize: 12, color: 'var(--ink-4)' }} className="scr-mobile-hide">{visibleVideos.length} video{visibleVideos.length === 1 ? '' : 's'} · sorted by recent</span>
