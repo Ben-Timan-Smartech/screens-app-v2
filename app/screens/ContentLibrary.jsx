@@ -48,6 +48,10 @@ const resolutionLabel = (v) => {
   return v.tmrwResolution || '—';
 };
 
+// isHeavy / heavyReasons / heavyBadge are defined in data.jsx and attached to
+// window (shared with ScreenDetail so the "needs re-encoding" logic lives in one
+// place). Referenced here as globals.
+
 // v0.1.71: shared column template for the list-view header + rows so they
 // stay aligned. Columns: Product Name · Size · Length · Orientation ·
 // Resolution · SKU Name · (selection check).
@@ -209,6 +213,11 @@ const VideoTile = ({ v, selected, onToggle, onPreview }) => {
           {dims && (
             <Chip tone="outline" style={{ fontFamily: 'var(--font-mono)' }}>
               {dimensionLabel(dims.w, dims.h)}
+            </Chip>
+          )}
+          {isHeavy(v) && (
+            <Chip tone="warn" title="Too heavy for the older screens — needs re-encoding">
+              {heavyBadge(v)}
             </Chip>
           )}
         </div>
@@ -445,6 +454,11 @@ const VideoListRow = ({ v, selected, onToggle, onPreview, divider }) => {
             ) : v.tmrwAssigned === false && (
               <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 500, color: 'var(--warn)', background: 'var(--warn-bg)', padding: '1px 5px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4 }}>Orphan</span>
             )}
+            {/* v0.2.x: heavy = 4K/above-1080p or too large — won't play on the
+                older retail boxes; needs re-encoding. */}
+            {isHeavy(v) && (
+              <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 500, color: 'var(--warn)', background: 'var(--warn-bg)', padding: '1px 5px', borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4 }} title="Too heavy for the older screens — needs re-encoding">{heavyBadge(v).replace('⚠ ', '')}</span>
+            )}
           </div>
           {subtitle && (
             <div style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -600,6 +614,11 @@ const PreviewModal = ({ video, onClose }) => {
                 <Chip tone="outline" style={{ marginRight: 6, fontFamily: 'var(--font-mono)' }}>
                   {dimensionLabel(dims.w, dims.h)}
                   {aspectLabel(dims.w, dims.h) && ` · ${aspectLabel(dims.w, dims.h)}`}
+                </Chip>
+              )}
+              {isHeavy(video) && (
+                <Chip tone="warn" style={{ marginRight: 6 }} title="Too heavy for the older screens — needs re-encoding">
+                  {heavyBadge(video)}
                 </Chip>
               )}
               <span className="tnum">{video.sizeMb ? `${video.sizeMb} MB · ` : ''}{video.filename || ''}</span>
@@ -1176,6 +1195,9 @@ const ContentLibrary = () => {
   const [activeProduct, setActiveProduct] = React.useState(null);
   const [selected, setSelected] = React.useState(new Set());
   const [uploadOpen, setUploadOpen] = React.useState(false);
+  // v0.2.x: "needs re-encoding" cross-brand filter — narrows the grid to
+  // videos flagged too heavy for the older screens (4K / >1080p / oversized).
+  const [heavyOnly, setHeavyOnly] = React.useState(false);
   // v0.1.86: the server upload endpoint requires library.edit, so only show
   // "Upload content" to users who actually have it — a viewer used to see the
   // button and hit a 403. Everyone from `user` up (owner/super_admin/admin/
@@ -1268,6 +1290,8 @@ const ContentLibrary = () => {
     ? MOCK_VIDEOS
     : MOCK_VIDEOS.filter(v => v.brand === brand?.name);
   const totalCount = MOCK_VIDEOS.length;
+  // v0.2.x: fleet-wide count of videos that can't play on the older screens.
+  const heavyCount = MOCK_VIDEOS.filter(isHeavy).length;
 
   // v0.1.69: the brand's video set is sectioned by the tm:rw tags the
   // server merges into each record (tmrwScope / productLine / tmrwActive
@@ -1317,12 +1341,13 @@ const ContentLibrary = () => {
     else if (activeProduct === BRAND_GLOBAL) base = brandVideos.filter(isBrandGlobal);
     else if (activeProduct === PRODUCTS) base = brandVideos.filter(isProductVid);
     else base = brandVideos.filter(v => isProductVid(v) && v.productLine === activeProduct);
+    if (heavyOnly) base = base.filter(isHeavy);
     const q = videoQuery.trim().toLowerCase();
     if (!q) return base;
     return base.filter(v =>
       [v.title, v.brand, v.product].some(f => (f || '').toLowerCase().includes(q)),
     );
-  }, [brandVideos, isAll, activeProduct, videoQuery]);
+  }, [brandVideos, isAll, activeProduct, videoQuery, heavyOnly]);
 
   // Selecting a nav entry filters the list. Brand-global videos are a
   // small, coherent set, so we also auto-tick the active, pushable ones
@@ -1347,7 +1372,7 @@ const ContentLibrary = () => {
     : MOCK_BRANDS;
 
   // Reset pagination whenever the visible-set changes shape.
-  React.useEffect(() => { setPage(0); }, [activeBrand, view, activeProduct, videoQuery]);
+  React.useEffect(() => { setPage(0); }, [activeBrand, view, activeProduct, videoQuery, heavyOnly]);
   // v0.1.64: switching brand clears the product filter + selection so
   // we don't carry one brand's product line / ticks into another.
   React.useEffect(() => { setActiveProduct(null); setSelected(new Set()); }, [activeBrand]);
@@ -1385,9 +1410,21 @@ const ContentLibrary = () => {
               <Icon.drive size={13} />
               <span>Drive synced · 2 min ago</span>
             </div>
-            {/* Filters button removed in v0.1.6 — filtering wasn't wired up
-                and was confusing users. Restore when there's real filter
-                logic to expose. */}
+            {/* v0.2.x: "needs re-encoding" filter — real filter logic now, so
+                the old "no filtering wired up" note no longer applies. Only
+                shown when the fleet actually has heavy videos. */}
+            {heavyCount > 0 && (
+              <Button
+                variant={heavyOnly ? 'primary' : 'ghost'}
+                size="sm"
+                icon={<Icon.warning size={13} />}
+                onClick={() => setHeavyOnly(v => !v)}
+                title="Show only videos too heavy for the older screens (4K / above 1080p / oversized) — these need re-encoding"
+                style={heavyOnly ? undefined : { color: 'var(--warn)' }}
+              >
+                {heavyCount} need re-encoding
+              </Button>
+            )}
             {canUpload && (
               <Button variant="primary" size="sm" icon={<Icon.upload size={13} />} onClick={() => setUploadOpen(true)}>Upload content</Button>
             )}

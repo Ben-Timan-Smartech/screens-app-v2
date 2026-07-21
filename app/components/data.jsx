@@ -203,4 +203,38 @@ const allStores = () => {
   return [...MOCK_STORES, ...extra];
 };
 
-Object.assign(window, { MOCK_BRANDS, MOCK_STORES, MOCK_VIDEOS, MOCK_ACTIVITY, MOCK_SCREENS_STORE, MOCK_SCHEDULES, MOCK_USERS, ROLE_LABEL, LOCATION_TAXONOMY, liveScreenToRow, allStores });
+// v0.2.x: flag videos that can choke a screen. Two independent problems, both
+// meaning the clip needs re-encoding before it's safe on the fleet:
+//   • resolution above 1080p — the legacy retail boxes can't hardware-decode it
+//     (→ freeze / "format unknown");
+//   • file too large — won't download intact over a flaky store link (→ truncated
+//     cache → won't play). loona-1 was 366 MB / 4K and hit both.
+// The server's Drive scan already computes this into `v.heavy` (a list of reason
+// tags); prefer that and only re-derive for records scanned before the flag
+// existed. Null-safe: unknown dims/size are treated as "not flagged" so a
+// just-uploaded clip (dims not yet processed by Drive) doesn't cry wolf.
+const HEAVY_MAX_LONG_EDGE = 1920; // 1080p's long edge
+const HEAVY_MAX_SIZE_MB = 200;
+const heavyReasons = (v) => {
+  if (!v) return [];
+  if (Array.isArray(v.heavy)) return v.heavy;
+  const out = [];
+  if (v.width && v.height) {
+    const longEdge = Math.max(v.width, v.height);
+    if (longEdge >= 3840) out.push('4k');
+    else if (longEdge > HEAVY_MAX_LONG_EDGE) out.push('hires');
+  }
+  if (v.sizeMb && v.sizeMb > HEAVY_MAX_SIZE_MB) out.push('large');
+  return out;
+};
+const isHeavy = (v) => heavyReasons(v).length > 0;
+// Short badge label for a heavy video (worst reason first).
+const heavyBadge = (v) => {
+  const r = heavyReasons(v);
+  if (r.includes('4k')) return '⚠ 4K';
+  if (r.includes('hires')) return '⚠ >1080p';
+  if (r.includes('large')) return '⚠ Large';
+  return null;
+};
+
+Object.assign(window, { MOCK_BRANDS, MOCK_STORES, MOCK_VIDEOS, MOCK_ACTIVITY, MOCK_SCREENS_STORE, MOCK_SCHEDULES, MOCK_USERS, ROLE_LABEL, LOCATION_TAXONOMY, liveScreenToRow, allStores, heavyReasons, isHeavy, heavyBadge });

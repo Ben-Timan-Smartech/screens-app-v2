@@ -153,7 +153,14 @@ def list_videos_recursive(folder_id: str) -> list[dict]:
                     f"(mimeType='application/vnd.google-apps.folder' or "
                     f"mimeType contains 'video/')"
                 ),
-                fields="nextPageToken, files(id,name,size,mimeType,parents)",
+                fields=(
+                    "nextPageToken, files(id,name,size,mimeType,parents,"
+                    # videoMediaMetadata rides along in the SAME list response —
+                    # no extra Drive round-trips / egress. Drive populates it only
+                    # after it finishes processing an uploaded video, so callers
+                    # must treat width/height/durationMillis as possibly-absent.
+                    "videoMediaMetadata(width,height,durationMillis))"
+                ),
                 pageSize=500,
                 pageToken=page_token,
                 supportsAllDrives=True,

@@ -345,6 +345,41 @@ def detect_product(filename: str, brand_products: list[str]) -> str | None:
     return None
 
 
+# ── v0.2.x: flag videos that can choke a screen ─────────────────────
+# Two independent problems, both of which mean a clip needs re-encoding
+# before it's safe to put on the fleet:
+#   • resolution above 1080p — the legacy retail boxes can't hardware-
+#     decode it, so it freezes / throws "format unknown".
+#   • file too large — it won't download intact over a flaky store link
+#     (a truncated cache then fails to play). loona-1 was 366 MB / 4K and
+#     hit BOTH; loona-3, the same ad at 1080p / 49 MB, plays fine.
+# Returns a list of reason tags ([] when the clip is screen-safe).
+# Tolerant of missing metadata — Drive fills videoMediaMetadata only
+# after it finishes processing an upload, so unknown dims are NOT flagged
+# (better to under-warn than cry wolf on every just-uploaded clip).
+MAX_SAFE_LONG_EDGE = 1920   # 1080p's long edge; above = undecodable on legacy
+MAX_SAFE_SIZE_MB = 200      # above this rarely caches intact on flaky wifi
+
+
+def video_heavy_reasons(width, height, size_mb) -> list[str]:
+    reasons: list[str] = []
+    try:
+        if width and height:
+            long_edge = max(int(width), int(height))
+            if long_edge >= 3840:
+                reasons.append("4k")
+            elif long_edge > MAX_SAFE_LONG_EDGE:
+                reasons.append("hires")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if size_mb and float(size_mb) > MAX_SAFE_SIZE_MB:
+            reasons.append("large")
+    except (TypeError, ValueError):
+        pass
+    return reasons
+
+
 def collect_videos() -> list[dict]:
     out: list[dict] = []
     skipped_dirs = ("/old/", "/archive/", "/_old/", "/raw/")
@@ -401,6 +436,9 @@ def collect_videos() -> list[dict]:
                     "mediaUrl": media_url,
                     "width": probe["width"],
                     "height": probe["height"],
+                    "heavy": video_heavy_reasons(
+                        probe["width"], probe["height"], size_mb
+                    ) or None,
                 }
             )
     return out
@@ -538,19 +576,35 @@ def collect_videos_drive() -> list[dict]:
             # _serve_media detects that shape (no slash after /media/)
             # and routes to the Drive streaming path.
             media_url = "/media/" + urllib.parse.quote(f["id"])
+            # v0.2.x: real dimensions + duration now ride along in the Drive
+            # list response (videoMediaMetadata) — no extra egress. Absent
+            # until Drive finishes processing an upload, so stay null-safe.
+            vmm = f.get("videoMediaMetadata") or {}
+            width = vmm.get("width")
+            height = vmm.get("height")
+            try:
+                duration_sec = round(int(vmm["durationMillis"]) / 1000)
+            except (KeyError, TypeError, ValueError):
+                duration_sec = None
+            duration_label = (
+                f"{duration_sec // 60}:{duration_sec % 60:02d}"
+                if duration_sec is not None else "—"
+            )
+            heavy = video_heavy_reasons(width, height, size_mb)
             out.append({
                 "id":          video_id,
                 "title":       title,
                 "brand":       brand["name"],
                 "product":     product,
-                "duration":    "—",
-                "durationSec": None,
+                "duration":    duration_label,
+                "durationSec": duration_sec,
                 "screens":     screens,
                 "sizeMb":      size_mb,
                 "filename":    name,
                 "mediaUrl":    media_url,
-                "width":       None,
-                "height":      None,
+                "width":       width,
+                "height":      height,
+                "heavy":       heavy or None,
             })
     return out
 
