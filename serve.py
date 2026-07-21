@@ -5057,22 +5057,54 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         published = (info.get("publishedAt") or "")[:10]   # YYYY-MM-DD
         ver_label = f"v{html.escape(version)}" if version else "latest build"
 
-        def _btn(href: str, primary: bool, title: str, sub: str) -> str:
+        # Recommend a build based on the device actually viewing this page —
+        # normally the tablet's own browser, so its User-Agent carries the
+        # Android version. Modern targets Android 8+; the legacy build is for
+        # the old Android 6/7 retail boxes. Unknown / desktop → default to
+        # Modern (fits nearly all current screens) with no hard recommendation.
+        ua = self.headers.get("User-Agent", "")
+        m_ver = re.search(r"Android\s+(\d+)", ua)
+        android_major = int(m_ver.group(1)) if m_ver else None
+        detected = android_major is not None
+        recommended = "legacy" if (detected and android_major < 8) else "modern"
+
+        def _btn(href: str, primary: bool, title: str, sub: str, badge_text: str = "") -> str:
             bg = "#2563eb" if primary else "#1c1c20"
             border = "#2563eb" if primary else "#33333a"
             fg = "#ffffff" if primary else "#e7e7ea"
+            badge = f'<span class="rec">{html.escape(badge_text)}</span>' if badge_text else ""
             return (
                 f'<a class="btn" download href="{href}" '
                 f'style="background:{bg};border:1px solid {border};color:{fg}">'
-                f'<span class="btn-title">{html.escape(title)}</span>'
+                f'<span class="btn-row"><span class="btn-title">{html.escape(title)}</span>{badge}</span>'
                 f'<span class="btn-sub">{html.escape(sub)}</span>'
                 f'</a>'
             )
 
-        modern_btn = _btn("/apk", True, "Download for this screen",
-                          "Standard build · Android 8 and newer")
-        legacy_btn = _btn("/apk/legacy", False, "Older device? Use the legacy build",
-                          "For Android 6 / 7 boxes")
+        modern_btn = _btn(
+            "/apk", recommended == "modern", "Modern Download",
+            "Android 8 and newer",
+            "✓ Best for this screen" if (recommended == "modern" and detected) else "",
+        )
+        legacy_btn = _btn(
+            "/apk/legacy", recommended == "legacy", "Legacy Download",
+            "For older Android 6 & 7 boxes",
+            "✓ Best for this screen" if (recommended == "legacy" and detected) else "",
+        )
+
+        # `android_major` is our own parsed int, so this hand-built HTML is safe
+        # to inject unescaped.
+        if detected:
+            rec_label = "Modern" if recommended == "modern" else "Legacy"
+            detect_line = (
+                f'This screen is on <strong>Android {android_major}</strong> — '
+                f'get the <strong>{rec_label}</strong> build.'
+            )
+        else:
+            detect_line = (
+                '<strong>Modern</strong> works on nearly all screens. Use '
+                '<strong>Legacy</strong> only for older Android 6 / 7 boxes.'
+            )
 
         ver_line = (
             f'Latest version <strong>{ver_label}</strong>'
@@ -5115,8 +5147,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     transition: transform .04s ease;
   }}
   .btn:active {{ transform: scale(.99); }}
+  .btn-row {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
   .btn-title {{ font-size: 16px; font-weight: 600; }}
   .btn-sub {{ font-size: 12.5px; opacity: .8; }}
+  .rec {{ font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+          background: rgba(255,255,255,.22); color: #fff; letter-spacing: .01em; white-space: nowrap; }}
+  .detect {{ font-size: 13.5px; color: #c8c8d0; margin: 0 0 18px; line-height: 1.55;
+             background: #131316; border: 1px solid #26262c; border-radius: 10px; padding: 12px 14px; }}
+  .detect strong {{ color: #fafafa; font-weight: 600; }}
   .help {{
     margin-top: 22px; padding: 16px 18px;
     background: #131316; border: 1px solid #26262c; border-radius: 12px;
@@ -5134,6 +5172,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     <div class="kicker">Smartech Screens</div>
     <h1>Install the player</h1>
     <p class="ver">{ver_line}</p>
+    <p class="detect">{detect_line}</p>
     {modern_btn}
     {legacy_btn}
     {notes_link}
@@ -5148,7 +5187,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         <li>Launch <b>Screens</b> and follow on-screen setup.</li>
       </ol>
     </div>
-    <div class="foot">Not sure which build? Use the standard one — try legacy only if it won't install.</div>
+    <div class="foot">Modern = Android 8 and newer · Legacy = Android 6 / 7. If a build won't install, try the other one.</div>
   </div>
 </body>
 </html>"""
