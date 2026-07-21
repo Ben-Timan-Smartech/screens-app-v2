@@ -153,11 +153,12 @@ fun PlayerScreen(
             controller = controller,
         )
 
-        // v0.1.92: guided brand experience. Sits over the video (the video is
-        // the attract loop) but BELOW the staff-unlock catcher — which is now
-        // corners-only (see CornerUnlockOverlay), so the four corners still
-        // reach staff unlock while the rest of the screen drives the
-        // experience. No-ops when the screen has no experienceUrl set.
+        // v0.1.92: guided brand experience. Sits over the video, which is the
+        // attract loop it plays against. Since v0.2.7 there's no staff-unlock
+        // catcher to sit under: MainActivity.dispatchTouchEvent watches for the
+        // corner sequence and passes every touch through, so the experience —
+        // including any controls it puts in a corner, as the WHOOP deck does —
+        // gets the whole screen. No-ops when the screen has no experienceUrl.
         ExperienceOverlay(
             experienceUrl = experienceUrl,
             promptPosition = experiencePromptPos,

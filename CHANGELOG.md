@@ -18,6 +18,26 @@ Rules:
 
 ---
 
+## v0.2.6
+
+- **Screens now recover on their own after a video is fixed.** When a clip was
+  too heavy or broken, a screen would try it, give up, and stay stuck — the only
+  fix was restarting the tablet or hand-editing its playlist (that's what PH.X6
+  needed). Now the player re-tries a fixed clip automatically: the moment you
+  re-push or replace it the screen picks up the good version, and even with no
+  change it re-checks a bad clip after ~15 minutes. No more manual un-sticking.
+
+- **The staff unlock no longer blocks the four corners of the screen.** To catch
+  the four-corner unlock tap, the app used to put an invisible catcher over each
+  corner — and anything under a catcher never got the tap, so an experience's own
+  corner buttons (e.g. the WHOOP deck's chapter dots and Back/Next) wouldn't
+  respond. The app now watches for the taps at the window and passes every tap
+  straight through, so the whole screen is live. Getting in is unchanged: same
+  four corners, same order, same 4-second window; TVs still hold OK.
+
+  **Worth a quick check on a real screen** — it changes how touches are handled,
+  which can't be fully verified before it's on a device.
+
 ## v0.2.5
 
 - **Deleting a guided experience now actually removes it from your screens.**

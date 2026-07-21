@@ -29,7 +29,8 @@ import kotlinx.coroutines.flow.Flow
  *   3. Video picker for the chosen brand
  *   4. Success confirmation, auto-dismiss after 15s
  *
- * When `null`, the overlay is hidden and the [CornerUnlockOverlay] is active.
+ * When `null`, the overlay is hidden and the host activity is watching for an
+ * unlock gesture.
  */
 private sealed class Stage {
     data object Pin : Stage()
@@ -58,16 +59,10 @@ fun StaffOverlay(
     repository: PlayerRepository,
     onPickVideo: (VideoItem) -> Unit,
     /**
-     * True when the host is a TV-class device (no touchscreen / leanback).
-     * Drives two things: the four-corner-tap overlay is suppressed (it can't
-     * fire without touch input anyway), and the staff stages should rely on
-     * the externally-provided D-pad unlock bus to enter.
-     */
-    tvLike: Boolean = false,
-    /**
-     * Unit-emitting flow that the host activity pumps when the TV unlock
-     * gesture fires (hold OK / Select for ~1.5s). Used in place of the
-     * corner taps on TV hosts; safe to leave null on touch devices.
+     * Unit-emitting flow that the host activity pumps when a staff unlock
+     * gesture fires — four corner taps on a touch device, or hold OK/Select
+     * for ~1.5s on a TV remote. The activity picks whichever suits the host,
+     * so this is the overlay's only way in.
      */
     externalUnlock: Flow<Unit>? = null,
     /**
@@ -88,18 +83,12 @@ fun StaffOverlay(
         onVisibilityChange?.invoke(visible)
     }
 
-    // Touch path — invisible four-corner-tap unlock. Skip on TV-class
-    // devices: the overlay would still attach pointer-input handlers but
-    // a remote can't fire taps, so it's just dead weight.
-    if (!tvLike) {
-        CornerUnlockOverlay(onUnlock = {
-            visible = true
-            stage = Stage.Pin
-        })
-    }
-
-    // D-pad path — collect the activity's unlock bus. Works on any device,
-    // but on TVs it's the only entry point.
+    // Both unlock gestures — four-corner taps on touch devices, hold-OK on TVs
+    // — are detected by the activity and arrive on the same bus. v0.2.7 moved
+    // the corner taps there; they used to be an overlay of pointer-input Boxes
+    // right here, which had to swallow every touch in the four corners to see
+    // them, breaking any content that put controls in a corner. See
+    // MainActivity.dispatchTouchEvent.
     if (externalUnlock != null) {
         LaunchedEffect(externalUnlock) {
             externalUnlock.collect {
