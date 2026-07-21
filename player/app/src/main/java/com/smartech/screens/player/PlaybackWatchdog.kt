@@ -162,6 +162,12 @@ class PlaybackWatchdog(
      *  endless re-downloads. */
     private val badSourcePurges = mutableMapOf<String, Int>()
 
+    /** v0.2.x: when we last purged/gave-up each id ([SystemClock.elapsedRealtime]).
+     *  Drives the cooldown that re-arms a given-up source so a file fixed at the
+     *  source (re-encoded/replaced) recovers on its own, instead of staying dead
+     *  until the app restarts. */
+    private val badSourcePurgeAt = mutableMapOf<String, Long>()
+
     /** Hop the consecutive-stall counter doesn't trip on a real
      *  loop boundary (REPEAT_MODE_ALL resets position to 0 between
      *  items). Cleared on every [Player.Listener.onMediaItemTransition]. */
@@ -196,14 +202,29 @@ class PlaybackWatchdog(
             if (error.errorCode in BAD_SOURCE_CODES && !isOnSplash()) {
                 val id = player.currentMediaItem?.mediaId
                 if (id != null) {
+                    // v0.2.x: if we gave up on this id a while ago, wipe the
+                    // counter and try again — the source may have been re-encoded
+                    // or replaced since. Without this, an id we gave up on stays
+                    // dead until the app restarts, even after the file is fixed
+                    // (the bug that left PH.X6 looping until a manual playlist
+                    // edit). A stale cached copy of a now-fixed file still errors
+                    // on playback, so this re-arm drives the purge + re-download
+                    // that pulls the good bytes.
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if ((badSourcePurges[id] ?: 0) > MAX_SOURCE_PURGES &&
+                        now - (badSourcePurgeAt[id] ?: 0L) >= BAD_SOURCE_RETRY_COOLDOWN_MS) {
+                        LogBuffer.w(TAG, "Bad source '$label' — ${BAD_SOURCE_RETRY_COOLDOWN_MS / 60000}m cooldown elapsed, re-arming re-download")
+                        badSourcePurges[id] = 0
+                    }
                     val n = (badSourcePurges[id] ?: 0) + 1
                     badSourcePurges[id] = n
+                    badSourcePurgeAt[id] = now
                     if (n <= MAX_SOURCE_PURGES) {
                         LogBuffer.w(TAG, "Bad source '$label' (${error.errorCodeName}) — purge + re-download (attempt $n/$MAX_SOURCE_PURGES)")
                         runCatching { onBadSource(id) }
                             .onFailure { LogBuffer.w(TAG, "onBadSource callback failed: ${it.message}") }
                     } else {
-                        LogBuffer.w(TAG, "Bad source '$label' persists after $MAX_SOURCE_PURGES re-downloads — leaving it; the file likely needs re-encoding/replacing")
+                        LogBuffer.w(TAG, "Bad source '$label' persists after $MAX_SOURCE_PURGES re-downloads — leaving it; will retry after a ${BAD_SOURCE_RETRY_COOLDOWN_MS / 60000}m cooldown (re-encode/replace it to fix sooner)")
                     }
                 }
             }
@@ -234,6 +255,24 @@ class PlaybackWatchdog(
         stallTicks = 0
         bufferingTicks = 0
         pendingError = false
+    }
+
+    /**
+     * v0.2.x: wipe all per-item "give up" state so every item gets a fresh
+     * chance. Call this when the playlist REVISION changes — a re-push almost
+     * always means the operator added/removed/replaced content, so an item we'd
+     * given up on (bad source, or an undecodable clip we were skipping) should be
+     * retried immediately rather than waiting for the cooldown or an app restart.
+     * Cheap and idempotent.
+     */
+    fun onPlaylistChanged() {
+        if (badSourcePurges.isNotEmpty() || perItemBufferKicks.isNotEmpty() || perItemKicks.isNotEmpty()) {
+            LogBuffer.i(TAG, "Playlist revision changed — clearing bad-source / skip give-up state")
+        }
+        badSourcePurges.clear()
+        badSourcePurgeAt.clear()
+        perItemBufferKicks.clear()
+        perItemKicks.clear()
     }
 
     private suspend fun tick() {
@@ -543,9 +582,17 @@ class PlaybackWatchdog(
             PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
         )
 
-        /** Cap purge+re-download attempts per video per app session, so a
-         *  file that's corrupt at the *source* (not just locally) can't
-         *  spin in an endless re-download loop. */
+        /** Cap purge+re-download attempts before we back off, so a file
+         *  that's corrupt at the *source* (not just locally) can't spin in a
+         *  tight re-download loop. Re-armed on [onPlaylistChanged] or after
+         *  [BAD_SOURCE_RETRY_COOLDOWN_MS]. */
         private const val MAX_SOURCE_PURGES = 2
+
+        /** v0.2.x: after we give up on a bad source, wait this long before
+         *  trying again on the next error. Long enough not to hammer a
+         *  genuinely-broken file, short enough that a source fixed during the
+         *  day (re-encoded/replaced) recovers on its own without an app
+         *  restart — no more manual playlist edits to un-stick a screen. */
+        private const val BAD_SOURCE_RETRY_COOLDOWN_MS = 15 * 60 * 1000L
     }
 }

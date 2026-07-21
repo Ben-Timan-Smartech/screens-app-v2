@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
@@ -291,6 +292,17 @@ class MainActivity : ComponentActivity() {
                     val cardMediaId by controller.currentMediaIdFlow.collectAsState()
                     val cardCity by repo.store.locCity.collectAsState(initial = null)
                     val cardState by repo.state.collectAsState()
+                    // v0.2.x: when the playlist revision changes (a re-push —
+                    // content added / removed / replaced), clear the watchdog's
+                    // per-item "give up" state so a source we'd abandoned gets an
+                    // immediate fresh try. This is why fixing a screen no longer
+                    // needs an app restart or a manual playlist edit — a re-push
+                    // (or the 15-min cooldown) re-arms the re-download. watchdog is
+                    // initialised in onCreate before setContent, so it's safe here.
+                    val playRevision = (cardState as? PlayerRepository.State.Playing)?.revision
+                    LaunchedEffect(playRevision) {
+                        if (playRevision != null) watchdog.onPlaylistChanged()
+                    }
                     val staffUp by staffOverlayVisible.collectAsState()
                     // v0.1.92: a guided experience owns the whole screen (its
                     // WebView is rendered in PlayerScreen), so suppress the card
