@@ -1131,6 +1131,12 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   // "Now playing" only makes sense when the tablet is actually online.
   const current = isLive ? playlist[0] : null;
   const totalDurationSec = playlist.reduce((a, v) => a + (v.durationSec || 15), 0);
+  // v0.2.x: which playlist items are too heavy for the older screens. Prefer the
+  // library record (carries the scanned dims + heavy flag) and fall back to the
+  // pushed item itself. isHeavy is a global from data.jsx.
+  const heavyInPlaylist = playlist
+    .map(it => (window.MOCK_VIDEOS || []).find(x => x.id === it.id) || it)
+    .filter(isHeavy);
 
   // Status panel values. We use lastKnown (registry record, online or not) so
   // the device info stays visible after a disconnect — only Health and Last
@@ -1691,6 +1697,25 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 }}>
                   <Icon.warning size={13} />
                   <span>Screen offline — edits queue and apply when the tablet next reconnects.</span>
+                </div>
+              )}
+              {/* v0.2.x: heavy-video warning. Amber, mirrors the SyncPicker
+                  conflict panel. Shows which items won't play on the older
+                  retail boxes (4K / above 1080p / oversized). */}
+              {heavyInPlaylist.length > 0 && (
+                <div style={{
+                  padding: '10px 12px', marginBottom: 8, borderRadius: 8,
+                  background: 'var(--warn-bg)', display: 'flex',
+                  alignItems: 'flex-start', gap: 8, fontSize: 11.5,
+                  color: 'var(--warn)', lineHeight: 1.45,
+                }}>
+                  <span style={{ marginTop: 1, flexShrink: 0 }}><Icon.warning size={13} /></span>
+                  <span>
+                    <span style={{ fontWeight: 600 }}>
+                      {heavyInPlaylist.length} video{heavyInPlaylist.length === 1 ? '' : 's'} may not play on this screen.
+                    </span>{' '}
+                    {heavyInPlaylist.map(v => v.title).join(', ')} — too high-resolution or too large for the older retail boxes. Re-encode to 1080p in the content library.
+                  </span>
                 </div>
               )}
               {playlist.length === 0 ? (
