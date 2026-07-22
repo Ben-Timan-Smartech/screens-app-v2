@@ -76,6 +76,25 @@
             </intent-filter>
         </service>
 
+        <!-- Auto-confirm accessibility service (v0.2.7). Presses INSTALL on
+             the system update dialog so an unattended screen self-updates
+             without anyone tapping. Disabled until an operator enables it in
+             Settings → Accessibility; the Device admin screen has a one-tap
+             shortcut. BIND_ACCESSIBILITY_SERVICE is the required system
+             permission that lets only the OS bind this service. -->
+        <service
+            android:name=".update.InstallAutoConfirmService"
+            android:exported="false"
+            android:label="@string/auto_confirm_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/install_auto_confirm_service" />
+        </service>
+
         <!-- FileProvider exposes the downloaded APK to the system
              PackageInstaller as a content:// URI. The authority must
              match Updater.launchInstaller's hard-coded format

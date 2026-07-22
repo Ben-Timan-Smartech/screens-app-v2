@@ -18,6 +18,22 @@ Rules:
 
 ---
 
+## v0.2.7
+
+- **Screens can now update themselves — no one has to tap "Install".** Until
+  now an update put up Android's "Install this update to the existing app?" box
+  and waited for someone to press Install. On an unattended shop-floor screen
+  that never happened, so the update stalled — and the screen sat parked on the
+  dialog instead of playing. The player can now confirm that dialog by itself.
+
+  **One-time setup on each screen:** open the staff menu → Device admin →
+  Actions → **"Turn on automatic updates"**, and switch Screens on under
+  Accessibility. It sticks across reboots. After that, every future update
+  installs hands-free during the overnight window, with nothing to tap. Two
+  things to know: this update still needs a manual Install tap on each screen
+  (the feature ships *inside* it, so it can't confirm its own arrival), and the
+  Device admin screen shows a live "Automatic updates: on" once it's set.
+
 ## v0.2.6
 
 - **Screens now recover on their own after a video is fixed.** When a clip was
