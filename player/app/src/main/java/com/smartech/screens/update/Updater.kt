@@ -504,6 +504,15 @@ class Updater(
             return
         }
 
+        // v0.2.7: arm the accessibility auto-confirmer just before the system
+        // installer appears. If InstallAutoConfirmService is enabled on this
+        // device it will press INSTALL on the dialog below, so an unattended
+        // screen updates itself with no one tapping. No-op when the service
+        // isn't enabled — the dialog just waits for a human, as before. Armed
+        // for both the overnight background path and manual CMS/staff triggers,
+        // since either can reach here.
+        InstallAutoConfirm.arm()
+
         // v0.1.48/v0.1.54: fallback chain. Stock Android binds the
         // system PackageInstaller to ACTION_VIEW + content URI from
         // API 24+, but some Amlogic / cheap-tablet ROMs (Sumvision

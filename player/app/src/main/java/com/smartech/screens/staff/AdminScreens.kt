@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -39,6 +40,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -50,6 +54,7 @@ import com.smartech.screens.ScreensApp
 import com.smartech.screens.data.LocationTaxonomy
 import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.data.UserDirectory
+import com.smartech.screens.update.InstallAutoConfirm
 import com.smartech.screens.update.Updater
 import com.smartech.screens.util.DeviceInfo
 import com.smartech.screens.util.LogBuffer
@@ -463,7 +468,38 @@ fun DeviceAdminScreen(
                 val updater = (ctx.applicationContext as ScreensApp).updater
                 val updateState by updater.state.collectAsState()
                 val checking = updateState is Updater.State.Checking
+
+                // v0.2.7: automatic-update status. The accessibility service
+                // that auto-taps the system "Install" dialog stays off until an
+                // operator enables it. Re-read on resume so returning from the
+                // Settings page flips this without reopening the admin screen.
+                val lifecycleOwner = LocalLifecycleOwner.current
+                var autoUpdateOn by remember { mutableStateOf(InstallAutoConfirm.isServiceEnabled(ctx)) }
+                DisposableEffect(lifecycleOwner) {
+                    val obs = LifecycleEventObserver { _, e ->
+                        if (e == Lifecycle.Event.ON_RESUME) {
+                            autoUpdateOn = InstallAutoConfirm.isServiceEnabled(ctx)
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(obs)
+                    onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+                }
+
                 CardSection("Actions") {
+                    // Auto-update first: it's the setup that makes every other
+                    // update hands-free, so it's the row an operator wants.
+                    ActionRow(
+                        title = if (autoUpdateOn) "Automatic updates: on" else "Turn on automatic updates",
+                        sub = if (autoUpdateOn)
+                            "This screen installs updates by itself — no one has to tap Install."
+                        else
+                            "One-time setup: enable Screens under Accessibility so updates install without anyone tapping Install.",
+                        onClick = {
+                            LogBuffer.i("Admin", "Accessibility settings opened (auto-update) by ${user.name}")
+                            InstallAutoConfirm.openAccessibilitySettings(ctx)
+                        },
+                    )
+                    Divider()
                     ActionRow(
                         title = "Run network test",
                         sub = "Latency, packet loss, download / upload, link details.",
