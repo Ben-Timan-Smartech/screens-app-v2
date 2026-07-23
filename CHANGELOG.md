@@ -18,6 +18,18 @@ Rules:
 
 ---
 
+## v0.2.8
+
+- **The product card now cycles through every product that shares a video.**
+  When one clip is used for several products — a range of variants, or a whole
+  brand — the on-screen price/description card used to show nothing (there was
+  no single product to pin it to). Now it rotates through each product in turn,
+  showing every one's name, price, image, and description, with small dots
+  marking where it's up to. On a touch screen a shopper can still tap any
+  product for its full details; on signage it cycles on its own. Single-product
+  videos are unchanged. This reads the products straight from the tm:rw index
+  (a family or brand video's members), so there's nothing extra to set up.
+
 ## v0.2.7
 
 - **Screens can now update themselves — no one has to tap "Install".** Until

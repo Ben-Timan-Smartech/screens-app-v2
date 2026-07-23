@@ -896,6 +896,12 @@ _TMRW_VIDEOS_CACHE: dict = {"fetchedAt": 0.0, "byBrand": {}, "hash": "0"}
 # demand without waiting out the TTL.
 _TMRW_VIDEOS_TTL = 5 * 60   # 5 minutes
 
+# v0.2.8: most products a single family/brand video's shopper card will cycle
+# through. Family scope is naturally small (variants of one product); brand
+# scope can be a whole catalogue, which is too many to rotate meaningfully — so
+# the card takes the first N and stops.
+_CARD_PRODUCTS_CAP = 8
+
 
 def _reset_tmrw_caches() -> None:
     """Force the next /api/library to re-pull tm:rw brands + videos.
@@ -1045,6 +1051,85 @@ def _tmrw_videos_map() -> dict:
             _sku_detail[sku] = d
         return _sku_detail[sku]
 
+    # v0.2.8: expand a family/brand-scope video into the list of products it
+    # represents, so the shopper card can cycle through them. A product-scope
+    # video already resolves to one product and skips all this. Everything here
+    # is best-effort and capped: if it can't resolve at least two real
+    # products, it returns None and the card keeps its single-product
+    # behaviour, so there's no regression where tm:rw data is thin or a brand
+    # name doesn't match cleanly.
+    _brand_products_cache: dict[str, list] = {}
+
+    def _brand_products(brand: str) -> list:
+        bl = (brand or "").strip().lower()
+        if not bl:
+            return []
+        if bl not in _brand_products_cache:
+            got: list = []
+            try:
+                preq = urllib.request.Request(
+                    f"{BRAND_API_BASE}/products?brand={urllib.parse.quote(brand)}",
+                    headers={"X-API-Key": key, "Accept": "application/json"},
+                )
+                with urllib.request.urlopen(preq, timeout=8) as presp:
+                    got = json.loads(presp.read().decode("utf-8") or "[]")
+            except Exception as e:
+                print(f"[tmrwvideos] products for brand {brand!r} failed: {e}", file=sys.stderr)
+                got = []
+            _brand_products_cache[bl] = got if isinstance(got, list) else []
+        return _brand_products_cache[bl]
+
+    def _card_from_product(p: dict) -> dict | None:
+        """One tm:rw product row → the shopper-card shape, or None if it's too
+        empty to be worth a slide."""
+        name = (p.get("name") or p.get("productName") or "").strip() or None
+        if not name:
+            return None
+        sku = (p.get("ivendSku") or p.get("sku") or "").strip() or None
+        detail = _product_detail(sku) if sku else {
+            "packshot": None, "descShort": None, "descLong": None, "prices": None}
+        prices = _extract_prices(p) or detail.get("prices")
+        card = {
+            "product": name,
+            "prices": prices,
+            "description": detail.get("descShort"),
+            "descriptionLong": detail.get("descLong"),
+            "packshotUrl": detail.get("packshot"),
+        }
+        # A name alone is a blank card. Only cycle to products that also carry a
+        # price, a description, or an image — something a shopper can read.
+        if not (prices or card["description"] or card["descriptionLong"] or card["packshotUrl"]):
+            return None
+        return {k: v for k, v in card.items() if v is not None}
+
+    def _expand_card_products(r: dict, brand: str | None, scope: str) -> list | None:
+        if scope not in ("family", "brand") or not brand:
+            return None
+        prods = _brand_products(brand)
+        if not prods:
+            return None
+        if scope == "family":
+            fam = (r.get("familyId") or r.get("scopeKey") or "").strip().lower()
+            members = [p for p in prods
+                       if (p.get("familyId") or "").strip().lower() == fam] if fam else []
+        else:  # brand scope — the whole brand, capped below
+            members = list(prods)
+        cards: list = []
+        seen: set = set()
+        for p in members:
+            key_id = (p.get("ivendSku") or p.get("sku") or p.get("name") or "").strip().lower()
+            if not key_id or key_id in seen:
+                continue
+            seen.add(key_id)
+            c = _card_from_product(p)
+            if c:
+                cards.append(c)
+            if len(cards) >= _CARD_PRODUCTS_CAP:
+                break
+        # Only a cycling widget if there are ≥2; one falls through to the
+        # existing single-product path unchanged.
+        return cards if len(cards) >= 2 else None
+
     def _resolve_brand(r: dict) -> str | None:
         if r.get("brand"):
             return r["brand"].strip() or None
@@ -1098,13 +1183,19 @@ def _tmrw_videos_map() -> dict:
             "description": (_product_detail(sku_val)["descShort"] if sku_val else None),
             "descriptionLong": (_product_detail(sku_val)["descLong"] if sku_val else None),
             "prices": (_extract_prices(r) or (_product_detail(sku_val)["prices"] if sku_val else None)),
+            # v0.2.8: for a family/brand video, the products it represents, so
+            # the shopper card can cycle through them. None for a single-product
+            # video (or when fewer than two resolve) — the card then keeps its
+            # existing single-product behaviour.
+            "products": _expand_card_products(r, brand, _row_scope),
         }
     import hashlib
     # v0.1.77: fold the packshot URL into the hash (not just the file set)
     # so a newly-resolved product image busts the /api/library ETag and
     # reaches clients instead of serving a stale, packshot-less 304.
     new_hash = hashlib.sha1(
-        json.dumps({k: [(fk, vv.get("packshotUrl"), vv.get("description"), vv.get("prices"))
+        json.dumps({k: [(fk, vv.get("packshotUrl"), vv.get("description"), vv.get("prices"),
+                         vv.get("products"))
                     for fk, vv in sorted(v["videos"].items())]
                     for k, v in by_brand.items()}, sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
@@ -1177,6 +1268,8 @@ def _library_with_logos() -> tuple[dict, str]:
                     nv["descriptionLong"] = row["descriptionLong"]
                 if row.get("prices"):
                     nv["prices"] = row["prices"]
+                if row.get("products"):
+                    nv["products"] = row["products"]      # v0.2.8: cycle list
                 new_videos.append(nv)
             else:
                 new_videos.append({**v, "tmrwAssigned": False, "tmrwActive": False})
@@ -1218,6 +1311,7 @@ def _library_with_logos() -> tuple[dict, str]:
                     "description": row.get("description"),        # v0.1.86
                     "descriptionLong": row.get("descriptionLong"),
                     "prices": row.get("prices"),
+                    "products": row.get("products"),             # v0.2.8
                     "pendingSync": True,
                     "source": "tmrw",
                 })
@@ -1277,6 +1371,8 @@ def _product_card_for(video_id: str) -> dict | None:
                 card["prices"] = v["prices"]
             if v.get("packshotUrl"):
                 card["packshotUrl"] = v["packshotUrl"]
+            if v.get("products"):
+                card["products"] = v["products"]      # v0.2.8: multi-product cycle
             blogo = logos.get((v.get("brand") or "").lower())
             if blogo:
                 card["brandLogoUrl"] = blogo
