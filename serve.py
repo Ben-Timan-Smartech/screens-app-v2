@@ -664,6 +664,104 @@ def _validate_experience_html(raw: bytes) -> tuple[str | None, str | None]:
     return text, None
 
 
+# v0.2.6 — the oldest WebView on the fleet.
+#
+# MEASURED, not assumed. A probe page run on a real legacy signage box reported
+# **"Chrome 83 (WebView)"** — Android 6/7-era hardware whose WebView stopped
+# updating in 2020 and never will again (Google dropped WebView support for
+# those OS versions). Before measuring, we'd assumed ~106; the gap between the
+# assumption and the truth is exactly where the bugs lived.
+#
+# CSS newer than this doesn't error on those boxes. The declaration is simply
+# **dropped**, silently, and the layout quietly breaks — no console, no crash,
+# nothing in any log. That is how a WHOOP deck that looked perfect in every
+# browser rendered small and clipped on a shop floor: `#fit{inset:0}` (Chrome
+# 87) was ignored, so the element whose whole job was to fill the screen
+# shrink-wrapped to its content instead.
+LEGACY_WEBVIEW_CHROME = 83
+
+# (regex, min Chrome, human name, what to use instead)
+_LEGACY_CSS_CHECKS = [
+    (re.compile(r"color-mix\s*\(", re.I), 111, "color-mix()",
+     "use rgba(var(--your-colour-rgb), .14) — define the colour as an "
+     "'R,G,B' triplet variable and rgba() it"),
+    (re.compile(r"(?<![\w-])inset\s*:", re.I), 87, "the `inset` shorthand",
+     "write top/right/bottom/left in full"),
+    (re.compile(r"(?<![\w-])aspect-ratio\s*:", re.I), 88, "aspect-ratio",
+     "use the padding-top percentage trick, or fixed sizes"),
+    (re.compile(r":has\s*\(", re.I), 105, "the :has() selector",
+     "restructure with a class toggled in JS"),
+    (re.compile(r"(?<![\w-])@container(?![\w-])", re.I), 105, "container queries",
+     "use a media query or size in JS"),
+    (re.compile(r"(?<![\w-])@layer(?![\w-])", re.I), 99, "@layer",
+     "order your rules by specificity instead"),
+    (re.compile(r"(?<![\w-])accent-color\s*:", re.I), 93, "accent-color",
+     "style the control directly"),
+    (re.compile(r"text-wrap\s*:\s*(balance|pretty)", re.I), 114, "text-wrap: balance/pretty",
+     "hard-wrap the copy, or accept the default wrapping"),
+    (re.compile(r":is\s*\(", re.I), 88, "the :is() selector",
+     "write the selectors out in full"),
+    (re.compile(r"\.\s*replaceAll\s*\(", re.I), 85, "String.replaceAll()",
+     "use .replace(/x/g, …)"),
+]
+
+
+def _strip_comments(text: str) -> str:
+    """Blank out /* … */ and <!-- … --> so a checker can't match prose.
+
+    Not cosmetic. The first run of the legacy check reported "color-mix() used
+    2x" against a file with zero color-mix RULES — it was matching the comment
+    that explained the color-mix fix. A checker that cries wolf gets ignored,
+    and an ignored checker is worse than none: it spends the operator's trust
+    and still lets the real thing through.
+    """
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.S)
+    return text
+
+
+def _legacy_css_warnings(text: str) -> list[str]:
+    """Things this page uses that the oldest screens can't render.
+
+    Warnings, NOT rejections: a fleet of modern screens can use modern CSS
+    quite happily, and it isn't this function's place to decide that a brand's
+    experience is wrong. But a silent break on a customer-facing screen is the
+    worst way to find out, so the upload says it plainly and up front.
+    """
+    text = _strip_comments(text)
+    out: list[str] = []
+    for pattern, need, name, hint in _LEGACY_CSS_CHECKS:
+        hits = pattern.findall(text)
+        if not hits:
+            continue
+        out.append(
+            f"{name} is used {len(hits)}x but needs Chrome {need}. The oldest "
+            f"screens run Chrome {LEGACY_WEBVIEW_CHROME}, which ignores it — "
+            f"the rule is dropped and the layout breaks with no error. "
+            f"Instead: {hint}."
+        )
+
+    # `gap` needs splitting by container: grid gap is Chrome 57 (fine), but
+    # FLEX gap is Chrome 84 and silently collapses the spacing on a legacy box.
+    # Only the flex ones are worth warning about, so parse the rule rather than
+    # grepping for "gap:" and crying wolf on every grid.
+    flex_gap = 0
+    for block in re.findall(r"<style[^>]*>(.*?)</style>", text, re.S | re.I):
+        for _sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", block):
+            if re.search(r"(?<![\w-])gap\s*:", body) and \
+               re.search(r"display\s*:\s*(inline-)?flex", body):
+                flex_gap += 1
+    if flex_gap:
+        out.append(
+            f"`gap` inside a flex container is used {flex_gap}x but needs "
+            f"Chrome 84. The oldest screens run Chrome {LEGACY_WEBVIEW_CHROME}, "
+            "where it's ignored and the spacing collapses. Instead: use margins "
+            "(`.parent > * + * {margin-left: …}`). Note grid gap is fine — "
+            "that's supported back to Chrome 57."
+        )
+    return out
+
+
 def _experience_public_url(filename: str) -> str:
     public = (auth.PUBLIC_URL or "").rstrip("/")
     path = f"/interactive/{filename}"
@@ -2828,14 +2926,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         with _STATE_LOCK:
             _experiences.append(entry)
             _save_experiences()
+        # v0.2.6: flag CSS the oldest screens can't render. NOT a rejection —
+        # a modern-only fleet can use modern CSS, and it isn't the server's
+        # place to veto a brand's design. But these break SILENTLY on a Chrome
+        # 83 box (rule dropped, no error anywhere), so the alternative to saying
+        # it here is finding out from a shop floor. Logged as well as returned,
+        # so it's on the record even if nobody reads the toast.
+        warnings = _legacy_css_warnings(text)
         _log_activity(
             kind="library",
-            text=f"Uploaded guided experience “{entry['name']}”",
+            text=f"Uploaded guided experience “{entry['name']}”"
+                 + (f" — {len(warnings)} legacy-screen warning"
+                    f"{'' if len(warnings) == 1 else 's'}" if warnings else ""),
             icon="upload",
         )
+        if warnings:
+            print(f"[experiences] {filename} legacy warnings: " + " | ".join(warnings),
+                  file=sys.stderr)
         self._send_json({
             "ok": True,
             "experience": {**entry, "url": _experience_public_url(filename), "builtin": False},
+            "warnings": warnings,
+            "legacyChrome": LEGACY_WEBVIEW_CHROME,
         })
 
     def _serve_api_library_upload(self) -> None:
