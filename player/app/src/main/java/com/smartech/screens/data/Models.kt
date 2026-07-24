@@ -58,6 +58,11 @@ data class VideoItem(
     val prices: Prices? = null,
     val packshotUrl: String? = null,
     val brandLogoUrl: String? = null,
+    /** v0.2.8: when one video represents several products (a tm:rw family- or
+     *  brand-scope video), the products it stands for — so the card can cycle
+     *  through them. Null / <2 entries → the card shows this item's own single
+     *  product (the fields above) exactly as before. */
+    val products: List<ProductCard>? = null,
 )
 
 /** Region-keyed prices for the product-info card. Every field optional;
@@ -69,6 +74,19 @@ data class Prices(
     val eur: Double? = null,
     val berlinEur: Double? = null,
     val romeEur: Double? = null,
+)
+
+/** v0.2.8: one product on the shopper card's cycle. Mirrors the single-product
+ *  fields on [VideoItem]; the card rotates through a list of these when a video
+ *  represents more than one product. All optional — a missing field just drops
+ *  that row. */
+@Serializable
+data class ProductCard(
+    val product: String? = null,
+    val prices: Prices? = null,
+    val description: String? = null,
+    val descriptionLong: String? = null,
+    val packshotUrl: String? = null,
 )
 
 /** Response of GET /device/playlist. Server resolves schedules before returning. */

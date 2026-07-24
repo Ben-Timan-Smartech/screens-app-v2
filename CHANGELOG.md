@@ -18,6 +18,25 @@ Rules:
 
 ---
 
+## v0.2.8
+
+- **The product card now cycles through every product that shares a video.**
+  When one clip is used for several products — a range of variants, or a whole
+  brand — the on-screen price/description card used to show nothing (there was
+  no single product to pin it to). Now it rotates through each product in turn,
+  showing every one's name, price, image, and description, with small dots
+  marking where it's up to. On a touch screen a shopper can still tap any
+  product for its full details; on signage it cycles on its own. Single-product
+  videos are unchanged. This reads the products straight from the tm:rw index
+  (a family or brand video's members), so there's nothing extra to set up.
+
+- **Rotate a screen's picture from the CMS.** For a panel that's physically
+  mounted turned — so the picture comes out sideways or upside-down — Screen
+  detail now has a **Display rotation** control (None / 90° / 180° / 270°). The
+  screen rotates its whole output to match. Off (None) for every screen by
+  default, so nothing changes unless you set it; the setting sticks through
+  reboots and applies the moment the tablet reconnects.
+
 ## v0.2.7
 
 - **Screens can now update themselves — no one has to tap "Install".** Until

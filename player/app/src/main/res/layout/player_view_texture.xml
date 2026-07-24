@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v0.2.8: a PlayerView backed by a TextureView, used ONLY when a screen has a
+  non-zero display rotation. A SurfaceView (the default PlayerView surface) does
+  not reliably rotate — the frame turns but the video stays axis-aligned — so a
+  rotated screen inflates this instead. surface_type is an inflation-time attr,
+  which is why this has to be a layout resource rather than a code tweak.
+  Non-rotated screens never touch this and keep the default SurfaceView.
+-->
+<androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    app:surface_type="texture_view" />

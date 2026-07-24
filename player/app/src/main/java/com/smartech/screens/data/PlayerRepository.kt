@@ -512,6 +512,11 @@ class PlayerRepository(
          *  over the video with the currently-playing item's description,
          *  region price, and image. */
         val productCard: Boolean = false,
+        /** v0.2.8: physical-mount display rotation in degrees (0/90/180/270).
+         *  0 = none. The player rotates its whole output to match a panel
+         *  mounted rotated where Android reports the wrong way up. Persisted to
+         *  DeviceStore so a rotated screen renders correctly on boot. */
+        val rotation: Int = 0,
         /** v0.1.92: guided brand experience. When non-null it's an https URL
          *  to a self-contained interactive HTML page the player caches +
          *  renders in a kiosk WebView (tap the attract prompt to open it,
@@ -619,6 +624,12 @@ class PlayerRepository(
      *  info card over the video when true. */
     private val _productCard = MutableStateFlow(false)
     val productCardFlow: StateFlow<Boolean> = _productCard.asStateFlow()
+
+    /** v0.2.8: last rotation (deg) we pushed to DeviceStore, so apply() only
+     *  writes on a real change instead of on every 3s poll. -1 = not yet seen,
+     *  so the first poll always persists the server value. The persisted value
+     *  in [DeviceStore.rotation] is what the player renders from. */
+    private var _rotationApplied = -1
 
     /** v0.1.92: guided-experience URL for this screen (null = plain video
      *  screen). The player observes this: when set it caches the HTML and
@@ -975,6 +986,16 @@ class PlayerRepository(
         if (state.productCard != _productCard.value) {
             _productCard.value = state.productCard
             LogBuffer.i(TAG, "Product card → ${if (state.productCard) "on" else "off"}")
+        }
+
+        // v0.2.8: physical-mount display rotation. Persist to DeviceStore (the
+        // player renders from the stored value, so a rotated screen is correct
+        // on boot before the first poll). Only write on a real change — apply()
+        // runs every poll and we don't want a DataStore write every 3s.
+        if (state.rotation != _rotationApplied) {
+            _rotationApplied = state.rotation
+            liveScope.launch { store.setRotation(state.rotation) }
+            LogBuffer.i(TAG, "Display rotation → ${state.rotation}°")
         }
 
         // v0.1.92: guided-experience URL. Same silent-update pattern — the

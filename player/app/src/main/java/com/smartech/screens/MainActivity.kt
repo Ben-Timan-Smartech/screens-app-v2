@@ -24,6 +24,7 @@ import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.player.PlayerController
 import com.smartech.screens.player.PlayerScreen
 import com.smartech.screens.player.ProductInfoCardOverlay
+import com.smartech.screens.player.RotatedRoot
 import com.smartech.screens.player.TabletCommandPalette
 import com.smartech.screens.player.TapNextOverlay
 import com.smartech.screens.staff.HoldProgressIndicator
@@ -275,7 +276,13 @@ class MainActivity : ComponentActivity() {
                 // briefly showing the wizard while DataStore loads. First-run
                 // tablets see the player flash for a beat before the wizard.
                 val onboarded by repo.store.isOnboarded.collectAsState(initial = true)
+                // v0.2.8: physical-mount display rotation. 0° (default) is a
+                // pass-through in RotatedRoot, so a non-rotated fleet is
+                // unaffected. Read from the persisted store value so a rotated
+                // panel is correct on boot, before the first /api/state poll.
+                val displayRotation by repo.store.rotation.collectAsState(initial = 0)
 
+                RotatedRoot(displayRotation) {
                 Box(Modifier.fillMaxSize()) {
                     // Catch-all Back interceptor. By default the TV remote's
                     // Back button finishes the activity, which on a HOME app
@@ -402,6 +409,7 @@ class MainActivity : ComponentActivity() {
                     // top of everything else (player, staff, onboarding).
                     UpdaterOverlay(updater = (application as ScreensApp).updater)
                 }
+                } // close RotatedRoot (v0.2.8)
             }
         }
     }
