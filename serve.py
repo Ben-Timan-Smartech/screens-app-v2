@@ -1705,6 +1705,12 @@ def _ensure_screen_state(device_id: str) -> dict:
             "pushedAt": None,
             "mixSplash": True,                    # bundled splash mixed in by default
             "productCard": False,                 # v0.1.86: shopper-facing product info card — opt-in per screen via /api/screens/<id>/product-card
+            # v0.2.8: physical-mount display rotation in degrees (0/90/180/270).
+            # For a panel mounted rotated where Android reports the wrong way up;
+            # the player rotates its whole output to match. 0 = no rotation (the
+            # default for every screen — nothing changes). Set via
+            # /api/screens/<id>/rotation.
+            "rotation": 0,
             # v0.1.92: guided brand experience. When set to an https URL the
             # screen keeps playing its normal loop to attract, but shows a
             # "tap to explore" prompt; a tap opens that URL fullscreen in a
@@ -2064,7 +2070,7 @@ _city_brand: dict = {}          # mutable copy of DEFAULT_CITY_BRAND
 # rejected.
 SELF_EDIT_ACTIONS = (
     "playlist", "mix-splash", "product-card", "tap-next", "progress-bar", "audio",
-    "poll-mode", "low-data-mode", "sync-group", "display-mode",
+    "poll-mode", "low-data-mode", "sync-group", "display-mode", "rotation",
 )
 ENFORCE_DEVICE_SECRET = os.environ.get("SCREENS_ENFORCE_DEVICE_SECRET", "0") == "1"
 
@@ -3500,6 +3506,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # while it's a group member.
                         "mixSplash":   False if sync_group_id else s["mixSplash"],
                         "productCard": bool(s.get("productCard")),   # v0.1.86: on-screen product info card
+                        "rotation":    int(s.get("rotation") or 0),  # v0.2.8: physical-mount display rotation (deg)
                         "experienceUrl": s.get("experienceUrl"),     # v0.1.92: guided brand experience (kiosk WebView), null = off
                         "experiencePromptPos": s.get("experiencePromptPos") or "top",   # v0.1.95: "top" | "bottom"
                         # v0.1.98: tap-to-skip. Forced OFF for a screen in a
@@ -3602,6 +3609,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "currentItems":          state.get("items", []),
                         "mixSplash":             state.get("mixSplash", True),
                         "productCard":           bool(state.get("productCard")),   # v0.1.86
+                        "rotation":              int(state.get("rotation") or 0),  # v0.2.8
                         "experienceUrl":         state.get("experienceUrl"),       # v0.1.92
                         "experiencePromptPos":   state.get("experiencePromptPos") or "top",   # v0.1.95
                         # Raw stored value (NOT the sync-group-forced one) so the
@@ -4492,9 +4500,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }   (legacy — writes pollMode)
         # POST /api/screens/<deviceId>/sync-group      { syncGroup: string | null }
         # POST /api/screens/<deviceId>/display-mode    { displayMode: int | null }
+        # POST /api/screens/<deviceId>/rotation        { rotation: 0|90|180|270 }
         # POST /api/screens/<deviceId>/name            { name: string }
         # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|display-mode|name|location)$", path)
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|display-mode|rotation|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -4685,6 +4694,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state["revision"] += 1
                     _save_per_screen()
                     self._send_json({"ok": True, "productCard": state["productCard"]})
+                    return
+                if action == "rotation":
+                    # v0.2.8: physical-mount display rotation for this screen, in
+                    # degrees. The player rotates its whole output to match a
+                    # panel mounted rotated. 0 = no rotation (every screen's
+                    # default). Only 0/90/180/270 are valid. Bump revision so the
+                    # tablet re-polls and applies it on its next tick.
+                    state = _ensure_screen_state(device_id)
+                    try:
+                        rot = int(body.get("rotation", 0))
+                    except (TypeError, ValueError):
+                        rot = -1
+                    if rot not in (0, 90, 180, 270):
+                        self._send_json(
+                            {"ok": False, "error": "rotation must be 0, 90, 180 or 270"},
+                            status=400,
+                        )
+                        return
+                    state["rotation"] = rot
+                    state["revision"] += 1
+                    _save_per_screen()
+                    self._send_json({"ok": True, "rotation": state["rotation"]})
                     return
                 if action == "experience":
                     # v0.1.92: point this screen at a guided brand experience

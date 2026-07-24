@@ -1,5 +1,6 @@
 package com.smartech.screens.player
 
+import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -8,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.viewinterop.AndroidView
@@ -42,6 +44,13 @@ fun PlayerScreen(
     val experiencePromptPos by repository.experiencePromptPosFlow.collectAsState()
     // v0.2.0: slim playback progress bar along the bottom edge.
     val progressBar by repository.progressBarFlow.collectAsState()
+    // v0.2.8: when this screen has a non-zero display rotation, render video
+    // through a TextureView (SurfaceView doesn't rotate reliably). Read from
+    // the persisted store value — the RotatedRoot wrapper in MainActivity does
+    // the geometry; this just picks the surface type. 0 = default SurfaceView,
+    // i.e. no change for the fleet.
+    val displayRotation by repository.store.rotation.collectAsState(initial = 0)
+    val rotatedSurface = displayRotation != 0
 
     // Forward any per-location splash file to the controller.
     LaunchedEffect(remoteSplash) { controller.setRemoteSplash(remoteSplash) }
@@ -93,21 +102,37 @@ fun PlayerScreen(
             .fillMaxSize()
             .background(Color(0xFF141414))
     ) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = controller.player
-                    useController = false
-                    setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
-                    setKeepContentOnPlayerReset(true)
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                }
-            },
-        )
+        // key on the surface type so flipping rotation on/off recreates the
+        // PlayerView with the right surface. Between two non-zero angles the
+        // key is unchanged — RotatedRoot handles the new angle, the surface stays.
+        key(rotatedSurface) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    // v0.2.8: a rotated screen needs a TextureView-backed
+                    // PlayerView (surface_type is an inflation-time attr, hence
+                    // the layout resource). Non-rotated screens keep the default
+                    // programmatic PlayerView (SurfaceView) exactly as before.
+                    val view = if (rotatedSurface) {
+                        LayoutInflater.from(ctx)
+                            .inflate(com.smartech.screens.R.layout.player_view_texture, null)
+                            as PlayerView
+                    } else {
+                        PlayerView(ctx)
+                    }
+                    view.apply {
+                        player = controller.player
+                        useController = false
+                        setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+                        setKeepContentOnPlayerReset(true)
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                    }
+                },
+            )
+        }
         // v0.1.15: giant ticking clock on top of the player when the
         // CMS has put this screen in calibration mode. Renders nothing
         // when calibrateUntilMs is null / past, so the cost on the

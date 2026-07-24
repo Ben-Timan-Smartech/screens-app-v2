@@ -30,6 +30,13 @@ Rules:
   videos are unchanged. This reads the products straight from the tm:rw index
   (a family or brand video's members), so there's nothing extra to set up.
 
+- **Rotate a screen's picture from the CMS.** For a panel that's physically
+  mounted turned — so the picture comes out sideways or upside-down — Screen
+  detail now has a **Display rotation** control (None / 90° / 180° / 270°). The
+  screen rotates its whole output to match. Off (None) for every screen by
+  default, so nothing changes unless you set it; the setting sticks through
+  reboots and applies the moment the tablet reconnects.
+
 ## v0.2.7
 
 - **Screens can now update themselves — no one has to tap "Install".** Until

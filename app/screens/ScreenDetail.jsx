@@ -517,6 +517,42 @@ const ResolutionRow = ({ label, sub, selected, disabled, onClick }) => (
   </button>
 );
 
+// v0.2.8: physical-mount display rotation. For a panel turned in its mount so
+// the picture comes out sideways / upside-down. Reuses the same radio rows as
+// the resolution picker. 0° (default) = no rotation.
+const ROTATION_OPTIONS = [
+  { deg: 0,   label: 'None',          sub: 'Default — output the way the box reports it.' },
+  { deg: 90,  label: 'Rotate 90°',    sub: 'Quarter-turn clockwise.' },
+  { deg: 180, label: 'Rotate 180°',   sub: 'Upside-down mount.' },
+  { deg: 270, label: 'Rotate 270°',   sub: 'Quarter-turn anticlockwise.' },
+];
+
+const DisplayRotationCard = ({ screen, onSetRotation, canEdit, isLive }) => {
+  const current = Number(screen?.rotation) || 0;
+  const summary = current === 0 ? 'None' : `${current}°`;
+  return (
+    <CollapsibleCard title="Display rotation" summary={summary} padding={16}>
+      <div style={{ fontSize: 11, color: 'var(--ink-4)', marginBottom: 10 }}>
+        {isLive
+          ? 'Rotates the whole screen output. Use when the panel is physically mounted turned and the picture comes out sideways or upside-down.'
+          : 'Saves the rotation now; the tablet applies it when it reconnects.'}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {ROTATION_OPTIONS.map((o) => (
+          <ResolutionRow
+            key={o.deg}
+            label={o.label}
+            sub={o.sub}
+            selected={current === o.deg}
+            disabled={!canEdit}
+            onClick={() => current !== o.deg && onSetRotation(o.deg)}
+          />
+        ))}
+      </div>
+    </CollapsibleCard>
+  );
+};
+
 const PollModeRow = ({ value, onChange, disabled, isLive }) => {
   const modes = [
     { key: 'fast',   label: 'Fast',   detail: '10 s'   },
@@ -1277,6 +1313,22 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
+  // v0.2.8: physical-mount display rotation (0/90/180/270).
+  const handleSetRotation = async (deg) => {
+    if (!targetDeviceId) return;
+    try {
+      await setScreenRotation(targetDeviceId, deg);
+      showToast(
+        isLive
+          ? (deg === 0 ? 'Display rotation cleared' : `Display rotated ${deg}°`)
+          : (deg === 0 ? 'Rotation will clear when the tablet reconnects' : `Rotation (${deg}°) will apply when the tablet reconnects`),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
   // v0.1.98: show/hide the customer-facing "next video" control.
   const handleTapNextToggle = async (next) => {
     if (!targetDeviceId) return;
@@ -1973,6 +2025,18 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               <DisplayResolutionCard
                 screen={lastKnown}
                 onSetMode={handleSetDisplayMode}
+                canEdit={canEdit}
+                isLive={isLive}
+              />
+            )}
+
+            {/* v0.2.8: physical-mount display rotation. Always available (no
+                tablet-capability gate like resolution) — it's a pure output
+                transform. */}
+            {hasHistory && (
+              <DisplayRotationCard
+                screen={lastKnown}
+                onSetRotation={handleSetRotation}
                 canEdit={canEdit}
                 isLive={isLive}
               />

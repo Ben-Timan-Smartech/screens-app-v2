@@ -446,6 +446,20 @@ const setScreenProductCard = async (deviceId, productCard) => {
   return res.json();
 };
 
+// v0.2.8: setScreenRotation — POST /api/screens/<id>/rotation. Physical-mount
+// display rotation in degrees (0/90/180/270); 0 = none. For a panel mounted
+// turned where the box reports the wrong way up — the player rotates its whole
+// output to match. Server rejects anything other than 0/90/180/270.
+const setScreenRotation = async (deviceId, rotation) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/rotation`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rotation }),
+  });
+  if (!res.ok) throw new Error(`rotation failed: ${res.status}`);
+  return res.json();
+};
+
 // v0.1.97: useExperiences — the guided-experience library (vendored + uploaded).
 // Small payload, so no ETag dance like useLibrary; refetch on demand via
 // reload(). Returns { experiences, loading, error, reload }.
@@ -1636,7 +1650,7 @@ Object.assign(window, {
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenProductCard,
+  setScreenProductCard, setScreenRotation,
   setScreenExperience, setScreenTapNext, setScreenProgressBar,
   useExperiences, uploadExperience, deleteExperience,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,

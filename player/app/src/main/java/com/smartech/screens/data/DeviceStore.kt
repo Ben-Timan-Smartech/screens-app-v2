@@ -2,6 +2,7 @@ package com.smartech.screens.data
 
 import android.content.Context
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -30,6 +31,12 @@ class DeviceStore(private val context: Context) {
         val CacheCapBytes = longPreferencesKey("cache_cap_bytes")
         val PollIntervalSec = longPreferencesKey("poll_interval_sec")
         val OrientationOverride = stringPreferencesKey("orientation_override")
+        // v0.2.8: physical-mount display rotation in degrees (0/90/180/270).
+        // Persisted so a rotated panel renders the right way up on boot,
+        // before the first /api/state poll lands — no flash of un-rotated
+        // output. The server value (set from the CMS) is authoritative and
+        // refreshes this each poll.
+        val Rotation = intPreferencesKey("rotation")
 
         // Structured location — set via the cascading dropdowns in Device admin.
         val LocRegion     = stringPreferencesKey("loc_region")       // "USA" | "UK" | "EU"
@@ -72,6 +79,8 @@ class DeviceStore(private val context: Context) {
     val playlistEtag: Flow<String?> = context.dataStore.data.map { it[Keys.PlaylistEtag] }
     val settingsEtag: Flow<String?> = context.dataStore.data.map { it[Keys.SettingsEtag] }
     val orientationOverride: Flow<String?> = context.dataStore.data.map { it[Keys.OrientationOverride] }
+    /** v0.2.8: display rotation in degrees (0/90/180/270). 0 = none. */
+    val rotation: Flow<Int> = context.dataStore.data.map { it[Keys.Rotation] ?: 0 }
 
     // Structured location flows
     val locRegion: Flow<String?>     = context.dataStore.data.map { it[Keys.LocRegion] }
@@ -107,6 +116,13 @@ class DeviceStore(private val context: Context) {
             if (value == null) prefs.remove(Keys.OrientationOverride)
             else prefs[Keys.OrientationOverride] = value
         }
+    }
+
+    /** v0.2.8: persist the display rotation. Anything other than 90/180/270
+     *  normalises to 0 (no rotation). */
+    suspend fun setRotation(degrees: Int) {
+        val norm = if (degrees in intArrayOf(90, 180, 270)) degrees else 0
+        context.dataStore.edit { it[Keys.Rotation] = norm }
     }
 
     /** Persist the server-issued device secret. Blank/null clears it. */
