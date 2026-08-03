@@ -130,7 +130,7 @@ fun SuperAdminHome(
                 Spacer(Modifier.height(20.dp))
                 HomeAction(
                     title = "Device admin",
-                    sub = "See logs, change orientation, location, and cache settings.",
+                    sub = "See logs, change rotation, location, and cache settings.",
                     onClick = onDeviceAdmin,
                 )
                 Spacer(Modifier.height(if (compact) 20.dp else 40.dp))
@@ -193,7 +193,7 @@ fun DeviceAdminScreen(
     val store = repository.store
 
     val deviceId by store.deviceId.collectAsState(initial = null)
-    val orientation by store.orientationOverride.collectAsState(initial = null)
+    val rotation by store.rotation.collectAsState(initial = 0)
     val syncGroup by repository.syncGroupFlow.collectAsState()
     val syncGroupMembers by repository.syncGroupMembersFlow.collectAsState()
     val availableSyncGroups by repository.availableSyncGroupsFlow.collectAsState()
@@ -427,12 +427,12 @@ fun DeviceAdminScreen(
             // Editable config
             item {
                 CardSection("Configuration") {
-                    OrientationRow(
-                        current = orientation,
-                        onChange = { value ->
+                    RotationRow(
+                        current = rotation,
+                        onChange = { deg ->
                             scope.launch {
-                                store.setOrientationOverride(value)
-                                LogBuffer.i("Admin", "Orientation override → ${value ?: "AUTO"} by ${user.name}")
+                                repository.setRotationOnServer(deg)
+                                LogBuffer.i("Admin", "Screen rotation → ${deg}° by ${user.name}")
                             }
                         }
                     )
@@ -700,15 +700,19 @@ private fun EditableRow(
 }
 
 @Composable
-private fun OrientationRow(current: String?, onChange: (String?) -> Unit) {
-    val options = listOf(null to "Auto", "LANDSCAPE" to "Landscape", "PORTRAIT" to "Portrait")
+private fun RotationRow(current: Int, onChange: (Int) -> Unit) {
+    // v0.2.9: replaces the old Auto/Landscape/Portrait control (which was never
+    // wired to anything) with a working display-rotation picker. Writes through
+    // to the per-screen `rotation` setting the CMS also drives; the player
+    // applies it via RotatedRoot. For a panel physically mounted turned.
+    val options = listOf(0 to "0°", 90 to "90°", 180 to "180°", 270 to "270°")
     Row(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("Orientation", color = Muted, fontSize = 13.sp, modifier = Modifier.weight(0.6f))
+        Text("Rotation", color = Muted, fontSize = 13.sp, modifier = Modifier.weight(0.6f))
         Row(
             Modifier.weight(1f),
             horizontalArrangement = Arrangement.spacedBy(6.dp),

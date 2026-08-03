@@ -18,6 +18,22 @@ Rules:
 
 ---
 
+## v0.2.9
+
+- **The on-screen "Orientation" setting now actually rotates the screen.** In
+  Device admin it used to offer Auto / Landscape / Portrait — but nothing in the
+  app was wired to it, so it did nothing. It's now a **Rotation** control
+  (0° / 90° / 180° / 270°) that rotates the whole output, the same as the CMS
+  Display rotation added in v0.2.8 (they drive the same setting). Use it for a
+  panel mounted turned.
+
+- **The cache cap actually protects the device now.** Before, the "Cache cap"
+  number had almost no effect — a screen would keep downloading its playlist and
+  could fill the tablet's storage regardless. Now a screen always keeps ~1 GB
+  free and won't cache past the cap: if content would overflow, it skips the
+  extra videos (and logs it) instead of running the device out of space. No
+  change on screens with plenty of storage.
+
 ## v0.2.8
 
 - **The product card now cycles through every product that shares a video.**
