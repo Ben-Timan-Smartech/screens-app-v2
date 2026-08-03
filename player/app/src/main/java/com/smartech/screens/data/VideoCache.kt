@@ -38,6 +38,14 @@ class VideoCache(
     private val root: File = File(context.filesDir, "videos").apply { mkdirs() }
     private val inflight = ConcurrentHashMap<String, Boolean>()
 
+    /** v0.2.9: the current cache cap in bytes. PlayerRepository keeps this in
+     *  sync with the operator's setting each refresh. [ensure] refuses new
+     *  downloads once the completed cache reaches it, so a low cap actually
+     *  limits how much a screen stores rather than only trimming after the
+     *  fact. Defaults to 8 GB to match the historical soft cap. */
+    @Volatile
+    var maxCacheBytes: Long = 8L * 1024 * 1024 * 1024
+
     // v0.1.39: dedicated downloader client. The shared OkHttp client has a
     // 60 s callTimeout (correct for API requests) — for a 300 MB video on
     // 1 Mbps wifi that's nowhere near enough. We inherit the connection
@@ -87,6 +95,21 @@ class VideoCache(
     ): File = withContext(Dispatchers.IO) {
         val target = file(item.id)
         if (target.exists() && target.length() > 0) return@withContext target
+        // v0.2.9: free-space + cap guard. Never let caching fill the device or
+        // blow past the configured cap. If we're below the free-space headroom,
+        // or the completed cache is already at the cap, skip this download — the
+        // item just isn't cached (it drops out of playback) instead of the
+        // tablet running out of storage. This is where the cap actually bites,
+        // since reconcile() won't evict the current (pinned) playlist.
+        val freeMb = usableSpace() / MB
+        if (usableSpace() <= MIN_FREE_BYTES) {
+            LogBuffer.w(TAG, "Skipping ${item.id}: low storage (free ${freeMb}MB ≤ ${MIN_FREE_BYTES / MB}MB headroom)")
+            return@withContext target
+        }
+        if (completedBytes() >= maxCacheBytes) {
+            LogBuffer.w(TAG, "Skipping ${item.id}: at cache cap (${completedBytes() / MB}MB ≥ ${maxCacheBytes / MB}MB)")
+            return@withContext target
+        }
         if (inflight.putIfAbsent(item.id, true) != null) {
             while (inflight.containsKey(item.id)) Thread.sleep(100)
             // The first caller finished — but "finished" includes "failed".
@@ -329,7 +352,21 @@ class VideoCache(
     fun totalBytes(): Long =
         root.listFiles { f -> f.isFile }?.sumOf { it.length() } ?: 0L
 
+    /** Free space on the volume the cache lives on. */
+    fun usableSpace(): Long = root.usableSpace
+
+    /** Bytes used by completed (.mp4) videos only — excludes in-progress .part
+     *  files, so a large partial download doesn't spuriously trip the cap. */
+    private fun completedBytes(): Long =
+        root.listFiles { f -> f.isFile && f.extension == "mp4" }?.sumOf { it.length() } ?: 0L
+
     companion object {
         private const val TAG = "VideoCache"
+        private const val MB = 1_048_576L
+        /** v0.2.9: minimum free space the cache will preserve on the device.
+         *  ensure() skips downloads once free space would drop below this, so a
+         *  screen never fills its own storage — protecting small-storage boxes
+         *  where the cache cap (default 8 GB) exceeds the free space available. */
+        const val MIN_FREE_BYTES = 1L * 1024 * 1024 * 1024   // 1 GB
     }
 }

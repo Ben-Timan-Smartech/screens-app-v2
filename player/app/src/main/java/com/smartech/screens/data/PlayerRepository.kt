@@ -1814,6 +1814,43 @@ class PlayerRepository(
         }
     }
 
+    /** v0.2.9: set this screen's display rotation from the tablet (Device
+     *  admin). Posts to the same per-screen `rotation` endpoint the CMS uses,
+     *  so the server stays the single source of truth and the setting survives
+     *  reboots. Applies locally first so the screen turns immediately. */
+    suspend fun setRotationOnServer(degrees: Int) {
+        val norm = if (degrees in intArrayOf(90, 180, 270)) degrees else 0
+        LogBuffer.i(TAG, "setRotationOnServer → $norm")
+        // Optimistic local apply — RotatedRoot rotates on the next frame, before
+        // the poll echoes the server value back. Bump _rotationApplied so the
+        // echo doesn't trigger a redundant store write.
+        _rotationApplied = norm
+        store.setRotation(norm)
+
+        val base = store.liveServerUrl.first()?.trimEnd('/')
+        if (base.isNullOrBlank()) {
+            LogBuffer.w(TAG, "setRotationOnServer skipped — no liveServerUrl set")
+            return
+        }
+        val deviceId = store.ensureDeviceId()
+        val body = """{"rotation":$norm}"""
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/api/screens/${urlEncode(deviceId)}/rotation")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) LogBuffer.w(TAG, "setRotationOnServer HTTP ${r.code}")
+                    else LogBuffer.i(TAG, "setRotationOnServer OK")
+                }
+                lastLiveRevision = -1
+            }.onFailure {
+                LogBuffer.w(TAG, "setRotationOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
+            }
+        }
+    }
+
     private fun urlEncode(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
 
     /**
@@ -2175,6 +2212,12 @@ class PlayerRepository(
      * doesn't make the CMS think the screen has gone offline.
      */
     fun startLiveSync() {
+        // v0.2.9: keep the cache's cap in sync with the operator's setting so
+        // the download-time free-space + cap guard always uses the current
+        // value, on every refresh path. Runs for the process lifetime.
+        liveScope.launch {
+            store.cacheCapBytes.collect { cache.maxCacheBytes = it }
+        }
         liveScope.launch {
             // v0.1.41: pre-seed the live server URL BEFORE the polling
             // loop reads it. Without this, a fresh first boot raced the
