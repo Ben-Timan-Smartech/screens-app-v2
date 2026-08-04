@@ -18,6 +18,17 @@ Rules:
 
 ---
 
+## v0.2.12
+
+- **Fix: a screen's settings (rotation, mute, product card, sync group, …) now
+  stick on the first try.** Under a busy fleet the CMS could briefly stall while
+  saving to its disk, and a change made during that moment would silently snap
+  back to the old value on the screen's next check-in — so you'd set the rotation
+  and it would "not stick" until you did it a second time. Settings now save in
+  the background instead of holding everything up, so the change takes effect
+  immediately and the CMS no longer freezes under load. Server-side only — no
+  screen update needed.
+
 ## v0.2.11
 
 - **Hotfix: 90°/270° screen rotation now lays out correctly.** At 90°/270° the

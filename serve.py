@@ -529,13 +529,16 @@ def _parse_multipart(body: bytes, boundary: bytes) -> list[dict]:
     return out
 
 
-def _atomic_write_json(path: Path, data: object) -> None:
-    """Atomic JSON write. Caller does NOT need to hold _STATE_LOCK —
-    callers in this module already do, but this helper doesn't assume."""
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Atomically write a pre-serialised string. Safe to call WITHOUT holding
+    _STATE_LOCK — and hot paths should, so the (gcsfuse-backed, occasionally
+    slow) write never runs under the lock and stalls other request threads.
+    The temp file name carries the writer's thread id so a background flush and
+    a rare synchronous save can't clobber each other's temp file."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp = path.with_suffix(path.suffix + f".{threading.get_ident()}.tmp")
+        tmp.write_text(text, encoding="utf-8")
         tmp.replace(path)
     except Exception as e:
         # We don't want a disk hiccup to crash an API request — log and
@@ -543,24 +546,53 @@ def _atomic_write_json(path: Path, data: object) -> None:
         print(f"[state] atomic write to {path} failed: {e}", file=sys.stderr)
 
 
+def _atomic_write_json(path: Path, data: object) -> None:
+    """Atomic JSON write. Caller does NOT need to hold _STATE_LOCK —
+    callers in this module already do, but this helper doesn't assume.
+    Serialises and writes on the calling thread; fleet-frequency state savers
+    should instead use the coalesced *_soon variants, which hand the write to
+    the background flusher (see _flush_state_loop) so it never runs under the
+    lock."""
+    _atomic_write_text(path, json.dumps(data, indent=2))
+
+
 def _save_per_screen() -> None:
-    """Persist _per_screen. Call inside _STATE_LOCK after any mutation."""
+    """Persist _per_screen NOW, on the calling thread. Call inside _STATE_LOCK.
+
+    Reserved for the rare paths that want the write to land before returning
+    (startup migration, a full-fleet content push). Fleet-frequency / toggle
+    callers must use [_save_per_screen_soon] so the gcsfuse write happens on the
+    background flusher instead of under the lock — see [_flush_state_loop]."""
     _atomic_write_json(PER_SCREEN_JSON, _per_screen)
 
 
 # v0.2.2: heartbeat write coalescing — see _save_screens_soon for the why.
+# v0.2.12: the actual disk write for BOTH state objects now runs on the
+# background flusher [_flush_state_loop], never inline under _STATE_LOCK. gcsfuse
+# caps writes at ~1/sec per object; when a save stalled while the request thread
+# held _STATE_LOCK, every other thread that needed the lock — crucially every
+# /api/state poll and every self-edit/toggle POST — stalled with it. That is why
+# a screen's rotation change could "not stick": the POST hung behind the write
+# backlog and the next poll snapped the screen back to the server's old value.
+# The *_soon savers just mark state dirty; the flusher serialises it under the
+# lock (fast, CPU-only) and does the I/O with the lock released.
 _screens_dirty = False
 _screens_flushed_at = 0.0
 # 10s keeps the whole fleet an order of magnitude under the GCS per-object cap
 # no matter how many screens are added, and is far below the 60s poll interval,
 # so nothing that reads lastHeartbeat off disk notices the delay.
 _SCREENS_FLUSH_SEC = 10.0
+_per_screen_dirty = False
+# How often the background flusher wakes to persist dirty state.
+_STATE_FLUSH_TICK_SEC = 2.0
 
 
 def _save_screens() -> None:
-    """Persist _screens NOW. Call inside _STATE_LOCK after any mutation.
+    """Persist _screens NOW, on the calling thread. Call inside _STATE_LOCK.
 
-    High-frequency callers must use [_save_screens_soon] instead."""
+    Reserved for rare operator writes (register / rename / location / unregister)
+    where a person is waiting; fleet-frequency callers must use
+    [_save_screens_soon]."""
     global _screens_dirty, _screens_flushed_at
     _atomic_write_json(SCREENS_JSON, _screens)
     _screens_dirty = False
@@ -568,32 +600,65 @@ def _save_screens() -> None:
 
 
 def _save_screens_soon() -> None:
-    """Persist _screens at most once per [_SCREENS_FLUSH_SEC]. Inside _STATE_LOCK.
+    """Mark _screens dirty; the background flusher persists it, throttled to at
+    most once per [_SCREENS_FLUSH_SEC]. Call inside _STATE_LOCK.
 
     `lastHeartbeat` changes on EVERY beat from EVERY screen, and _save_screens
     rewrites the whole object. In prod that object lives on a gcsfuse mount, and
     **GCS caps mutations at ~1/sec per object**. At 28 screens the fleet sustained
     ~1.35 rewrites/sec — permanently over the cap. GCS answers 429
-    rateLimitExceeded, gcsfuse retries, the write blocks, request threads pile
-    up, and since the service runs minScale=maxScale=1 there is no second
-    instance to take over: the whole CMS goes dark until the backlog drains
-    (~a minute). It scaled linearly with the fleet, so every screen made it
-    worse — and any *other* write landing in that window (an experience upload,
-    say) got stuck behind it and lost.
-
-    Coalescing costs effectively nothing. The in-memory update already happened,
-    so /api/screens and the online/offline logic — which read `_screens`, not the
-    file — stay instantly accurate. Only the disk flush waits. And lastHeartbeat
-    is re-reported by every screen within its poll interval, so the few seconds a
-    restart could lose refill themselves faster than anyone could look.
-
-    Operator writes (register / rename / location / unregister) deliberately keep
-    calling [_save_screens] directly: they're rare, and a person is waiting."""
+    rateLimitExceeded, gcsfuse retries, the write blocks. Since v0.2.12 that write
+    is handed to the flusher rather than run under _STATE_LOCK, so a stalled flush
+    no longer takes the request threads — or the whole CMS — down with it. The
+    in-memory update already happened, so /api/screens and the online/offline
+    logic stay instantly accurate; only the disk flush waits."""
     global _screens_dirty
     _screens_dirty = True
-    if time.monotonic() - _screens_flushed_at < _SCREENS_FLUSH_SEC:
-        return
-    _save_screens()
+
+
+def _save_per_screen_soon() -> None:
+    """Mark _per_screen dirty; the background flusher persists it within
+    [_STATE_FLUSH_TICK_SEC]. Call inside _STATE_LOCK.
+
+    Used by the self-edit / per-screen toggle endpoints (rotation, audio, product
+    card, sync group, …). The in-memory change is visible to the very next
+    /api/state poll, and the (gcsfuse) disk write is deferred off the lock, so the
+    POST returns immediately instead of hanging behind a write backlog under load
+    — which is what made a rotation change fail to stick until it was retried."""
+    global _per_screen_dirty
+    _per_screen_dirty = True
+
+
+def _flush_state_loop() -> None:
+    """Background daemon: persist dirty in-memory state to disk WITHOUT holding
+    _STATE_LOCK during the (gcsfuse-backed, sometimes slow) write. Each tick it
+    serialises the dirty object under the lock — fast, CPU-only, no I/O — then
+    releases the lock and writes. Keeping the write off the lock is what stops a
+    stalled GCS flush from taking every request thread with it (v0.2.12)."""
+    global _screens_dirty, _screens_flushed_at, _per_screen_dirty
+    while True:
+        time.sleep(_STATE_FLUSH_TICK_SEC)
+        try:
+            per_screen_text = None
+            screens_text = None
+            with _STATE_LOCK:
+                if _per_screen_dirty:
+                    per_screen_text = json.dumps(_per_screen, indent=2)
+                    _per_screen_dirty = False
+                # _screens stays throttled: lastHeartbeat churns on every beat and
+                # the object must stay under the GCS per-object write cap.
+                if _screens_dirty and (time.monotonic() - _screens_flushed_at) >= _SCREENS_FLUSH_SEC:
+                    screens_text = json.dumps(_screens, indent=2)
+                    _screens_dirty = False
+                    _screens_flushed_at = time.monotonic()
+            # Disk I/O with the lock released. Thread-id-tagged temp files (see
+            # _atomic_write_text) keep this from racing a rare synchronous save.
+            if per_screen_text is not None:
+                _atomic_write_text(PER_SCREEN_JSON, per_screen_text)
+            if screens_text is not None:
+                _atomic_write_text(SCREENS_JSON, screens_text)
+        except Exception as e:
+            print(f"[state] flush loop error: {e}", file=sys.stderr)
 
 
 def _save_custom_stores() -> None:
@@ -1756,7 +1821,7 @@ def _ensure_screen_state(device_id: str) -> dict:
             "pendingCommands": [],                 # list of pending commands for this screen
         }
         _per_screen[device_id] = s
-        _save_per_screen()
+        _save_per_screen_soon()
     # Back-fill any fields persisted before they shipped so older records
     # get sane defaults without a migration script.
     #
@@ -3391,7 +3456,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # Drained queue is a state change worth persisting —
                         # otherwise a redeploy after a command was emitted
                         # but before it was drained could re-fire it.
-                        _save_per_screen()
+                        _save_per_screen_soon()
                     # Per-screen splash resolution from the device's location.
                     screen_meta = _screens.get(screen_id, {})
                     location = screen_meta.get("location") or {}
@@ -4603,7 +4668,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
                     state = _ensure_screen_state(device_id)
                     state["pendingCommands"].append({"command": cmd, "at": time.time()})
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     print(f"[command] {device_id} -> {cmd}", file=sys.stderr)
                     label = {
                         "reboot":        "Rebooted",
@@ -4704,7 +4769,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state = _ensure_screen_state(device_id)
                     state["mixSplash"] = bool(body.get("mixSplash", True))
                     state["revision"] += 1                  # bump so player picks up flag change
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     self._send_json({"ok": True, "mixSplash": state["mixSplash"]})
                     return
                 if action == "product-card":
@@ -4714,7 +4779,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state = _ensure_screen_state(device_id)
                     state["productCard"] = bool(body.get("productCard", False))
                     state["revision"] += 1
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     self._send_json({"ok": True, "productCard": state["productCard"]})
                     return
                 if action == "rotation":
@@ -4736,7 +4801,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         return
                     state["rotation"] = rot
                     state["revision"] += 1
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     self._send_json({"ok": True, "rotation": state["rotation"]})
                     return
                 if action == "experience":
@@ -4799,7 +4864,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state = _ensure_screen_state(device_id)
                     state["tapNext"] = bool(body.get("tapNext", False))
                     state["revision"] += 1
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     self._send_json({"ok": True, "tapNext": state["tapNext"]})
                     return
                 if action == "progress-bar":
@@ -4809,13 +4874,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state = _ensure_screen_state(device_id)
                     state["progressBar"] = bool(body.get("progressBar", False))
                     state["revision"] += 1
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     self._send_json({"ok": True, "progressBar": state["progressBar"]})
                     return
                 if action == "audio":
                     state = _ensure_screen_state(device_id)
                     state["audioOn"] = bool(body.get("audioOn", False))
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     # Don't bump revision — audio toggles shouldn't
                     # force a full playlist re-init on the tablet.
                     # The player polls /api/state every ~3s and reads
@@ -4839,7 +4904,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # Keep the legacy flag in sync so older tablets reading
                     # lowDataMode still behave correctly until they update.
                     state["lowDataMode"] = (raw == "slow")
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     pretty = {"fast": "Fast (10 s)", "normal": "Normal (60 s)", "slow": "Slow (10 min)"}[raw]
                     _log_activity(
@@ -4857,7 +4922,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     legacy = bool(body.get("lowDataMode", False))
                     state["lowDataMode"] = legacy
                     state["pollMode"] = "slow" if legacy else DEFAULT_POLL_MODE
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     _log_activity(
                         kind="settings",
@@ -4881,7 +4946,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         new_group = cleaned if cleaned else None
                     state = _ensure_screen_state(device_id)
                     state["syncGroup"] = new_group
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     _log_activity(
                         kind="settings",
@@ -4919,7 +4984,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         self.send_error(400, "displayMode must be int or null"); return
                     state = _ensure_screen_state(device_id)
                     state["displayMode"] = new_mode
-                    _save_per_screen()
+                    _save_per_screen_soon()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     # Try to render a human label using the modes the
                     # tablet has reported — purely for the activity log.
@@ -5945,6 +6010,11 @@ def main() -> None:
         if cleared:
             _save_per_screen()
             print(f"[migrate] cleared {cleared} auto-set store:* sync group(s)", file=sys.stderr)
+    # v0.2.12: background state flusher — persists dirty _screens / _per_screen
+    # to disk off the request thread and out from under _STATE_LOCK, so a slow
+    # gcsfuse write can't stall polls or self-edit/toggle POSTs (which is what
+    # made rotation changes fail to stick under load).
+    threading.Thread(target=_flush_state_loop, daemon=True).start()
     # Daily re-scan in a background thread. Doesn't run on boot — the
     # existing library.json from the last run is used; Drive Sync UI lets
     # the user trigger an on-demand scan if needed.
