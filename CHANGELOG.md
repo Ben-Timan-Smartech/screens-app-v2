@@ -18,6 +18,15 @@ Rules:
 
 ---
 
+## v0.2.11
+
+- **Hotfix: 90°/270° screen rotation now lays out correctly.** At 90°/270° the
+  rotated UI was squished into a band with edges clipped. Two fixes: the rotated
+  canvas is now forced to the full screen size (it was being collapsed to a
+  square), and the UI is told it's in portrait so its layout fits the space.
+  Rotation actually looked correct end-to-end otherwise; 0° and 180° were
+  unaffected.
+
 ## v0.2.10
 
 - **Hotfix: the on-screen rotation control works now.** In v0.2.9 the Device
