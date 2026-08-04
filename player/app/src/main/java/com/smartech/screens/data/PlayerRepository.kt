@@ -1638,6 +1638,7 @@ class PlayerRepository(
                 val req = Request.Builder()
                     .url("$base/api/sync-groups/${urlEncode(deviceId)}/calibrate")
                     .post(body.toRequestBody("application/json".toMediaType()))
+                    .withDeviceSecret()          // v0.2.9.1: self-calibrate needs the secret too
                     .build()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) {
@@ -1839,6 +1840,7 @@ class PlayerRepository(
                 val req = Request.Builder()
                     .url("$base/api/screens/${urlEncode(deviceId)}/rotation")
                     .post(body.toRequestBody("application/json".toMediaType()))
+                    .withDeviceSecret()          // v0.2.9.1: server ENFORCEs it → 403 without
                     .build()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setRotationOnServer HTTP ${r.code}")

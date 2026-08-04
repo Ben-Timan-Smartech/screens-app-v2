@@ -4143,9 +4143,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # Body: { durationSec?: int (default 60) }. Returns the list of
         # screens affected.
         if path.startswith("/api/sync-groups/") and path.endswith("/calibrate"):
-            if self._require_perm("screens.command") is None:
-                return
             group_id = urllib.parse.unquote(path[len("/api/sync-groups/"):-len("/calibrate")])
+            # v0.2.9.1: auth. A CMS user with screens.command, OR a tablet
+            # calibrating ITSELF — cookieless, presenting its own device secret,
+            # where group_id is that screen's deviceId. Mirrors the self-edit
+            # auth on /api/screens/<id>/<action> so the Device-admin Calibrate
+            # button works on a no-login kiosk. Calibrating a whole multi-screen
+            # group (group_id isn't a known deviceId) stays user-only.
+            _cal_user = self._current_user()
+            if _cal_user is not None:
+                if self._require_perm("screens.command") is None:
+                    return
+            elif group_id in _screens:
+                _provided = self.headers.get("X-Device-Secret")
+                _expected = (_screens.get(group_id) or {}).get("deviceSecret")
+                if _expected and _provided == _expected:
+                    pass  # the device calibrating itself
+                elif _provided and _provided != _expected:
+                    self.send_error(403, "Invalid device secret"); return
+                elif ENFORCE_DEVICE_SECRET:
+                    self.send_error(403, "Device secret required"); return
+                else:
+                    print(f"[self-edit] {group_id} calibrate without device secret (grace)", file=sys.stderr)
+            else:
+                if self._require_perm("screens.command") is None:
+                    return
             try:
                 duration_sec = int(body.get("durationSec") or 60)
             except (TypeError, ValueError):

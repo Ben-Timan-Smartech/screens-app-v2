@@ -18,6 +18,15 @@ Rules:
 
 ---
 
+## v0.2.10
+
+- **Hotfix: the on-screen rotation control works now.** In v0.2.9 the Device
+  admin Rotation buttons were rejected by the server (403) because the tablet
+  wasn't sending its identity token with the request — so nothing happened.
+  Fixed. While checking, we found the Device-admin "Calibrate" button had the
+  same problem (it never worked from a screen) and fixed that too. The CMS-side
+  rotation control was unaffected.
+
 ## v0.2.9
 
 - **The on-screen "Orientation" setting now actually rotates the screen.** In
