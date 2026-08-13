@@ -16,6 +16,7 @@ Run from the project root:
 
 from __future__ import annotations
 
+import hmac
 import html
 import http.server
 import json
@@ -420,6 +421,11 @@ SECRETS_JSON = Path(os.environ.get(
 # Cloud Run injects $PORT (defaults to 8080); on a laptop we keep 8765.
 PORT = int(os.environ.get("PORT", "8765"))
 BIND = "0.0.0.0"   # Listen on all interfaces so the tablet can reach us on LAN.
+
+# Shared secret for the read-only /api/metrics endpoint (Claude Projects
+# Dashboard). Set on the Cloud Run service; the same value goes on the
+# dashboard side. Empty = the endpoint is closed (every request 401s).
+METRICS_KEY = os.environ.get("METRICS_KEY", "")
 
 RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
 
@@ -1687,6 +1693,70 @@ def _presence(last_heartbeat: float | None, poll_mode: str | None,
     age = (now if now is not None else time.time()) - last_heartbeat
     return (age < _live_threshold_sec(poll_mode),
             age < _online_threshold_sec(poll_mode))
+
+
+# ── Platform metrics (Claude Projects Dashboard) ─────────────────────
+# Powers GET /api/metrics: read-only, aggregate, no-PII usage counts for the
+# founders' dashboard. Cached so a few-minute poll never recomputes hot.
+_METRICS_CACHE: dict = {"data": None, "at": 0.0}
+_METRICS_TTL_SEC = 60.0
+
+
+def _metrics_payload() -> dict:
+    """Build the /api/metrics response. All numbers come from in-memory live
+    state (no external calls, sub-ms), so this is fast; the cache just spares
+    us recomputing on every dashboard poll. Wrapped fail-soft: if the compute
+    throws we still return a valid 200 with whatever metrics we have."""
+    now = time.time()
+    cached = _METRICS_CACHE.get("data")
+    if cached is not None and (now - _METRICS_CACHE.get("at", 0.0)) < _METRICS_TTL_SEC:
+        return cached
+
+    metrics: list[dict] = []
+
+    def add(key: str, label: str, value, period: str, unit: str | None = None) -> None:
+        m = {"key": key, "label": label, "value": value, "period": period}
+        if unit is not None:
+            m["unit"] = unit
+        metrics.append(m)
+
+    try:
+        # Everything reads _screens / _per_screen — snapshot under the lock,
+        # but the work is trivial so we just compute inside it (no I/O here).
+        with _STATE_LOCK:
+            total = len(_screens)
+            online = 0
+            stores: set[str] = set()
+            for dev, meta in _screens.items():
+                st = _per_screen.get(dev, {})
+                last = meta.get("lastHeartbeat") or 0
+                pm = st.get("pollMode") or DEFAULT_POLL_MODE
+                _, online_flag = _presence(last, pm, now)
+                if online_flag:
+                    online += 1
+                sid = ((meta.get("location") or {}).get("storeId") or "").strip()
+                if sid:
+                    stores.add(sid)
+            cutoff = now - 7 * 86400
+            updated_7d = sum(
+                1 for st in _per_screen.values()
+                if isinstance(st.get("pushedAt"), (int, float)) and st["pushedAt"] >= cutoff
+            )
+        add("screens_online", "Screens online", online, "now", unit="screens")
+        add("screens_total", "Screens deployed", total, "now", unit="screens")
+        add("stores_live", "Stores running the platform", len(stores), "now", unit="stores")
+        add("screens_updated_7d", "Screens given new content", updated_7d, "7d", unit="screens")
+    except Exception as e:
+        print(f"[metrics] compute failed: {e}", file=sys.stderr)
+
+    payload = {
+        "platform": "screens-app",
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "metrics": metrics[:8],
+    }
+    _METRICS_CACHE["data"] = payload
+    _METRICS_CACHE["at"] = now
+    return payload
 
 
 # ── Offline-screen alerting ──────────────────────────────────────────
@@ -3396,6 +3466,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "appVersion":       APP_VERSION,
                 "latestRelease":    _release_info(),
             })
+            return
+
+        # ── Platform metrics (founders' dashboard) ───────────────
+        # Read-only aggregate usage counts. On the public internet, gated
+        # ONLY by the X-Metrics-Key header (NOT a CMS session). Constant-time
+        # compare; missing key and wrong key return the identical 401 (no
+        # hints). The key is never logged (the request logger records the
+        # path + status only, not headers).
+        if path == "/api/metrics":
+            provided = self.headers.get("X-Metrics-Key", "") or ""
+            ok = bool(METRICS_KEY) and hmac.compare_digest(
+                provided.encode("utf-8"), METRICS_KEY.encode("utf-8"))
+            if not ok:
+                self._send_json({"error": "unauthorized"}, status=401)
+                return
+            self._send_json(_metrics_payload())
             return
 
         # ── Latest release ──────────────────────────────────────
