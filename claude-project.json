@@ -4,5 +4,6 @@
   "stage": "Live",
   "priority": "High",
   "liveUrl": "https://screens.smartechworld.com",
-  "audience": "external"
+  "audience": "external",
+  "metricsUrl": "https://screens.smartechworld.com/api/metrics"
 }
