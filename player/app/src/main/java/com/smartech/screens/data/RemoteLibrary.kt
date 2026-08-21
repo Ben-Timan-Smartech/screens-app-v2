@@ -7,6 +7,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
 
 /**
  * Pulls the library (brands + videos) from the live demo server's
@@ -15,10 +16,15 @@ import okhttp3.Request
  *
  * Refresh strategy: polled on demand from [refresh]; called from the live
  * sync loop in [PlayerRepository] every few ticks. Last good response is
- * cached in memory and served when the network is flaky.
+ * cached in memory AND (v0.2.13) persisted to [cacheFile], so a tablet that
+ * boots with no network shows the full last-saved catalogue in the picker
+ * instead of the hardcoded fallback set.
  */
 class RemoteLibrary(
     private val httpClient: OkHttpClient,
+    // v0.2.13: on-disk cache of the last good /api/library. Null disables
+    // persistence (e.g. previews / tests) — the in-memory cache still applies.
+    private val cacheFile: File? = null,
 ) {
     @Serializable
     data class Library(
@@ -109,8 +115,35 @@ class RemoteLibrary(
                     v.copy(mediaUrl = url)
                 }
                 _state.value = lib.copy(videos = items)
+                writeCache(_state.value)
                 LogBuffer.i("RemoteLibrary", "Fetched ${items.size} videos across ${lib.brands.size} brands")
             }
         }.onFailure { LogBuffer.throttledW("RemoteLibrary", "library-refresh-fail", "Refresh failed: ${it.message}") }
+    }
+
+    /** Persist the current library to disk (best-effort) so it survives a
+     *  reboot and is available to the picker before the next network fetch. */
+    private fun writeCache(lib: Library) {
+        val f = cacheFile ?: return
+        runCatching { f.writeText(json.encodeToString(Library.serializer(), lib)) }
+            .onFailure { LogBuffer.throttledW("RemoteLibrary", "library-cache-write-fail", "Cache write failed: ${it.message}") }
+    }
+
+    /** Hydrate [state] from the on-disk cache when we have no live data yet.
+     *  Lets the brand/video picker show the full saved catalogue on a
+     *  no-network boot instead of the hardcoded fallback. No-op once a live
+     *  refresh has populated [state]. Does its own file I/O — call off the
+     *  main thread. */
+    fun loadCache() {
+        val f = cacheFile ?: return
+        if (_state.value.brands.isNotEmpty() || _state.value.videos.isNotEmpty()) return
+        if (!f.exists()) return
+        runCatching {
+            val lib = json.decodeFromString<Library>(f.readText())
+            if (lib.brands.isNotEmpty() || lib.videos.isNotEmpty()) {
+                _state.value = lib
+                LogBuffer.i("RemoteLibrary", "Loaded cached library: ${lib.videos.size} videos, ${lib.brands.size} brands")
+            }
+        }.onFailure { LogBuffer.throttledW("RemoteLibrary", "library-cache-read-fail", "Cache read failed: ${it.message}") }
     }
 }

@@ -39,8 +39,13 @@ class PlayerRepository(
      *  delegates to this. Null = updater not set up yet (early
      *  process boot), in which case we silently no-op. */
     var updater: com.smartech.screens.update.Updater? = null
-    /** Library mirror — pulled from the live server, surfaced to staff overlay. */
-    val remoteLibrary: RemoteLibrary = RemoteLibrary(httpClient)
+    /** Library mirror — pulled from the live server, surfaced to staff overlay.
+     *  v0.2.13: cached to disk so the picker shows the full saved catalogue on
+     *  a no-network boot instead of the hardcoded fallback set. */
+    val remoteLibrary: RemoteLibrary = RemoteLibrary(
+        httpClient,
+        cacheFile = java.io.File(appContext.filesDir, "library-cache.json"),
+    )
     private var libraryRefreshTickCounter = 0
     sealed class State {
         data object Registering : State()
@@ -2221,6 +2226,11 @@ class PlayerRepository(
             store.cacheCapBytes.collect { cache.maxCacheBytes = it }
         }
         liveScope.launch {
+            // v0.2.13: hydrate the brand/video picker from the on-disk library
+            // cache first, so a boot with no network shows the full saved
+            // catalogue instead of the hardcoded fallback. No-op once a live
+            // refresh lands (it only fills an empty in-memory library).
+            kotlinx.coroutines.withContext(Dispatchers.IO) { remoteLibrary.loadCache() }
             // v0.1.41: pre-seed the live server URL BEFORE the polling
             // loop reads it. Without this, a fresh first boot raced the
             // pre-seed coroutine in ScreensApp.onCreate — the polling
