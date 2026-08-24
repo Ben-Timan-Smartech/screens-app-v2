@@ -1784,6 +1784,56 @@ def _send_alert(text: str) -> None:
         print(f"[alerts] webhook post failed: {e}", file=sys.stderr)
 
 
+def _maybe_post_daily_digest(now: float) -> None:
+    """Post ONE Slack summary per day (at [ALERT_DIGEST_HOUR_UTC]) covering every
+    offline/recovery since the last summary, plus what's still down — instead of
+    a webhook message per transition (v0.2.13). Silent on a quiet day. Snapshots
+    under the lock, posts outside it; best-effort, never raises."""
+    global _digest_last_date
+    if not ALERT_WEBHOOK:
+        return
+    tm = time.gmtime(now)
+    today = time.strftime("%Y-%m-%d", tm)
+    # One digest opportunity per day, once the target hour has passed.
+    if tm.tm_hour < ALERT_DIGEST_HOUR_UTC or _digest_last_date == today:
+        return
+    _digest_last_date = today
+    with _STATE_LOCK:
+        downs = list(_digest_downs.values())
+        ups = list(_digest_ups.values())
+        _digest_downs.clear()
+        _digest_ups.clear()
+        currently: list[str] = []
+        for d in sorted(_alerted_offline):
+            s = _screens.get(d)
+            if not s:
+                currently.append(_alert_label({"deviceId": d}))
+                continue
+            last = s.get("lastHeartbeat") or 0
+            mins = int((now - last) // 60) if last else 0
+            dur = f"~{mins // 60}h{mins % 60:02d}m" if mins >= 60 else f"~{mins}m"
+            currently.append(f"{_alert_label(s)} ({dur})")
+    if not downs and not ups and not currently:
+        return  # nothing to report — no noise on a quiet day
+    lines = [f"📋 *Screens daily summary — {today}*"]
+    if currently:
+        lines.append(f"🔴 Offline now ({len(currently)}): " + ", ".join(currently))
+    if downs:
+        events = sum(d["count"] for d in downs)
+        labels = ", ".join(
+            d["label"] + (f" ×{d['count']}" if d["count"] > 1 else "")
+            for d in sorted(downs, key=lambda x: x["label"])
+        )
+        lines.append(
+            f"⚠️ Dropped offline since the last summary — "
+            f"{len(downs)} screen(s), {events} event(s): {labels}"
+        )
+    if ups:
+        labels = ", ".join(u["label"] for u in sorted(ups, key=lambda x: x["label"]))
+        lines.append(f"🟢 Recovered ({len(ups)}): {labels}")
+    _send_alert("\n".join(lines))
+
+
 def _offline_monitor_loop() -> None:
     """Watch for screens going offline / recovering and alert once per
     transition. A screen is alerted as down only after (a) it was seen online
@@ -1816,16 +1866,23 @@ def _offline_monitor_loop() -> None:
                     if (down_for is not None and down_for >= threshold
                             and device_id not in _alerted_offline):
                         _alerted_offline.add(device_id)
-                        downs.append((f"{_alert_label(s)} · ~{int(down_for // 60)} min", device_id))
-            # Log + notify outside the lock — the webhook does network I/O.
+                        downs.append((_alert_label(s), device_id))
+            # Every transition is logged to the activity feed live; the Slack
+            # alerts are batched into a once-a-day digest (v0.2.13) so flapping
+            # store wifi doesn't spam the channel. Done outside the lock.
             for label, dev in downs:
                 _log_activity(kind="offline", text=f"{label} went offline",
                               icon="offline", tone="err", target=dev)
-                _send_alert(f"🔴 Screen {label} went offline")
+                e = _digest_downs.setdefault(dev, {"label": label, "count": 0})
+                e["label"] = label
+                e["count"] += 1
             for label, dev in ups:
                 _log_activity(kind="back", text=f"{label} is back online",
                               icon="check", tone="ok", target=dev)
-                _send_alert(f"🟢 Screen {label} is back online")
+                e = _digest_ups.setdefault(dev, {"label": label, "count": 0})
+                e["label"] = label
+                e["count"] += 1
+            _maybe_post_daily_digest(now)
         except Exception as e:
             print(f"[alerts] monitor iteration failed: {e}", file=sys.stderr)
 
@@ -2220,6 +2277,19 @@ except ValueError:
     ALERT_OFFLINE_AFTER_SEC = 300
 _alerted_offline: set[str] = set()   # deviceIds we've already flagged as down
 _ever_online: set[str] = set()       # deviceIds seen online at least once this run
+# v0.2.13: Slack alerts are collapsed into ONE summary per day (at
+# ALERT_DIGEST_HOUR_UTC, server/UTC time) instead of a webhook post per
+# offline/recovery transition — flapping store wifi (PH.* etc.) was spamming
+# the channel. The activity feed still records every transition live; only the
+# webhook is batched. Buffers are in-memory (reset on redeploy — losing a day's
+# batched events on a rare restart is acceptable for non-critical alerts).
+try:
+    ALERT_DIGEST_HOUR_UTC = int(os.environ.get("SCREENS_ALERT_DIGEST_HOUR_UTC", "8"))
+except ValueError:
+    ALERT_DIGEST_HOUR_UTC = 8
+_digest_downs: dict[str, dict] = {}   # deviceId -> {"label": str, "count": int}
+_digest_ups: dict[str, dict] = {}     # deviceId -> {"label": str, "count": int}
+_digest_last_date: str | None = None  # UTC date the daily digest last fired
 # v0.1.58: integration secrets, {name: {value, updatedAt, updatedBy}}.
 # Currently holds the Brand Asset Manager API key; structured as a dict
 # so adding more keys later doesn't require an endpoint change. Only the
