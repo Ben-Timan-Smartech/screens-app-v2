@@ -18,6 +18,17 @@ Rules:
 
 ---
 
+## v0.2.13
+
+- **Offline: the staff brand & video picker now shows your real catalogue, not
+  the demo brands.** Before, if a screen booted with no internet, the "Add
+  content" picker fell back to a short hard-coded demo list (Anker, B&O, DVX,
+  Ember, Foreo, Motorola, SONOS). Now the tablet keeps a saved copy of the full
+  catalogue from the last time it was online, so staff see every real brand and
+  video even offline. A clear banner across the top tells them they're not
+  connected — the list may be out of date and new pushes won't land until the
+  screen is back online.
+
 ## v0.2.12
 
 - **Fix: a screen's settings (rotation, mute, product card, sync group, …) now

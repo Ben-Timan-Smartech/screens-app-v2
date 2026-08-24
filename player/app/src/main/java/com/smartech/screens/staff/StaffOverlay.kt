@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -76,6 +77,11 @@ fun StaffOverlay(
     var visible by remember { mutableStateOf(false) }
     var stage by remember { mutableStateOf<Stage>(Stage.Pin) }
     val scope = rememberCoroutineScope()
+
+    // v0.2.13: live server reachability, so the brand/video pickers can warn
+    // staff when they're offline (and therefore seeing the cached catalogue).
+    val connection by repository.connection.collectAsState()
+    val offline = connection == PlayerRepository.ConnectionStatus.OFFLINE
 
     // Mirror the visibility flag back to the host. LaunchedEffect re-fires
     // whenever `visible` changes; idempotent if the host doesn't care.
@@ -170,6 +176,7 @@ fun StaffOverlay(
                 onBack = { stage = Stage.Playlist(s.user) },
                 onPickBrand = { stage = Stage.Videos(s.user, it) },
                 onCancel = { visible = false },
+                offline = offline,
             )
             is Stage.Videos -> {
                 // Prefer the remote library (pulled from /api/library) so the
@@ -223,6 +230,7 @@ fun StaffOverlay(
                 VideoPickerScreen(
                     brand = s.brand,
                     videos = videos,
+                    offline = offline,
                     onBack = { stage = Stage.Brands(s.user) },
                     onPick = { picked ->
                         // v0.1.49: `picked` is now a list. Push the

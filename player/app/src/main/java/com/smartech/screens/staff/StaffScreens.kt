@@ -361,6 +361,7 @@ fun BrandPickerScreen(
     onPickBrand: (String) -> Unit,
     onCancel: () -> Unit,
     remoteLibrary: com.smartech.screens.data.RemoteLibrary? = null,
+    offline: Boolean = false,
 ) {
     // Pull from /api/library when the live server is reachable. Falls back to
     // a short hardcoded alphabetical set while the first response is in flight
@@ -381,6 +382,10 @@ fun BrandPickerScreen(
         left = { Rail("Which brand?", "Search or tap a brand. Tap back to re-enter PIN.", 1) },
         right = {
             Column(Modifier.fillMaxSize().padding(paneInset())) {
+                if (offline) {
+                    OfflineNotice()
+                    Spacer(Modifier.height(if (compactPane()) 10.dp else 16.dp))
+                }
                 SearchBar(query, onQueryChange = { query = it }, placeholder = "Search brands")
                 Spacer(Modifier.height(if (compactPane()) 14.dp else 28.dp))
                 // v0.1.53: bound the grid so the bottom row stays
@@ -456,6 +461,34 @@ private fun BrandLogo(brand: String, logoUrl: String?) {
                 error = { fallback() },
             )
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Offline notice — shown atop the brand/video pickers when the live
+// server is unreachable. v0.2.13: the picker now shows the full
+// last-saved catalogue (from the on-disk library cache) rather than
+// the hardcoded fallback set, so this tells staff the list may be out
+// of date and that pushes won't land until the tablet is back online.
+// ─────────────────────────────────────────────────────────────
+@Composable
+private fun OfflineNotice() {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0x22E8A33D))
+            .border(1.dp, Amber, RoundedCornerShape(14.dp))
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFA63824)))
+        Spacer(Modifier.width(14.dp))
+        Text(
+            "No internet connection — showing your last saved catalogue. " +
+                "Reconnect to get the latest and to push changes to this screen.",
+            color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+        )
     }
 }
 
@@ -575,6 +608,7 @@ fun VideoPickerScreen(
     onBack: () -> Unit,
     onPick: (List<VideoItem>) -> Unit,
     onCancel: () -> Unit,
+    offline: Boolean = false,
 ) {
     var query by remember { mutableStateOf(TextFieldValue("")) }
     // Track selected ids (not the full item) so the set is stable
@@ -617,6 +651,10 @@ fun VideoPickerScreen(
         right = {
             val compact = compactPane()
             Column(Modifier.fillMaxSize().padding(paneInset())) {
+                if (offline) {
+                    OfflineNotice()
+                    Spacer(Modifier.height(if (compact) 10.dp else 16.dp))
+                }
                 SearchBar(query, onQueryChange = { query = it }, placeholder = "Search $brand videos")
                 // v0.1.71: four filters — All · Products · Brand videos ·
                 // Orphans (Unassigned). Only shown when tm:rw has section
