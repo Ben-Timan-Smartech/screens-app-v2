@@ -1840,7 +1840,8 @@ def _offline_monitor_loop() -> None:
     at least once this run — so stale rows don't alert on boot — and (b) it's
     been offline past its normal online threshold + ALERT_OFFLINE_AFTER_SEC,
     which debounces flapping."""
-    print(f"[alerts] offline monitor started (webhook {'on' if ALERT_WEBHOOK else 'off'})",
+    print(f"[alerts] offline monitor started (webhook {'on' if ALERT_WEBHOOK else 'off'}"
+          f", Slack batched into a daily digest at {ALERT_DIGEST_HOUR_UTC:02d}:00 UTC)",
           file=sys.stderr)
     while True:
         time.sleep(60)
