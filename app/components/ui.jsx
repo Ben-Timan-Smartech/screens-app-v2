@@ -1242,7 +1242,7 @@ const Thumbnail = ({ title, brand, duration, aspect = '16/9', size = 'md', style
 // ─────────────────────────────────────────────────────────────
 // Sidebar — left nav. Wired to hash routes.
 // ─────────────────────────────────────────────────────────────
-const SidebarItem = ({ icon, label, current, count, onClick, muted }) => {
+const SidebarItem = ({ icon, label, current, count, onClick, muted, liveDot }) => {
   const [hover, setHover] = React.useState(false);
   return (
     <button onClick={onClick}
@@ -1254,11 +1254,69 @@ const SidebarItem = ({ icon, label, current, count, onClick, muted }) => {
         color: current ? 'var(--ink-1)' : muted ? 'var(--ink-4)' : 'var(--ink-3)',
         background: current ? 'var(--ink-8)' : hover ? 'var(--bone-soft)' : 'transparent',
         borderRadius: 2,
+        // 2px left rail marker in the primary accent (mint in dark, ink in
+        // light). Inset shadow instead of border to avoid layout shift.
+        boxShadow: current ? 'inset 2px 0 0 0 var(--accent)' : 'none',
         textAlign: 'left', cursor: 'pointer',
       }}>
       <span style={{ color: current ? 'var(--ink-1)' : 'var(--ink-4)', display: 'flex' }}>{icon}</span>
-      <span style={{ flex: 1 }}>{label}</span>
-      {count !== undefined && <span style={{ fontSize: 11, color: 'var(--ink-4)', fontVariantNumeric: 'tabular-nums' }}>{count}</span>}
+      <span style={{ flex: 1, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        {label}
+        {liveDot && (
+          <span aria-hidden style={{
+            width: 5, height: 5, borderRadius: '50%',
+            background: 'var(--accent-signal, var(--accent-amber))',
+            boxShadow: '0 0 6px var(--signal-glow, rgba(255,184,77,0.5))',
+            animation: 'sidebar-live-pulse 2s ease-in-out infinite',
+          }} />
+        )}
+      </span>
+      {count !== undefined && <span style={{ fontSize: 11, color: current ? 'var(--ink-2)' : 'var(--ink-4)', fontVariantNumeric: 'tabular-nums' }}>{count}</span>}
+    </button>
+  );
+};
+
+// Small group heading inside the sidebar nav — separates "Operate" work
+// (Dashboard, Content, Screens) from "Watch" work (Activity).
+const SidebarGroup = ({ label, children }) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginTop: 8 }}>
+    <div style={{
+      fontSize: 10, fontWeight: 500, letterSpacing: '0.14em',
+      textTransform: 'uppercase', color: 'var(--ink-4)',
+      padding: '6px 12px 4px',
+    }}>{label}</div>
+    {children}
+  </div>
+);
+
+// Sidebar-mounted command-palette launcher. Clicking (or focusing +
+// hitting Enter) opens the palette via the same event the ⌘K/Ctrl-K
+// shortcut fires internally. Keyboard shortcut hint sits on the right
+// so operators learn ⌘K without having to hunt for it.
+const SidebarSearchChip = () => {
+  const [hover, setHover] = React.useState(false);
+  const isMac = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform);
+  const openPalette = () => window.dispatchEvent(new Event('open-command-palette'));
+  return (
+    <button
+      onClick={openPalette}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      aria-label="Open command palette"
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        width: '100%', padding: '7px 10px', margin: '2px 0 6px',
+        background: hover ? 'var(--bone-soft)' : 'transparent',
+        border: 'var(--border)', borderRadius: 3,
+        fontSize: 12, color: 'var(--ink-4)', cursor: 'pointer',
+        textAlign: 'left',
+      }}>
+      <Icon.search size={12} />
+      <span style={{ flex: 1 }}>Jump to anything…</span>
+      <span style={{
+        fontFamily: 'var(--font-mono)', fontSize: 10,
+        padding: '1px 5px', border: 'var(--border-strong)', borderRadius: 2,
+        color: 'var(--ink-3)',
+      }}>{isMac ? '⌘K' : 'Ctrl K'}</span>
     </button>
   );
 };
@@ -1360,7 +1418,12 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
   // Dynamic counts. Library polls /api/library; Screens reads the live
   // registry; Schedules counts the (currently empty) MOCK_SCHEDULES.
   const libraryCount = useLibraryCount();
-  const fleetCount = useFleet().length;
+  const fleet = useFleet();
+  const fleetCount = fleet.length;
+  // "Any screen on air?" — drives the pulsing mint live-dot on the
+  // Dashboard nav item so operators can spot at a glance whether the
+  // fleet is broadcasting without opening the page.
+  const anyLive = fleet.some((s) => s.status === 'online');
   const scheduleCount = (MOCK_SCHEDULES || []).length;
 
   // Real user from /api/auth/me, fetched once on mount in AuthProvider.
@@ -1403,28 +1466,40 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
       <span style={{ color: 'var(--ink-4)', display: 'flex' }}><Icon.chevD size={12} /></span>
     </div>
 
-    {/* Main nav — items hidden if the role can't access them. */}
-    <nav style={{ display: 'flex', flexDirection: 'column', gap: 1, marginTop: 2 }}>
-      <SidebarItem icon={<Icon.home />} label="Dashboard" current={current === 'dashboard'} onClick={() => navigate('/dashboard')} />
-      {can(user, 'library.view') && (
-        <SidebarItem icon={<Icon.library />} label="Content library" current={current === 'library'} count={libraryCount || undefined} onClick={() => navigate('/library')} />
-      )}
-      {can(user, 'screens.view') && (
-        <SidebarItem icon={<Icon.screens />} label="Screens" current={current === 'screens'} count={fleetCount || undefined} onClick={() => navigate('/screens')} />
-      )}
-      {can(user, 'screens.view') && (
-        <SidebarItem icon={<Icon.sync />} label="Sync groups" current={current === 'sync-groups'} onClick={() => navigate('/sync-groups')} />
-      )}
-      {/* v0.1.56: Schedules hidden. The page still exists at
-          /schedules for anyone who knows the URL, but it's not
-          surfaced in the sidebar until the scheduling feature
-          actually does something — currently the MOCK_SCHEDULES
-          list is always empty and the page is dead weight. */}
-      {false && can(user, 'schedules.view') && (
-        <SidebarItem icon={<Icon.schedule />} label="Schedules" current={current === 'schedules'} count={scheduleCount || undefined} onClick={() => navigate('/schedules')} />
-      )}
+    {/* Command-palette launcher — sits at the top of the nav so ⌘K
+        is discoverable without hunting; clicking dispatches the same
+        open event the shortcut uses internally. */}
+    <SidebarSearchChip />
+
+    {/* Main nav — items hidden if the role can't access them.
+        Grouped into "Operate" (things you act on) and "Watch"
+        (things you monitor) so the sidebar reads as a control
+        console rather than an undifferentiated list. */}
+    <nav style={{ display: 'flex', flexDirection: 'column' }}>
+      <SidebarGroup label="Operate">
+        <SidebarItem icon={<Icon.home />} label="Dashboard" current={current === 'dashboard'} liveDot={anyLive} onClick={() => navigate('/dashboard')} />
+        {can(user, 'library.view') && (
+          <SidebarItem icon={<Icon.library />} label="Content library" current={current === 'library'} count={libraryCount || undefined} onClick={() => navigate('/library')} />
+        )}
+        {can(user, 'screens.view') && (
+          <SidebarItem icon={<Icon.screens />} label="Screens" current={current === 'screens'} count={fleetCount || undefined} onClick={() => navigate('/screens')} />
+        )}
+        {can(user, 'screens.view') && (
+          <SidebarItem icon={<Icon.sync />} label="Sync groups" current={current === 'sync-groups'} onClick={() => navigate('/sync-groups')} />
+        )}
+        {/* v0.1.56: Schedules hidden. The page still exists at
+            /schedules for anyone who knows the URL, but it's not
+            surfaced in the sidebar until the scheduling feature
+            actually does something — currently the MOCK_SCHEDULES
+            list is always empty and the page is dead weight. */}
+        {false && can(user, 'schedules.view') && (
+          <SidebarItem icon={<Icon.schedule />} label="Schedules" current={current === 'schedules'} count={scheduleCount || undefined} onClick={() => navigate('/schedules')} />
+        )}
+      </SidebarGroup>
       {can(user, 'activity.view') && (
-        <SidebarItem icon={<Icon.activity />} label="Activity log" current={current === 'activity'} onClick={() => navigate('/activity')} />
+        <SidebarGroup label="Watch">
+          <SidebarItem icon={<Icon.activity />} label="Activity log" current={current === 'activity'} onClick={() => navigate('/activity')} />
+        </SidebarGroup>
       )}
     </nav>
 
