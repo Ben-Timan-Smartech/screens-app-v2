@@ -152,40 +152,57 @@
   --dur-slow: 420ms;
 }
 
-/* Dark — uses Ink as default and inverts toward Bone */
+/* Dark — "Control room" palette (v0.4 redesign, phase 1).
+   Monitor-cool warm-black with a subtle cyan bias so the ground reads as
+   an active display, not paper. Ink still runs from primary text at ink-0
+   down to the page ground at ink-10 — no component code changes; only
+   values flip. */
 [data-theme="dark"] {
-  --ink-0:  #F7F6F2;
-  --ink-1:  #EFEDE6;
-  --ink-2:  #E2DED3;
-  --ink-3:  #C9C4B6;
-  --ink-4:  #9A968A;
-  --ink-5:  #6E6B62;
-  --ink-6:  #4A4843;
-  --ink-7:  #2F2E2A;
-  --ink-8:  #252522;
-  --ink-9:  #1A1A19;
-  --ink-10: #141414;
+  --ink-0:  #EEF3F3;   /* primary text — cool Bone                  */
+  --ink-1:  #DDE4E4;   /* headings                                  */
+  --ink-2:  #BFCACA;   /* body                                      */
+  --ink-3:  #9AA6A6;   /* secondary body                            */
+  --ink-4:  #7E8B8B;   /* tertiary / meta                           */
+  --ink-5:  #5C6669;   /* muted                                     */
+  --ink-6:  #4B5559;   /* strong border                             */
+  --ink-7:  #2E363B;   /* divider                                   */
+  --ink-8:  #1F262B;   /* raised hover                              */
+  --ink-9:  #141A1F;   /* sunken surface                            */
+  --ink-10: #07090B;   /* page ground — monitor-cool warm-black     */
 
-  /* Bone tokens flip too — `var(--bone)` semantically means "page bg",
-     and the sidebar reads it directly. Without these the sidebar would
-     stay light while the rest of the app went dark. */
-  --bone:       #141414;
-  --bone-soft:  #1A1A19;
-  --bone-line:  rgba(247, 246, 242, 0.08);
-  --paper:      #1F1F1F;
+  /* Bone semantics: "page bg" flips to the cool ground. */
+  --bone:       #07090B;
+  --bone-soft:  #0E1216;
+  --bone-line:  rgba(180, 220, 220, 0.08);
+  --paper:      #141A1F;
 
-  --accent:       #F7F6F2;
-  --accent-hover: var(--ink-8);
-  --on-accent:    #141414;
+  /* Primary accent — phosphor mint. Buttons, active nav, focus states.
+     Reads as an oscilloscope trace / working monitor against the cool
+     ground; not the AI-default cyan/blue or acid-green. */
+  --accent:       #4EE7B4;
+  --accent-hover: #62EFC0;
+  --on-accent:    #07090B;
+  --accent-glow:  rgba(78, 231, 180, 0.35);
 
-  --border:        1px solid rgba(247, 246, 242, 0.08);
-  --border-strong: 1px solid rgba(247, 246, 242, 0.16);
-  --border-faint:  1px solid rgba(247, 246, 242, 0.05);
+  /* Working-colour overrides for dark.
+     - amber/signal collapse to a single broadcast-amber (on-air, warnings)
+     - electric warms slightly so it holds contrast on cool ground
+     - clay shifts to coral so error-red doesn't muddy on the cool ground */
+  --accent-amber:    #FFB84D;
+  --accent-signal:   #FFB84D;
+  --accent-electric: #7AC0FF;
+  --accent-clay:     #FF7A5C;
+  --accent-mint:     #4EE7B4;
+  --signal-glow:     rgba(255, 184, 77, 0.4);
 
-  --ok:  #88C28F; --ok-bg:  rgba(61, 140, 75, 0.18);
-  --warn: #E8A33D; --warn-bg: rgba(232, 163, 61, 0.16);
-  --err: #E28770; --err-bg:  rgba(200, 103, 74, 0.2);
-  --info: #8FA6F5; --info-bg: rgba(45, 91, 255, 0.18);
+  --border:        1px solid rgba(180, 220, 220, 0.07);
+  --border-strong: 1px solid rgba(180, 220, 220, 0.14);
+  --border-faint:  1px solid rgba(180, 220, 220, 0.04);
+
+  --ok:   #6BE0A8; --ok-bg:  rgba(107, 224, 168, 0.14); --ok-dot:  #6BE0A8;
+  --warn: #FFB84D; --warn-bg: rgba(255, 184, 77, 0.14); --warn-dot: #FFB84D;
+  --err:  #FF7A5C; --err-bg:  rgba(255, 122, 92, 0.14); --err-dot:  #FF7A5C;
+  --info: #7AC0FF; --info-bg: rgba(122, 192, 255, 0.14);
 }
 
 /* Base inside artboards */
