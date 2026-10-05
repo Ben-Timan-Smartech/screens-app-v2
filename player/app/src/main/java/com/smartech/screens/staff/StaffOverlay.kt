@@ -195,6 +195,7 @@ fun StaffOverlay(
                             PickerVideo(
                                 item = VideoItem(
                                     id = rv.id, title = rv.title,
+                                    type = rv.type,   // v0.2.14: carry image/video so a tablet-side push plays as the right kind
                                     brand = rv.brand, product = rv.product,
                                     url = rv.mediaUrl ?: "",
                                     durationSec = rv.durationSec?.toInt(),

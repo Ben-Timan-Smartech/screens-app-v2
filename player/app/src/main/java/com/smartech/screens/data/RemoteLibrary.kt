@@ -49,6 +49,8 @@ class RemoteLibrary(
     data class RemoteVideo(
         val id: String,
         val title: String,
+        // v0.2.14: "video" (default) or "image" — lets the picker badge stills.
+        val type: String = "video",
         val brand: String? = null,
         val product: String? = null,
         // mediaUrl is null for tm:rw "pending" videos (assigned in the

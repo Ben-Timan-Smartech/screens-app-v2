@@ -366,6 +366,7 @@ const useLibraryCount = () => {
 const pushToScreens = async (videos, { deviceIds = [], mode = 'replace' } = {}) => {
   const items = videos.map((v) => ({
     id: v.id,
+    type: v.type || 'video',        // v0.2.14: "image" stills play for durationSec
     title: v.title,
     brand: v.brand,
     product: v.product,
@@ -390,6 +391,7 @@ const pushToScreens = async (videos, { deviceIds = [], mode = 'replace' } = {}) 
 const setScreenPlaylist = async (deviceId, items, mode = 'replace') => {
   const payload = items.map((v) => ({
     id: v.id,
+    type: v.type || 'video',        // v0.2.14: "image" stills play for durationSec
     title: v.title,
     brand: v.brand,
     product: v.product,
