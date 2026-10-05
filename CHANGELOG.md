@@ -18,6 +18,14 @@ Rules:
 
 ---
 
+## v0.2.15
+
+- **Mass actions on screens.** In a store's screen list you can now **Select all**
+  (or tick several), then **Update**, **Refresh** or **Reboot** every selected
+  screen in one go — no more clicking into each screen one at a time. Update and
+  Reboot ask for a quick confirm first ("Update 12 screens?"). Handy for rolling
+  a new app build out to a whole store at once. Server + CMS only — no new APK.
+
 ## v0.2.14
 
 - **Brand images now sync and play on screens, just like videos.** Drop a still

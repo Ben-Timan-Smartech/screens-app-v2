@@ -145,6 +145,32 @@ const ScreensStoreView = ({ storeId }) => {
   const store = { ...baseStore, ...counts };
   const [selected, setSelected] = React.useState(new Set());
   const toggle = (id) => { const n = new Set(selected); n.has(id) ? n.delete(id) : n.add(id); setSelected(n); };
+  // v0.2.15: bulk screen commands from the multi-select bar (mass update /
+  // refresh / reboot). Gated on screens.command — a viewer can still select +
+  // "Push content" but not fan out commands. `pendingCmd` holds a command
+  // awaiting an inline confirm (Update / Reboot are disruptive); Refresh fires
+  // straight away.
+  const auth = useAuth();
+  const canCommand = can(auth.user || {}, 'screens.command');
+  const [bulkBusy, setBulkBusy] = React.useState(false);
+  const [pendingCmd, setPendingCmd] = React.useState(null);
+  const BULK_LABELS = { update: 'Update', refresh: 'Refresh', reboot: 'Reboot' };
+  const runBulk = async (command) => {
+    const ids = Array.from(selected);
+    if (ids.length === 0) return;
+    setBulkBusy(true);
+    try {
+      const res = await sendBulkScreenCommand(ids, command);
+      const n = (res && typeof res.screensTargeted === 'number') ? res.screensTargeted : ids.length;
+      showToast(`${BULK_LABELS[command] || command} queued for ${n} screen${n === 1 ? '' : 's'}`, 'ok');
+      setSelected(new Set());
+    } catch (e) {
+      showToast(`${BULK_LABELS[command] || command} failed: ${e.message}`, 'err');
+    } finally {
+      setBulkBusy(false);
+      setPendingCmd(null);
+    }
+  };
   // v0.1.56: list view is now the default. Persist the choice across
   // navigations so an operator who prefers the card grid doesn't get
   // bounced back to list every visit.
@@ -276,6 +302,19 @@ const ScreensStoreView = ({ storeId }) => {
             onClick={() => setView('list')}
             title="List view"
           />
+          {/* v0.2.15: select-all, so an operator can grab every screen shown
+              (e.g. a whole store filtered to a concept) and act on them in one
+              go via the bulk bar. */}
+          {visibleScreens.length > 0 && (() => {
+            const allSelected = visibleScreens.every(s => selected.has(s.id));
+            return (
+              <Button
+                variant="ghost" size="sm"
+                onClick={() => setSelected(allSelected ? new Set() : new Set(visibleScreens.map(s => s.id)))}
+                title={allSelected ? 'Clear selection' : 'Select every screen shown'}
+              >{allSelected ? 'Clear' : 'Select all'}</Button>
+            );
+          })()}
         </div>
 
         {screens.length === 0 ? (
@@ -339,11 +378,46 @@ const ScreensStoreView = ({ storeId }) => {
             boxShadow: '0 8px 24px rgba(9,9,11,0.18)',
             zIndex: 5,
           }}>
-            <span style={{ fontSize: 12, fontWeight: 500 }} className="tnum">{selected.size} selected</span>
-            <button onClick={() => setSelected(new Set())} style={{ fontSize: 12, color: 'rgba(250,250,250,0.7)', padding: '4px 6px', cursor: 'pointer' }}>Clear</button>
-            {/* Content is chosen in the library, then pushed to screens via the
-                PushPicker. Jump there so the operator can tick videos and push. */}
-            <button onClick={() => navigate('/library')} style={{ background: 'var(--ink-10)', color: 'var(--ink-0)', padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer' }}>Push content →</button>
+            {(() => {
+              const barBtn = { background: 'var(--ink-10)', color: 'var(--ink-0)', padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer' };
+              const linkBtn = { fontSize: 12, color: 'rgba(250,250,250,0.7)', padding: '4px 6px', cursor: 'pointer' };
+              const n = selected.size;
+              // Awaiting confirm for a disruptive command (Update / Reboot).
+              if (pendingCmd) {
+                return (
+                  <>
+                    <span style={{ fontSize: 12, fontWeight: 500 }}>
+                      {BULK_LABELS[pendingCmd]} {n} screen{n === 1 ? '' : 's'}?
+                    </span>
+                    <button
+                      onClick={() => runBulk(pendingCmd)}
+                      disabled={bulkBusy}
+                      style={{ ...barBtn, fontWeight: 600, ...(pendingCmd === 'reboot' ? { background: 'var(--err)', color: '#fff' } : {}), cursor: bulkBusy ? 'wait' : 'pointer', opacity: bulkBusy ? 0.7 : 1 }}>
+                      {bulkBusy ? 'Working…' : 'Confirm'}
+                    </button>
+                    <button onClick={() => setPendingCmd(null)} disabled={bulkBusy} style={linkBtn}>Cancel</button>
+                  </>
+                );
+              }
+              return (
+                <>
+                  <span style={{ fontSize: 12, fontWeight: 500 }} className="tnum">{n} selected</span>
+                  <button onClick={() => setSelected(new Set())} style={linkBtn}>Clear</button>
+                  {/* v0.2.15: fan a command out to every selected screen. Gated
+                      on screens.command so a viewer sees only "Push content". */}
+                  {canCommand && (
+                    <>
+                      <button onClick={() => setPendingCmd('update')} title="Update the player app to the latest build on the selected screens" style={barBtn}>Update</button>
+                      <button onClick={() => runBulk('refresh')} disabled={bulkBusy} title="Force the selected screens to re-fetch their content now" style={{ ...barBtn, cursor: bulkBusy ? 'wait' : 'pointer', opacity: bulkBusy ? 0.7 : 1 }}>Refresh</button>
+                      <button onClick={() => setPendingCmd('reboot')} title="Restart the player on the selected screens" style={barBtn}>Reboot</button>
+                    </>
+                  )}
+                  {/* Content is chosen in the library, then pushed to screens via
+                      the PushPicker. Jump there so the operator can tick videos. */}
+                  <button onClick={() => navigate('/library')} style={barBtn}>Push content →</button>
+                </>
+              );
+            })()}
           </div>
         )}
       </div>

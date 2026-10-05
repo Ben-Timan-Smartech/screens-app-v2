@@ -422,6 +422,19 @@ const sendScreenCommand = async (deviceId, command) => {
   return res.json();
 };
 
+// sendBulkScreenCommand — POST /api/screens/command. Queues the same command
+// to many screens in one call (Screens list multi-select → Update / Refresh /
+// Reboot). Returns { ok, command, screensTargeted }.
+const sendBulkScreenCommand = async (deviceIds, command) => {
+  const res = await fetch('/api/screens/command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceIds, command }),
+  });
+  if (!res.ok) throw new Error(`bulk command failed: ${res.status}`);
+  return res.json();
+};
+
 // setMixSplash — POST /api/screens/<id>/mix-splash to toggle the bundled
 // splash being mixed into the playlist.
 const setMixSplash = async (deviceId, mixSplash) => {
@@ -1651,7 +1664,7 @@ Object.assign(window, {
   Sidebar, SidebarItem, PageHeader, AppShell, Card, StatCard,
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
-  showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
+  showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, sendBulkScreenCommand, setMixSplash,
   setScreenProductCard, setScreenRotation,
   setScreenExperience, setScreenTapNext, setScreenProgressBar,
   useExperiences, uploadExperience, deleteExperience,

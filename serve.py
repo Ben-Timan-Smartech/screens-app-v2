@@ -4742,6 +4742,63 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"ok": True, "cityBrand": dict(_city_brand)})
             return
 
+        # ── Bulk screen command (v0.2.15) ────────────────────────
+        # POST /api/screens/command  { deviceIds: [...], command: "update"|"refresh"|"reboot"|"restartPlayer"|"clearCache"|"sendLogs" }
+        # Queues the same command to many screens in one call — backs the
+        # Screens list's multi-select "Update / Refresh / Reboot" bar so an
+        # operator can mass-update (e.g. every screen in a store/city) without
+        # clicking into each one. CMS-only (screens.command); `unregister` is
+        # deliberately NOT bulk-able (it deletes the screen — too destructive
+        # to fan out). One segment after /screens, so it doesn't collide with
+        # the /api/screens/<id>/<action> regex below.
+        if path == "/api/screens/command":
+            if self._require_perm("screens.command") is None:
+                return
+            BULK_COMMANDS = ("reboot", "restartPlayer", "clearCache", "update", "refresh", "sendLogs")
+            cmd = body.get("command")
+            device_ids = body.get("deviceIds")
+            if cmd not in BULK_COMMANDS:
+                self.send_error(400, "Unknown or non-bulk command"); return
+            if not isinstance(device_ids, list) or not device_ids:
+                self._send_json({"error": "no_screens"}, status=400); return
+            targeted: list[str] = []
+            with _STATE_LOCK:
+                for did in device_ids:
+                    did = str(did)
+                    if did not in _screens:
+                        continue   # skip unknown/stale ids rather than failing the batch
+                    state = _ensure_screen_state(did)
+                    state["pendingCommands"].append({"command": cmd, "at": time.time()})
+                    targeted.append(did)
+                if targeted:
+                    # Defer the disk write to the background flusher (v0.2.12) —
+                    # never hold _STATE_LOCK across a gcsfuse write on a request.
+                    _save_per_screen_soon()
+            label = {
+                "reboot":        "Rebooted",
+                "restartPlayer": "Restarted player on",
+                "clearCache":    "Cleared cache on",
+                "update":        "Triggered update on",
+                "refresh":       "Forced refresh on",
+                "sendLogs":      "Requested logs from",
+            }[cmd]
+            n = len(targeted)
+            _log_activity(
+                kind="command",
+                text=f"{label} {n} screen{'' if n == 1 else 's'} (bulk)",
+                icon={
+                    "reboot":        "schedule",
+                    "restartPlayer": "play",
+                    "clearCache":    "trash",
+                    "update":        "download",
+                    "refresh":       "refresh",
+                    "sendLogs":      "list",
+                }[cmd],
+            )
+            print(f"[command] bulk {cmd} -> {n} screen(s)", file=sys.stderr)
+            self._send_json({"ok": True, "command": cmd, "screensTargeted": n})
+            return
+
         # ── Per-screen controls ──────────────────────────────────
         # POST /api/screens/<deviceId>/command         { command: "reboot"|"clearCache"|"unregister"|"update"|"refresh" }
         # POST /api/screens/<deviceId>/playlist        { items: [...], mode: "replace"|"append" }
