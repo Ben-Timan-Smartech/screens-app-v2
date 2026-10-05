@@ -18,6 +18,18 @@ Rules:
 
 ---
 
+## v0.2.14
+
+- **Brand images now sync and play on screens, just like videos.** Drop a still
+  (JPG, PNG or WEBP) into a brand's folder in Brand Content and it shows up in
+  the Content Library alongside the videos, ready to add to any screen. On a
+  screen, an image shows full-screen for 10 seconds and then the playlist moves
+  on to the next item — it loops in with your videos, works in sync groups, and
+  shows the progress bar, all the same way. The library thumbnail is the image
+  itself. (Animated GIFs aren't supported — use a short MP4 for motion.)
+- Needs the new APK for screens to *play* images; the Content Library picks them
+  up as soon as the CMS updates.
+
 ## v0.2.13
 
 - **Offline: the staff brand & video picker now shows your real catalogue, not

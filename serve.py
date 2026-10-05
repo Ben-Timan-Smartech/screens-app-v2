@@ -3633,6 +3633,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         lib = _library_lookup_by_id(it.get("id") or "")
                         merged = dict(it)
                         merged["defaultUnmute"] = bool((lib or {}).get("defaultUnmute"))
+                        # v0.2.14: carry the content type + dwell from the
+                        # library so the tablet can tell a still from a video
+                        # even when the item was pushed before image support (or
+                        # by a client that didn't send them). A still needs a
+                        # positive durationSec for the player's setImageDurationMs
+                        # and the group-sync loop math.
+                        if lib:
+                            if lib.get("type"):
+                                merged["type"] = lib["type"]
+                            if not merged.get("durationSec") and lib.get("durationSec"):
+                                merged["durationSec"] = lib["durationSec"]
                         # v0.1.86: only screens with the product-card toggle on
                         # get the description / per-currency prices / packshot +
                         # brand logo for the on-screen card. Keeps the payload

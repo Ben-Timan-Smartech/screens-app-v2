@@ -65,6 +65,20 @@ const LIST_GRID = 'minmax(160px, 1.6fr) 76px 72px 104px 120px minmax(120px, 1fr)
 // `fit="contain"` + white backing reads like a proper on-white packshot.
 const ProductThumb = ({ v, fit = 'contain', ...thumbProps }) => {
   const [failed, setFailed] = React.useState(false);
+  // v0.2.14: a still-image content item IS its own thumbnail — render the
+  // image (served via the same /media route the player uses). `cover` fills
+  // the 16/9 cell; on a load error fall back to the generated thumbnail.
+  if (v && v.type === 'image' && v.mediaUrl && !failed) {
+    return (
+      <img
+        src={v.mediaUrl}
+        alt={v.title || 'image'}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#0a0a0a', display: 'block' }}
+      />
+    );
+  }
   if (v && v.packshotUrl && !failed) {
     return (
       <img
@@ -646,7 +660,9 @@ const PreviewModal = ({ video, onClose }) => {
           const isUpload = video.mediaUrl?.startsWith('/uploaded/');
           return (
             <div style={{ padding: '20px 20px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-              {/* Big thumbnail of the brand mark instead of a player. */}
+              {/* Hero. For a still we can show the real image (small + reliable,
+                  unlike the flaky video streaming we dropped in v0.1.56); for a
+                  video, the brand mark stands in for the dropped player. */}
               <div style={{
                 width: '100%', aspectRatio: '16 / 9',
                 background: 'var(--ink-9)', borderRadius: 8,
@@ -654,7 +670,10 @@ const PreviewModal = ({ video, onClose }) => {
                 color: 'var(--ink-3)', fontSize: 13, gap: 10,
                 position: 'relative', overflow: 'hidden',
               }}>
-                <Thumbnail title={video.title} brand={video.brand} aspect="16/9" size="lg" />
+                {video.type === 'image' && video.mediaUrl
+                  ? <img src={video.mediaUrl} alt={video.title}
+                         style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+                  : <Thumbnail title={video.title} brand={video.brand} aspect="16/9" size="lg" />}
               </div>
 
               {/* Two-column property sheet. */}
@@ -702,6 +721,8 @@ const PreviewModal = ({ video, onClose }) => {
             </div>
           );
         })()}
+        {/* Unmute toggle is video-only — a still has no audio. */}
+        {video.type !== 'image' && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 12,
           padding: '12px 16px', borderTop: 'var(--border)',
@@ -732,6 +753,7 @@ const PreviewModal = ({ video, onClose }) => {
             }} />
           </button>
         </div>
+        )}
       </div>
     </div>
   );

@@ -33,6 +33,14 @@ from typing import Iterator, Optional
 # this to route requests in serve.py without keeping mode state per-route.
 DRIVE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 
+# v0.2.14: media file extensions synced from the brand folders — videos AND
+# stills. Kept in step by hand with scan-videos.py's VIDEO_EXTS / IMAGE_EXTS
+# (drive_client must NOT import scan-videos, which imports drive_client). GIF
+# is excluded: Media3's image decoder can't render it.
+_VIDEO_EXTS = (".mp4", ".mov")
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+_MEDIA_EXTS = _VIDEO_EXTS + _IMAGE_EXTS
+
 
 def is_configured() -> bool:
     """True if the env says we should talk to Drive at all."""
@@ -133,17 +141,19 @@ def list_subfolders(parent_id: str) -> list[dict]:
 
 
 def list_videos_recursive(folder_id: str) -> list[dict]:
-    """All MP4/MOV files under `folder_id` (recursive).
+    """All playable media (MP4/MOV video + JPG/PNG/WEBP stills) under
+    `folder_id`, recursive.
 
-    Returns list of {id, name, size, parents}. Walks the folder tree
-    breadth-first so we don't blow the stack on huge libraries.
+    Returns list of {id, name, size, parents, ...media metadata}. Walks the
+    folder tree breadth-first so we don't blow the stack on huge libraries.
+    (Name kept for back-compat; it now returns stills too — see _MEDIA_EXTS.)
     """
     svc = _get_service()
     out: list[dict] = []
     queue: list[str] = [folder_id]
     while queue:
         current = queue.pop(0)
-        # Pull both video files and any nested folders in one pass.
+        # Pull video + image files and any nested folders in one pass.
         page_token: Optional[str] = None
         while True:
             resp = svc.files().list(
@@ -151,15 +161,17 @@ def list_videos_recursive(folder_id: str) -> list[dict]:
                     f"'{current}' in parents and "
                     f"trashed=false and "
                     f"(mimeType='application/vnd.google-apps.folder' or "
-                    f"mimeType contains 'video/')"
+                    f"mimeType contains 'video/' or "
+                    f"mimeType contains 'image/')"
                 ),
                 fields=(
                     "nextPageToken, files(id,name,size,mimeType,parents,"
-                    # videoMediaMetadata rides along in the SAME list response —
-                    # no extra Drive round-trips / egress. Drive populates it only
-                    # after it finishes processing an uploaded video, so callers
-                    # must treat width/height/durationMillis as possibly-absent.
-                    "videoMediaMetadata(width,height,durationMillis))"
+                    # videoMediaMetadata / imageMediaMetadata ride along in the
+                    # SAME list response — no extra Drive round-trips / egress.
+                    # Drive populates them only after it finishes processing an
+                    # upload, so callers must treat dimensions as possibly-absent.
+                    "videoMediaMetadata(width,height,durationMillis),"
+                    "imageMediaMetadata(width,height))"
                 ),
                 pageSize=500,
                 pageToken=page_token,
@@ -175,10 +187,10 @@ def list_videos_recursive(folder_id: str) -> list[dict]:
                         continue
                     queue.append(f["id"])
                 else:
-                    # Only keep mp4 / mov by extension (Drive sometimes
-                    # tags weird mimetypes for mov files).
+                    # Keep only known media extensions (Drive sometimes
+                    # tags weird mimetypes for .mov / .webp files).
                     n = f.get("name", "").lower()
-                    if n.endswith(".mp4") or n.endswith(".mov"):
+                    if n.endswith(_MEDIA_EXTS):
                         out.append(f)
             page_token = resp.get("nextPageToken")
             if not page_token:
@@ -261,7 +273,8 @@ def list_drive_inventory(drive_id: str) -> list[dict]:
             q=(
                 "trashed=false and "
                 "(mimeType='application/vnd.google-apps.folder' or "
-                "mimeType contains 'video/')"
+                "mimeType contains 'video/' or "
+                "mimeType contains 'image/')"
             ),
             fields="nextPageToken, files(id,name,mimeType,parents,size,modifiedTime)",
             pageSize=1000,

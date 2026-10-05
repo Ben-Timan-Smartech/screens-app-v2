@@ -594,6 +594,8 @@ class PlayerRepository(
     private data class LiveItem(
         val id: String,
         val title: String,
+        /** v0.2.14: "video" (default) or "image" — see [VideoItem.type]. */
+        val type: String = "video",
         val brand: String? = null,
         val product: String? = null,
         val url: String,
@@ -1164,6 +1166,15 @@ class PlayerRepository(
         val safeRaw = mutableListOf<LiveItem>()
         val skipped = mutableListOf<Pair<LiveItem, Double>>()
         for (li in rawItems) {
+            // v0.2.14: stills aren't decoded like H.264, so the Mbps ceiling
+            // (sizeMb × 8 / durationSec) is meaningless for them — a 20 MB
+            // image on a 10 s dwell would read as "16 Mbps" and get wrongly
+            // skipped. Images always pass the bitrate gate; an oversized one
+            // is flagged "hires" server-side for the CMS warning instead.
+            if (li.type == "image") {
+                safeRaw += li
+                continue
+            }
             val sizeMb = li.sizeMb
             val durSec = li.durationSec?.toDouble()
             if (sizeMb == null || durSec == null || durSec <= 0.0) {
@@ -2332,7 +2343,7 @@ class PlayerRepository(
         else if (url.startsWith("/")) base + url
         else "$base/$url"
         return VideoItem(
-            id = id, title = title, brand = brand, product = product,
+            id = id, title = title, type = type, brand = brand, product = product,
             url = absoluteUrl, durationSec = durationSec,
             defaultUnmute = defaultUnmute,
             description = description,

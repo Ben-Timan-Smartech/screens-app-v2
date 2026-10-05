@@ -38,6 +38,12 @@ data class RegisterResponse(
 data class VideoItem(
     val id: String,
     val title: String,
+    /** v0.2.14: "video" (default) or "image". An image is shown full-screen
+     *  for [durationSec] via ExoPlayer's setImageDurationMs, then the queue
+     *  advances — so the loop / group-sync / progress-bar logic is unchanged.
+     *  Defaults to "video" so playlists pushed before image support behave
+     *  exactly as before. */
+    val type: String = "video",
     @SerialName("durationSec") val durationSec: Int? = null,
     /** Pre-signed or public R2 URL for the rendition matching this screen's tier. */
     val url: String,

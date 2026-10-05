@@ -288,10 +288,21 @@ class PlayerController(context: Context) {
             items += MediaItem.Builder().setMediaId(Source.SPLASH).setUri(splashUri).build()
         }
         items += playlist.map { lv ->
-            MediaItem.Builder()
+            val builder = MediaItem.Builder()
                 .setMediaId(lv.item.id)
                 .setUri(Uri.fromFile(lv.file))
-                .build()
+            // v0.2.14: a still has no intrinsic duration, so ExoPlayer needs
+            // setImageDurationMs to know how long to show it before advancing.
+            // Setting it is also what routes the item through Media3's image
+            // pipeline (decode → PlayerView) instead of the media extractors.
+            // We use the same dwell the server put in durationSec, so the
+            // group-sync loop math (which reads durationSec) lines up across an
+            // image exactly as it does for a video.
+            if (lv.item.type == "image") {
+                val dwellMs = (lv.item.durationSec ?: 10).coerceAtLeast(1).toLong() * 1000L
+                builder.setImageDurationMs(dwellMs)
+            }
+            builder.build()
         }
         // Refresh the per-item defaultUnmute map for volume decisions.
         defaultUnmuteById.clear()
