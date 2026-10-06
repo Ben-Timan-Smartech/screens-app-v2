@@ -18,6 +18,14 @@ Rules:
 
 ---
 
+## v0.2.16
+
+- **Fix: brand images now serve with the right file type.** The media server was
+  labelling every Drive-served file as a video, so a still (e.g. a brand logo)
+  wouldn't preview correctly in a browser and could confuse other tools. Images
+  now serve as images. Screens were never affected (the player reads the actual
+  file), so this is a behind-the-scenes correctness fix — server only, no APK.
+
 ## v0.2.14
 
 - **Brand images now sync and play on screens, just like videos.** Drop a still

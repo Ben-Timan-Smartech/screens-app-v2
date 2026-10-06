@@ -2167,6 +2167,32 @@ def _library_lookup_by_drive_id(drive_file_id: str) -> dict | None:
     return idx.get(drive_file_id)
 
 
+# v0.2.16: Content-Type by media extension. The Drive media proxy used to
+# hard-code video/mp4 for every library-indexed file ("all our brand content
+# is video") — but still images now flow through the same /media/<id> route,
+# so a .jpg logo was being served as video/mp4. That broke direct browser
+# preview and is just wrong; the tablet is unaffected (its image decoder
+# sniffs the actual bytes). Map by extension instead, defaulting to mp4 so
+# an unknown/extensionless file behaves exactly as before.
+_MEDIA_CONTENT_TYPES = {
+    ".mp4":  "video/mp4",
+    ".mov":  "video/quicktime",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png":  "image/png",
+    ".webp": "image/webp",
+}
+
+
+def _media_content_type(filename: str | None, fallback: str = "video/mp4") -> str:
+    """Best-effort Content-Type from a filename's extension."""
+    if filename:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in _MEDIA_CONTENT_TYPES:
+            return _MEDIA_CONTENT_TYPES[ext]
+    return fallback
+
+
 def _library_lookup_by_id(video_id: str) -> dict | None:
     """Return the cached library entry for the synthetic video ID
     (e.g. "sonos-1"). Used to merge per-video flags (defaultUnmute,
@@ -5986,9 +6012,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 size = int((cached.get("sizeMb") or 0) * 1024 * 1024)
             except Exception:
                 size = 0
-            # The library doesn't store mimetype; fall back to mp4
-            # which all our brand content uses. Real Range handling
-            # comes from the upstream response anyway.
+            # v0.2.16: the library doesn't store a mimetype, but it does
+            # store the filename — derive the Content-Type from its
+            # extension so stills serve as image/* instead of video/mp4.
+            # Real Range handling still comes from the upstream response.
+            ctype = _media_content_type(cached.get("filename"))
         else:
             # Not in library — fall back to Drive for metadata. This
             # still pays the rate-limit tax but only for files we
@@ -5996,7 +6024,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 meta = drive_client.get_metadata(file_id)
                 size = int(meta.get("size") or 0)
-                ctype = meta.get("mimeType") or "video/mp4"
+                ctype = meta.get("mimeType") or _media_content_type(meta.get("name"))
             except Exception as e:
                 print(f"[/media] metadata lookup failed for {file_id}: {e}", file=sys.stderr)
                 self.send_error(404, f"Drive file not found: {e}")
