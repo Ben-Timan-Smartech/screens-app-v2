@@ -96,7 +96,16 @@ def _get_service():
             )
         creds = service_account.Credentials.from_service_account_file(
             creds_path,
-            scopes=["https://www.googleapis.com/auth/drive.readonly"],
+            # drive.readonly keeps the existing read path working against
+            # folders the SA was shared on as Viewer. drive.file is additive
+            # — it only grants write access to files the app itself creates
+            # (encoded output lands under this scope). The folder has to be
+            # re-shared as Editor for writes to actually succeed; scopes
+            # authorise the operation, sharing authorises the target.
+            scopes=[
+                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/drive.file",
+            ],
         )
         # cache_discovery=False suppresses a noisy warning about the
         # built-in disk cache being unwritable in container environments.
@@ -427,7 +436,16 @@ def _streaming_token() -> str:
                 )
             _streaming_creds = service_account.Credentials.from_service_account_file(
                 creds_path,
-                scopes=["https://www.googleapis.com/auth/drive.readonly"],
+                # drive.readonly keeps the existing read path working against
+            # folders the SA was shared on as Viewer. drive.file is additive
+            # — it only grants write access to files the app itself creates
+            # (encoded output lands under this scope). The folder has to be
+            # re-shared as Editor for writes to actually succeed; scopes
+            # authorise the operation, sharing authorises the target.
+            scopes=[
+                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/drive.file",
+            ],
             )
         if not _streaming_creds.valid:
             _streaming_creds.refresh(ga_requests.Request())
