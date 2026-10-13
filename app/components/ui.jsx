@@ -1417,6 +1417,9 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
       {can(user, 'screens.view') && (
         <SidebarItem icon={<Icon.sync />} label="Sync groups" current={current === 'sync-groups'} onClick={() => navigate('/sync-groups')} />
       )}
+      {can(user, 'campaigns.view') && (
+        <SidebarItem icon={<Icon.schedule />} label="Campaigns" current={current === 'campaigns'} onClick={() => navigate('/campaigns')} />
+      )}
       {/* v0.1.56: Schedules hidden. The page still exists at
           /schedules for anyone who knows the URL, but it's not
           surfaced in the sidebar until the scheduling feature

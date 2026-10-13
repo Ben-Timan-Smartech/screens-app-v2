@@ -2179,6 +2179,37 @@ def _library_lookup_by_id(video_id: str) -> dict | None:
     return None
 
 
+def _library_videos_for_campaign(campaign_id: str) -> list[dict]:
+    """All library.json entries where contentType=='campaign' AND
+    campaign==campaign_id. The resolver uses this to find the clips
+    an active campaign should inject into targeted screens."""
+    _load_library()
+    data = _LIBRARY_CACHE.get("data") or {}
+    out = []
+    for v in (data.get("videos") or []):
+        if v.get("contentType") == "campaign" and v.get("campaign") == campaign_id:
+            out.append(v)
+    return out
+
+
+def _library_entry_to_playback_item(entry: dict) -> dict:
+    """Translate a library.json entry into the pushed-item shape the
+    tablet expects on /api/state. Mirrors the CMS pushToScreens() mapping
+    in ui.jsx so campaign-injected items are indistinguishable from
+    explicitly-pushed ones once they're in the player's queue."""
+    return {
+        "id":          entry.get("id"),
+        "title":       entry.get("title"),
+        "brand":       entry.get("brand"),
+        "product":     entry.get("product"),
+        "durationSec": entry.get("durationSec") or 15,
+        "url":         entry.get("mediaUrl"),
+        "sizeMb":      entry.get("sizeMb"),
+        "width":       entry.get("width"),
+        "height":      entry.get("height"),
+    }
+
+
 def _update_video_in_library(video_id: str, patch: dict) -> dict | None:
     """Mutate library.json in-place: find the video with matching id,
     apply patch (skipping None values), atomic-rewrite the file. Bumps
@@ -3654,6 +3685,49 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             if card:
                                 merged.update(card)
                         enriched_items.append(merged)
+                    # v0.2.14: campaign resolver. Append clips from every
+                    # campaign that is LIVE for this screen right now
+                    # (schedule window + daypart + locationScope matches
+                    # the screen's storeId) to the brand playlist.
+                    # Policy: campaigns append after the brand loop (one
+                    # full brand pass → every active campaign's clips →
+                    # repeat), per the design conversation. Deliberate:
+                    # keeps brand content front-and-centre, boosts
+                    # campaign exposure predictably, and makes the ratio
+                    # self-balancing (a 5-clip brand loop with 2 active
+                    # campaigns of 1 clip each ≈ 29% campaign).
+                    #
+                    # Revision bump: we XOR a stable per-campaign hash into
+                    # the stored revision so a tablet polling across a
+                    # window boundary sees a changed revision and
+                    # re-applies the merged list. XOR because the player's
+                    # `lastLiveRevision != revision` check treats revision
+                    # as a changed-signal, not a monotone counter — order
+                    # of add/remove doesn't matter.
+                    store_id_for_resolver = (location or {}).get("storeId")
+                    active_campaigns: list[dict] = []
+                    for camp in _campaigns:
+                        if _campaign_is_live_for_screen(camp, store_id_for_resolver):
+                            active_campaigns.append(camp)
+                    if active_campaigns:
+                        campaign_items: list[dict] = []
+                        for camp in active_campaigns:
+                            for lib_entry in _library_videos_for_campaign(camp["id"]):
+                                campaign_items.append(_library_entry_to_playback_item(lib_entry))
+                        enriched_items = enriched_items + campaign_items
+                        campaign_fingerprint = 0
+                        for camp in active_campaigns:
+                            # Python's hash() is salted per-process so we'd
+                            # randomise the fingerprint on every restart,
+                            # which would force every tablet to re-apply the
+                            # loop at deploy time. Use a stable hash.
+                            import hashlib
+                            h = hashlib.sha1(camp["id"].encode("utf-8")).digest()
+                            campaign_fingerprint ^= int.from_bytes(h[:4], "big")
+                        campaign_adjusted_revision = s["revision"] ^ campaign_fingerprint
+                    else:
+                        campaign_adjusted_revision = s["revision"]
+
                     # Sync-group playback hint. When the screen has a
                     # syncGroup set, compute "what every screen in this
                     # group should be playing right now" from the loop's
@@ -3663,10 +3737,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     sync_group_id = s.get("syncGroup")
                     playback = None
                     if sync_group_id:
+                        # v0.2.14: sync-group loop math runs over the
+                        # campaign-merged list, so grouped screens stay in
+                        # lockstep across campaign clips too. Revision
+                        # passed matches the one on the wire so the
+                        # tablet's loop-epoch comparison stays consistent.
                         playback = _compute_playback(
                             items=enriched_items,
                             group_id=sync_group_id,
-                            current_revision=s["revision"],
+                            current_revision=campaign_adjusted_revision,
                             now=time.time(),
                         )
                     # v0.1.35: list the group's other members so the
@@ -3725,7 +3804,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     poll_mode = s.get("pollMode", DEFAULT_POLL_MODE)
                     payload = {
                         "screenId":    screen_id,
-                        "revision":    s["revision"],
+                        # v0.2.14: revision reflects campaign overlay — the
+                        # tablet's `lastLiveRevision != revision` check
+                        # fires when a campaign activates or expires, so
+                        # the merged playlist is re-applied without a
+                        # manual push.
+                        "revision":    campaign_adjusted_revision,
                         "items":       enriched_items,
                         "pushedAt":    s["pushedAt"],
                         # mixSplash forced off in sync groups: the
