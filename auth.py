@@ -117,6 +117,14 @@ PERMISSIONS: dict[str, set[str]] = {
     "schedules.view":  {"owner", "super_admin", "admin", "manager", "user", "viewer"},
     "schedules.edit":  {"owner", "super_admin", "admin", "manager", "user"},
 
+    # v0.2.14: campaigns — a scheduled, location-targeted overlay on top of the
+    # per-screen brand playlist. Viewing is broad so the Content Library +
+    # Dashboard chips make sense to everyone; editing (create / dates /
+    # locations) is admin-scoped because an active campaign auto-injects clips
+    # into every targeted screen's loop, so the blast radius matches a push.
+    "campaigns.view":  {"owner", "super_admin", "admin", "manager", "user", "viewer"},
+    "campaigns.edit":  {"owner", "super_admin", "admin"},
+
     "settings.view":   {"owner", "super_admin", "admin"},
     "settings.edit":   {"owner", "super_admin"},
 
