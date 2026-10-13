@@ -400,6 +400,14 @@ EXPERIENCES_JSON = Path(os.environ.get(
     "SCREENS_EXPERIENCES_PATH",
     _state_path_default("experiences.json"),
 ))
+# v0.2.14: campaigns — scheduled, location-targeted overlays on the brand
+# loop. One entry per campaign (not per clip): the library.json entries
+# reference the campaign by id. Low write frequency (operator CRUD only) so
+# we persist inline inside _STATE_LOCK, same pattern as _experiences.
+CAMPAIGNS_JSON = Path(os.environ.get(
+    "SCREENS_CAMPAIGNS_PATH",
+    _state_path_default("campaigns.json"),
+))
 # v0.1.56: city → brand splash mapping. The dict is mutated by the
 # Settings → Splashes UI; pre-v0.1.56 it lived only in memory, so any
 # Cloud Run redeploy silently reset it to defaults. Now persisted
@@ -445,6 +453,15 @@ _custom_stores: dict[str, dict] = {}
 # in here — see _list_experiences). {id, name, brand, filename, sizeBytes,
 # uploadedAt, uploadedBy}
 _experiences: list[dict] = []
+# v0.2.14: list of campaign records. Shape:
+#   {id, name, startAt, endAt, daypart: {startMin, endMin}|null,
+#    locationScope: "all"|"stores", stores: [storeId...],
+#    brands: [brandId...] (optional, informational),
+#    createdBy, createdAt, updatedAt}
+# A library.json entry with contentType="campaign" carries `campaign: <id>`
+# pointing at an entry here. The playlist resolver reads this list to
+# decide what to inject into each screen's loop.
+_campaigns: list[dict] = []
 
 
 # ── State persistence ────────────────────────────────────────────────
@@ -680,6 +697,157 @@ def _save_city_brand() -> None:
 def _save_experiences() -> None:
     """Persist _experiences. Call inside _STATE_LOCK after any mutation."""
     _atomic_write_json(EXPERIENCES_JSON, _experiences)
+
+
+def _save_campaigns() -> None:
+    """Persist _campaigns. Call inside _STATE_LOCK after any mutation.
+
+    Operator CRUD only (create / edit / delete a campaign); not touched on
+    the hot path, so the inline write is safe (unlike _screens/_per_screen
+    which must defer via *_soon savers — see [_save_screens_soon])."""
+    _atomic_write_json(CAMPAIGNS_JSON, _campaigns)
+
+
+# ── Campaign helpers ──────────────────────────────────────────────────
+# `_now` is a seam for testing; `datetime.datetime.now(UTC)` in prod.
+def _now_utc() -> "datetime.datetime":
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _parse_iso_utc(value: str) -> "datetime.datetime | None":
+    """Parse an ISO-8601 datetime string into an aware UTC datetime; None
+    on anything we don't recognise. Accepts both `…Z` and `…+00:00`."""
+    import datetime
+    if not isinstance(value, str) or not value:
+        return None
+    s = value.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def _validate_campaign_payload(body: dict, *, require_name: bool = True) -> tuple[dict | None, str | None]:
+    """Shape-check a POST/PATCH body. Returns (clean_patch, None) on
+    success or (None, error_message) on anything invalid. `require_name`
+    is False on PATCH so partial updates are allowed."""
+    out: dict = {}
+
+    name = (body.get("name") or "").strip() if isinstance(body.get("name"), str) else ""
+    if require_name and not name:
+        return None, "Missing 'name'"
+    if name:
+        if len(name) > 120:
+            return None, "name too long (max 120 chars)"
+        out["name"] = name
+
+    if "startAt" in body or "endAt" in body:
+        start = _parse_iso_utc(body.get("startAt", ""))
+        end   = _parse_iso_utc(body.get("endAt",   ""))
+        if "startAt" in body and start is None:
+            return None, "Invalid startAt (ISO-8601 UTC expected)"
+        if "endAt" in body and end is None:
+            return None, "Invalid endAt (ISO-8601 UTC expected)"
+        if start and end and end <= start:
+            return None, "endAt must be after startAt"
+        if start: out["startAt"] = start.isoformat()
+        if end:   out["endAt"]   = end.isoformat()
+
+    if "daypart" in body:
+        dp = body.get("daypart")
+        if dp is None:
+            out["daypart"] = None
+        elif isinstance(dp, dict):
+            try:
+                sm = int(dp.get("startMin"))
+                em = int(dp.get("endMin"))
+            except (TypeError, ValueError):
+                return None, "daypart.startMin / endMin must be integers 0–1440"
+            if not (0 <= sm < em <= 1440):
+                return None, "daypart requires 0 ≤ startMin < endMin ≤ 1440"
+            out["daypart"] = {"startMin": sm, "endMin": em}
+        else:
+            return None, "daypart must be null or {startMin, endMin}"
+
+    if "locationScope" in body:
+        scope = body.get("locationScope")
+        if scope not in ("all", "stores"):
+            return None, "locationScope must be 'all' or 'stores'"
+        out["locationScope"] = scope
+
+    if "stores" in body:
+        stores = body.get("stores") or []
+        if not isinstance(stores, list) or not all(isinstance(s, str) and s for s in stores):
+            return None, "stores must be a list of storeId strings"
+        out["stores"] = list(dict.fromkeys(stores))  # dedupe, preserve order
+
+    if "brands" in body:
+        brands = body.get("brands") or []
+        if not isinstance(brands, list) or not all(isinstance(b, str) and b for b in brands):
+            return None, "brands must be a list of brandId strings"
+        out["brands"] = list(dict.fromkeys(brands))
+
+    # A campaign scoped to specific stores must list at least one.
+    final_scope = out.get("locationScope")
+    final_stores = out.get("stores")
+    if final_scope == "stores" and final_stores is not None and len(final_stores) == 0:
+        return None, "locationScope='stores' needs at least one store"
+
+    return out, None
+
+
+def _campaign_schedule_active(camp: dict, now: "datetime.datetime | None" = None) -> bool:
+    """Time-only check: is `now` inside the campaign's [startAt, endAt]
+    window AND inside its daypart (if any)? Ignores location — used
+    both by the CMS list view and by the per-screen resolver."""
+    now = now or _now_utc()
+    start = _parse_iso_utc(camp.get("startAt", ""))
+    end   = _parse_iso_utc(camp.get("endAt", ""))
+    if not start or not end:
+        return False
+    if not (start <= now <= end):
+        return False
+    dp = camp.get("daypart")
+    if dp:
+        try:
+            cur_min = now.hour * 60 + now.minute
+            if not (int(dp.get("startMin", 0)) <= cur_min < int(dp.get("endMin", 1440))):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _campaign_targets_store(camp: dict, store_id: str | None) -> bool:
+    """Location-only check: does this campaign's scope cover the given
+    storeId? scope='all' matches any (including None); scope='stores'
+    requires the id to be in the stores list."""
+    scope = camp.get("locationScope") or "all"
+    if scope == "stores":
+        return bool(store_id) and store_id in (camp.get("stores") or [])
+    return True  # scope == "all"
+
+
+def _campaign_is_live_for_screen(camp: dict, store_id: str | None, now: "datetime.datetime | None" = None) -> bool:
+    """True if the campaign should be injected into THIS screen's loop
+    right now — the AND of schedule + location. The PR 2 playlist
+    resolver calls this per-screen to pick which campaigns to append."""
+    return _campaign_schedule_active(camp, now=now) and _campaign_targets_store(camp, store_id)
+
+
+def _public_campaign(camp: dict) -> dict:
+    """Shape returned to the CMS. `isActiveNow` reflects the schedule
+    only (time + daypart), independent of any screen — the Campaigns
+    list uses it for the status chip."""
+    out = dict(camp)
+    out["isActiveNow"] = _campaign_schedule_active(camp)
+    return out
 
 
 # v0.1.96 — the self-containment check. This is the rule that makes a guided
@@ -1594,6 +1762,19 @@ def _load_state_from_disk() -> None:
                     print(f"[state] {EXPERIENCES_JSON}: top-level isn't a list, skipping", file=sys.stderr)
             except Exception as e:
                 print(f"[state] load {EXPERIENCES_JSON} failed: {e}", file=sys.stderr)
+
+        # v0.2.14: campaigns list — same list-shaped pattern as _experiences.
+        global _campaigns
+        if CAMPAIGNS_JSON.is_file():
+            try:
+                raw = json.loads(CAMPAIGNS_JSON.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    _campaigns = raw
+                    print(f"[state] loaded {len(raw)} campaigns from {CAMPAIGNS_JSON}", file=sys.stderr)
+                else:
+                    print(f"[state] {CAMPAIGNS_JSON}: top-level isn't a list, skipping", file=sys.stderr)
+            except Exception as e:
+                print(f"[state] load {CAMPAIGNS_JSON} failed: {e}", file=sys.stderr)
 
 
 # ── Activity log ─────────────────────────────────────────────────────
@@ -3996,6 +4177,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"experiences": _list_experiences()})
             return
 
+        if path == "/api/campaigns":
+            # v0.2.14: list campaigns, newest-first for the CMS Campaigns
+            # page. Permission-gated: campaigns.view covers everyone except
+            # outside brand partners, who shouldn't see cross-brand
+            # scheduling at a glance.
+            if self._require_perm("campaigns.view") is None:
+                return
+            with _STATE_LOCK:
+                items = [_public_campaign(c) for c in _campaigns]
+            items.sort(key=lambda c: c.get("createdAt", ""), reverse=True)
+            self._send_json({"campaigns": items})
+            return
+
         if path == "/api/library/info":
             if self._require_perm("library.sync") is None:
                 return
@@ -4716,6 +4910,63 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"ok": True, "store": store})
             return
 
+        # v0.2.14: create a new campaign. Admin-scoped because the campaign
+        # will auto-inject clips into every screen the resolver matches
+        # (same blast radius as a push). Body: {name, startAt, endAt,
+        # daypart?, locationScope, stores?, brands?}. Returns the created
+        # record. The campaign id is derived from the name as a slug;
+        # retries with a numeric suffix on collision.
+        if path == "/api/campaigns":
+            if self._require_perm("campaigns.edit") is None:
+                return
+            patch, err = _validate_campaign_payload(body, require_name=True)
+            if err:
+                self._send_json({"error": "invalid", "detail": err}, status=400); return
+            # startAt + endAt required on create (editing can be partial).
+            if "startAt" not in patch or "endAt" not in patch:
+                self._send_json({"error": "invalid", "detail": "startAt and endAt required on create"}, status=400); return
+            # Default scope + stores so the record is always well-formed.
+            patch.setdefault("locationScope", "all")
+            patch.setdefault("stores", [])
+            patch.setdefault("brands", [])
+            patch.setdefault("daypart", None)
+            # Slug the name for the id, dedupe against existing campaigns
+            # with a -2 / -3 suffix. _slug is defined earlier in this file
+            # for the upload path and reused here.
+            base_slug = _slug(patch["name"]) or "campaign"
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                existing_ids = {c.get("id") for c in _campaigns}
+                camp_id = base_slug
+                suffix = 2
+                while camp_id in existing_ids:
+                    camp_id = f"{base_slug}-{suffix}"
+                    suffix += 1
+                now_iso = _now_utc().isoformat()
+                record = {
+                    "id":         camp_id,
+                    "name":       patch["name"],
+                    "startAt":    patch["startAt"],
+                    "endAt":      patch["endAt"],
+                    "daypart":    patch["daypart"],
+                    "locationScope": patch["locationScope"],
+                    "stores":     patch["stores"],
+                    "brands":     patch["brands"],
+                    "createdBy":  actor.get("email") or actor.get("display_name"),
+                    "createdAt":  now_iso,
+                    "updatedAt":  now_iso,
+                }
+                _campaigns.append(record)
+                _save_campaigns()
+            _log_activity(
+                kind="campaign",
+                text=f"Created campaign '{record['name']}'",
+                icon="plus",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"campaign": _public_campaign(record)})
+            return
+
         # ── Splash mapping update ────────────────────────────────
         # POST /api/splashes/mapping  { city: "NYC", brand: "tmrw"|"smartech"|null }
         if path == "/api/splashes/mapping":
@@ -5264,6 +5515,54 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         body = self._read_json()
 
+        # v0.2.14: PATCH /api/campaigns/<id> — partial update. Only the
+        # fields present in the body are touched; omit a field to leave
+        # it alone. `name` isn't required on PATCH (so partial edits of
+        # just the schedule / locations work).
+        m_camp = re.match(r"^/api/campaigns/([a-z0-9][a-z0-9-]*)$", path)
+        if m_camp:
+            if self._require_perm("campaigns.edit") is None:
+                return
+            camp_id = m_camp.group(1)
+            patch, err = _validate_campaign_payload(body, require_name=False)
+            if err:
+                self._send_json({"error": "invalid", "detail": err}, status=400); return
+            if not patch:
+                self._send_json({"error": "nothing_to_update"}, status=400); return
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                camp = next((c for c in _campaigns if c.get("id") == camp_id), None)
+                if camp is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                # Scope/stores stay internally consistent — if the caller
+                # moves to scope='stores' they must either name stores in
+                # this patch or already have them stored.
+                effective_scope = patch.get("locationScope", camp.get("locationScope"))
+                effective_stores = patch.get("stores", camp.get("stores") or [])
+                if effective_scope == "stores" and not effective_stores:
+                    self._send_json({"error": "invalid",
+                                     "detail": "locationScope='stores' needs at least one store"},
+                                    status=400); return
+                # endAt > startAt holds across the merged result, not just
+                # within the patch (patch might change only one).
+                final_start = _parse_iso_utc(patch.get("startAt", camp.get("startAt", "")))
+                final_end   = _parse_iso_utc(patch.get("endAt",   camp.get("endAt", "")))
+                if final_start and final_end and final_end <= final_start:
+                    self._send_json({"error": "invalid",
+                                     "detail": "endAt must be after startAt"},
+                                    status=400); return
+                camp.update(patch)
+                camp["updatedAt"] = _now_utc().isoformat()
+                _save_campaigns()
+            _log_activity(
+                kind="campaign",
+                text=f"Updated campaign '{camp['name']}'",
+                icon="check",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"campaign": _public_campaign(camp)})
+            return
+
         # v0.1.58: PATCH /api/integrations/<name> { value: "<key>" }.
         # Owner-only — checked here, not via PERMISSIONS, because it's
         # a deliberate single-role gate. Empty string clears the secret.
@@ -5411,6 +5710,33 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _serve_api_delete(self) -> None:
         path = self.path.split("?", 1)[0]
+        # v0.2.14: DELETE /api/campaigns/<id>. The campaign record goes;
+        # the library.json entries that reference it keep `campaign: <id>`
+        # harmlessly (resolver returns [] for a missing id, so a tablet
+        # that still has one on-disk just stops injecting it). Deliberate:
+        # we don't want to orphan content silently or scrub it in bulk.
+        camp_m = re.match(r"^/api/campaigns/([a-z0-9][a-z0-9-]*)$", path)
+        if camp_m:
+            if self._require_perm("campaigns.edit") is None:
+                return
+            camp_id = camp_m.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                camp = next((c for c in _campaigns if c.get("id") == camp_id), None)
+                if camp is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                _campaigns.remove(camp)
+                _save_campaigns()
+            _log_activity(
+                kind="campaign",
+                text=f"Deleted campaign '{camp.get('name') or camp_id}'",
+                icon="offline",
+                tone="warn",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"ok": True, "id": camp_id})
+            return
+
         # v0.1.96: DELETE /api/experiences/<id> removes an UPLOADED experience.
         # Vendored interactive/*.html aren't in _experiences, so this 404s for
         # them — they're part of the repo, not something the CMS can delete.
