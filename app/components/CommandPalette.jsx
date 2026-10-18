@@ -434,6 +434,20 @@ const CommandPalette = () => {
     return () => document.removeEventListener('keydown', onKey, true);
   }, [open, pendingCmd]);
 
+  // Programmatic open — the sidebar's search chip and any other in-app
+  // affordance dispatch this event so we have one canonical open path
+  // that doesn't depend on synthesising a keystroke.
+  React.useEffect(() => {
+    const onOpen = () => {
+      setOpen(true);
+      setQuery('');
+      setActiveIdx(0);
+      setPendingCmd(null);
+    };
+    window.addEventListener('open-command-palette', onOpen);
+    return () => window.removeEventListener('open-command-palette', onOpen);
+  }, []);
+
   // Focus the input on every open + every stage transition.
   React.useEffect(() => {
     if (open) setTimeout(() => inputRef.current?.focus(), 0);

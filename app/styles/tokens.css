@@ -372,3 +372,14 @@ html, body { background: var(--bone); }
     border-radius: 0 !important;
   }
 }
+
+/* Live indicator pulse — used by sidebar live-dot and dashboard on-air
+   cues. Kept subtle (opacity swing, no scale) so multiple pulses at once
+   don't feel busy. Reduced-motion viewers get a still dot. */
+@keyframes sidebar-live-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+@media (prefers-reduced-motion: reduce) {
+  @keyframes sidebar-live-pulse { 0%, 100% { opacity: 1; } }
+}
