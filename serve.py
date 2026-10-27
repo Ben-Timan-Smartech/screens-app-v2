@@ -5401,6 +5401,98 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"event": _public_event(record)})
             return
 
+        # v0.2.15 E2.5: Preview content on one screen. Snapshots the
+        # screen's current state, overrides with the supplied items,
+        # sets an expiry timestamp that the event-scheduler daemon
+        # watches — on expiry the snapshot is restored automatically.
+        # Lets operators verify a new clip plays correctly on real
+        # hardware before pushing it to the fleet.
+        #
+        # Body: { items: [{id, url, durationSec, type?, ...}, ...],
+        #         durationSec: int (how long to run the preview; capped
+        #                           at 1800 so a forgotten preview can't
+        #                           hold a screen hostage) }
+        # Refuses if the screen is currently in an active event
+        # (preview over a takeover would double-snapshot).
+        m_screen_preview = re.match(r"^/api/screens/([^/]+)/preview$", path)
+        if m_screen_preview:
+            if self._require_perm("screens.push") is None:
+                return
+            device_id = m_screen_preview.group(1)
+            raw_items = body.get("items") or []
+            if not isinstance(raw_items, list) or not raw_items:
+                self._send_json({"error": "no_items",
+                                 "detail": "items[] is required (at least one)"},
+                                status=400); return
+            try:
+                run_sec = int(body.get("durationSec") or 60)
+            except (TypeError, ValueError):
+                run_sec = 60
+            run_sec = max(10, min(1800, run_sec))
+            # Validate the items.
+            cleaned_items = []
+            for i, raw in enumerate(raw_items):
+                if not isinstance(raw, dict) or not raw.get("url"):
+                    self._send_json({"error": "invalid_item",
+                                     "detail": f"items[{i}] needs a url"},
+                                    status=400); return
+                cleaned_items.append({
+                    "id":          raw.get("id") or f"preview-{int(time.time()*1000)}-{i}",
+                    "title":       raw.get("title") or "Preview",
+                    "brand":       raw.get("brand"),
+                    "product":     raw.get("product"),
+                    "durationSec": raw.get("durationSec") or 15,
+                    "url":         raw.get("url"),
+                    "sizeMb":      raw.get("sizeMb"),
+                    "width":       raw.get("width"),
+                    "height":      raw.get("height"),
+                    "type":        raw.get("type") or "video",
+                })
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                if device_id not in _screens:
+                    self._send_json({"error": "unknown_screen"}, status=404); return
+                # Refuse while a real event is active for this screen —
+                # preview overriding an event would corrupt the event's
+                # snapshot. Operator must stop the event first.
+                active = _active_event_for_screen(
+                    device_id,
+                    (_screens.get(device_id, {}).get("location") or {}).get("storeId"),
+                )
+                if active:
+                    self._send_json({"error": "event_active",
+                                     "detail": f"'{active.get('name')}' is live on this screen; stop it first."},
+                                    status=409); return
+                s = _ensure_screen_state(device_id)
+                # If a preview is ALREADY in progress on this screen,
+                # keep the ORIGINAL snapshot (so restore still works)
+                # and just swap the live items — the operator is
+                # iterating on the test, not nesting.
+                if not s.get("_previewSnapshot"):
+                    s["_previewSnapshot"] = {k: s.get(k) for k in _EVENT_SNAPSHOT_FIELDS}
+                s["items"] = cleaned_items
+                s["mixSplash"] = False  # test content alone, no splash interleave
+                s["pendingCommands"] = []
+                s["revision"] = int(s.get("revision") or 0) + 1
+                s["pushedAt"] = int(time.time() * 1000)
+                expires_at_ms = s["pushedAt"] + run_sec * 1000
+                s["_previewExpiresAtMs"] = expires_at_ms
+                _save_per_screen_soon()
+            _log_activity(
+                kind="preview",
+                text=f"Preview on {device_id} — {len(cleaned_items)} clip(s) for {run_sec}s",
+                icon="check",
+                who=actor.get("display_name"),
+                target=device_id,
+            )
+            self._send_json({
+                "ok": True,
+                "deviceId": device_id,
+                "expiresAtMs": expires_at_ms,
+                "durationSec": run_sec,
+            })
+            return
+
         # v0.2.15: sign off an event. Flips state draft -> signed-off,
         # locks the record as ready-to-run, and starts advertising its
         # content as a preload hint to targeted screens in their
