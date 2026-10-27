@@ -458,11 +458,31 @@ _experiences: list[dict] = []
 # v0.2.15: list of event records. Shape:
 #   {id, name, startAt, endAt (both nullable for manual-only),
 #    targetMode: "stores"|"screens", stores: [], screens: [deviceIds],
-#    playlist: [item dicts in the pushed-item shape],
+#    splashes: {
+#      portrait:  {url, type: "video"|"image", durationSec, title?, ...},
+#      landscape: {url, type: "video"|"image", durationSec, title?, ...},
+#    },  # required at /start; portrait/landscape pre-uploaded or picked
+#    splashOn: bool,  # master: does the splash also play when a screen
+#                     # has a specific assignment? Default True.
+#    screenAssignments: {
+#      deviceId: {
+#        items: [...pushed-item shapes...],  # custom playlist for THIS screen
+#        splashOn: null|bool,  # per-screen override of master; null = inherit
+#      }
+#    },
 #    overrides: {mixSplash, audioOn, productCard, ...} (optional),
 #    state: "draft"|"scheduled"|"active"|"ended",
 #    snapshots: {deviceId: {items, mixSplash, productCard, ...}},
 #    createdBy, createdAt, updatedAt, startedAt, endedAt}
+#
+# Content resolution on start, per targeted screen:
+#   - Read screen's orientation; splash = splashes[portrait|landscape]
+#   - assignment = screenAssignments[deviceId] or {}
+#   - effectiveSplashOn = assignment.splashOn if not None else event.splashOn
+#   - If assignment.items set:
+#       items = assignment.items + ([splash] if effectiveSplashOn else [])
+#     Else:
+#       items = [splash]  # splash is the universal fallback
 # `snapshots` is only populated while state=="active" — on stop/end it's
 # consumed by _restore_screen_from_event and cleared.
 _events: list[dict] = []
@@ -781,15 +801,63 @@ def _restore_screen_from_event(event: dict, device_id: str) -> None:
     s["pushedAt"] = int(time.time() * 1000)
 
 
+def _resolve_event_items_for_screen(event: dict, device_id: str) -> list[dict]:
+    """Compute the final item list for a screen under an active event.
+
+    Rules (per the event spec):
+      1. splash = event.splashes[orientation]. If missing, the screen
+         gets an empty list (will show black). /start-time validation
+         enforces that both orientations have a splash, so this only
+         bites if a per-orientation entry was cleared mid-event via
+         PATCH — flagged in logs if it happens.
+      2. assignment = event.screenAssignments[deviceId], else {}.
+      3. effectiveSplashOn = assignment.splashOn if not None, else
+         event.splashOn (master toggle).
+      4. If assignment.items is non-empty:
+           - splashOn → items = [...assignment.items, splash]
+           - splashOff → items = assignment.items
+         Else (no assignment):
+           - items = [splash]  — splash is the universal fallback,
+             regardless of the splashOn toggle.
+    """
+    screen_meta = _screens.get(device_id) or {}
+    orient_raw = (screen_meta.get("orientation") or "landscape")
+    orient = str(orient_raw).lower() if orient_raw else "landscape"
+    if orient not in ("portrait", "landscape"):
+        orient = "landscape"
+    splash_item = (event.get("splashes") or {}).get(orient)
+
+    assignment = (event.get("screenAssignments") or {}).get(device_id) or {}
+    assigned_items = list(assignment.get("items") or [])
+
+    master_splash_on = bool(event.get("splashOn", True))
+    assigned_override = assignment.get("splashOn")  # None | True | False
+    effective_splash_on = (
+        master_splash_on if assigned_override is None else bool(assigned_override)
+    )
+
+    if assigned_items:
+        if effective_splash_on and splash_item:
+            return assigned_items + [splash_item]
+        return assigned_items
+    # Fallback: splash is the whole loop.
+    if splash_item:
+        return [splash_item]
+    print(f"[event] no splash resolved for {device_id} (orient={orient}, event={event.get('id')})", file=sys.stderr)
+    return []
+
+
 def _apply_event_override_to_screen(event: dict, device_id: str) -> None:
     """Overwrite the live per-screen playlist + settings with the
-    event's values. Does NOT persist the snapshot — call
-    _snapshot_screen_for_event FIRST. Must be inside _STATE_LOCK."""
+    event's resolved content for THIS screen (splash + assignment).
+    Does NOT persist the snapshot — call _snapshot_screen_for_event
+    FIRST. Must be inside _STATE_LOCK."""
     s = _ensure_screen_state(device_id)
-    s["items"] = list(event.get("playlist") or [])
+    s["items"] = _resolve_event_items_for_screen(event, device_id)
     overrides = event.get("overrides") or {}
-    # mixSplash defaults to False during an event — the event stands
-    # alone, no splash interleave unless the operator explicitly asked.
+    # mixSplash defaults to False during an event — the event's own
+    # splash resolution is the whole game, no brand-splash interleave
+    # unless the operator explicitly flipped the override on.
     s["mixSplash"] = bool(overrides.get("mixSplash", False))
     for key in ("productCard", "audioOn", "tapNext", "progressBar",
                 "experienceUrl", "experiencePromptPos", "rotation",
@@ -865,29 +933,87 @@ def _validate_event_payload(body: dict, *, require_name: bool = True) -> tuple[d
             return None, "screens must be a list of deviceId strings"
         out["screens"] = list(dict.fromkeys(screens))
 
-    if "playlist" in body:
-        playlist = body.get("playlist") or []
-        if not isinstance(playlist, list):
-            return None, "playlist must be a list"
-        cleaned = []
-        for i, item in enumerate(playlist):
-            if not isinstance(item, dict):
-                return None, f"playlist[{i}] must be an object"
-            if not item.get("id") or not item.get("url"):
-                return None, f"playlist[{i}] needs id and url"
-            cleaned.append({
-                "id":          item.get("id"),
-                "title":       item.get("title") or item.get("id"),
-                "brand":       item.get("brand"),
-                "product":     item.get("product"),
-                "durationSec": item.get("durationSec") or 15,
-                "url":         item.get("url"),
-                "sizeMb":      item.get("sizeMb"),
-                "width":       item.get("width"),
-                "height":      item.get("height"),
-                "type":        item.get("type") or "video",
-            })
-        out["playlist"] = cleaned
+    def _clean_item(item, where):
+        if not isinstance(item, dict):
+            return None, f"{where} must be an object"
+        if not item.get("id") or not item.get("url"):
+            return None, f"{where} needs id and url"
+        return {
+            "id":          item.get("id"),
+            "title":       item.get("title") or item.get("id"),
+            "brand":       item.get("brand"),
+            "product":     item.get("product"),
+            "durationSec": item.get("durationSec") or 15,
+            "url":         item.get("url"),
+            "sizeMb":      item.get("sizeMb"),
+            "width":       item.get("width"),
+            "height":      item.get("height"),
+            "type":        item.get("type") or "video",
+        }, None
+
+    # v0.2.15 shape: splashes.portrait + splashes.landscape are the
+    # event-wide fallback content. Each is an item shape (same as a
+    # playlist item). Both are REQUIRED to /start, but at /create and
+    # /patch time either can be unset so the operator can fill them in
+    # progressively.
+    if "splashes" in body:
+        sp = body.get("splashes")
+        if sp is None:
+            out["splashes"] = {}
+        elif not isinstance(sp, dict):
+            return None, "splashes must be an object or null"
+        else:
+            cleaned_sp: dict = {}
+            for key in ("portrait", "landscape"):
+                if key not in sp:
+                    continue
+                raw = sp.get(key)
+                if raw is None:
+                    cleaned_sp[key] = None
+                    continue
+                item, err = _clean_item(raw, f"splashes.{key}")
+                if err:
+                    return None, err
+                cleaned_sp[key] = item
+            out["splashes"] = cleaned_sp
+
+    if "splashOn" in body:
+        v = body.get("splashOn")
+        if not isinstance(v, bool):
+            return None, "splashOn must be a boolean"
+        out["splashOn"] = v
+
+    # v0.2.15: per-screen content assignments. Nested shape:
+    #   { deviceId: { items: [...], splashOn: null|bool } }
+    # Null splashOn means "inherit the master setting"; True/False
+    # override just for this screen.
+    if "screenAssignments" in body:
+        sa = body.get("screenAssignments")
+        if sa is None:
+            out["screenAssignments"] = {}
+        elif not isinstance(sa, dict):
+            return None, "screenAssignments must be an object or null"
+        else:
+            cleaned_sa: dict = {}
+            for device_id, entry in sa.items():
+                if not isinstance(device_id, str) or not device_id:
+                    return None, "screenAssignments keys must be deviceId strings"
+                if not isinstance(entry, dict):
+                    return None, f"screenAssignments[{device_id}] must be an object"
+                items_raw = entry.get("items") or []
+                if not isinstance(items_raw, list):
+                    return None, f"screenAssignments[{device_id}].items must be a list"
+                items_cleaned = []
+                for i, raw in enumerate(items_raw):
+                    item, err = _clean_item(raw, f"screenAssignments[{device_id}].items[{i}]")
+                    if err:
+                        return None, err
+                    items_cleaned.append(item)
+                sp_on = entry.get("splashOn")
+                if sp_on is not None and not isinstance(sp_on, bool):
+                    return None, f"screenAssignments[{device_id}].splashOn must be bool or null"
+                cleaned_sa[device_id] = {"items": items_cleaned, "splashOn": sp_on}
+            out["screenAssignments"] = cleaned_sa
 
     if "overrides" in body:
         ov = body.get("overrides")
@@ -5026,7 +5152,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             patch.setdefault("targetMode", "stores")
             patch.setdefault("stores", [])
             patch.setdefault("screens", [])
-            patch.setdefault("playlist", [])
+            patch.setdefault("splashes", {})
+            patch.setdefault("splashOn", True)
+            patch.setdefault("screenAssignments", {})
             patch.setdefault("overrides", {})
             patch.setdefault("startAt", None)
             patch.setdefault("endAt", None)
@@ -5041,22 +5169,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     suffix += 1
                 now_iso = _now_utc().isoformat()
                 record = {
-                    "id":           ev_id,
-                    "name":         patch["name"],
-                    "startAt":      patch["startAt"],
-                    "endAt":        patch["endAt"],
-                    "targetMode":   patch["targetMode"],
-                    "stores":       patch["stores"],
-                    "screens":      patch["screens"],
-                    "playlist":     patch["playlist"],
-                    "overrides":    patch["overrides"],
-                    "state":        "draft",
-                    "snapshots":    {},
-                    "createdBy":    actor.get("email") or actor.get("display_name"),
-                    "createdAt":    now_iso,
-                    "updatedAt":    now_iso,
-                    "startedAt":    None,
-                    "endedAt":      None,
+                    "id":                ev_id,
+                    "name":              patch["name"],
+                    "startAt":           patch["startAt"],
+                    "endAt":             patch["endAt"],
+                    "targetMode":        patch["targetMode"],
+                    "stores":            patch["stores"],
+                    "screens":           patch["screens"],
+                    "splashes":          patch["splashes"],
+                    "splashOn":          patch["splashOn"],
+                    "screenAssignments": patch["screenAssignments"],
+                    "overrides":         patch["overrides"],
+                    "state":             "draft",
+                    "snapshots":         {},
+                    "createdBy":         actor.get("email") or actor.get("display_name"),
+                    "createdAt":         now_iso,
+                    "updatedAt":         now_iso,
+                    "startedAt":         None,
+                    "endedAt":           None,
                 }
                 _events.append(record)
                 _save_events()
@@ -5086,10 +5216,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self._send_json({"error": "not_found"}, status=404); return
                 if ev.get("state") == "active":
                     self._send_json({"error": "already_active"}, status=409); return
-                if not ev.get("playlist"):
-                    self._send_json({"error": "empty_playlist",
-                                     "detail": "An event needs at least one playlist item"},
-                                    status=400); return
+                # v0.2.15: splashes are the universal fallback; both
+                # orientations must be set before an event can go live
+                # so NO screen in the target set can end up with an
+                # empty loop. Per-screen assignments are optional.
+                sp = ev.get("splashes") or {}
+                if not sp.get("portrait") or not sp.get("landscape"):
+                    self._send_json({
+                        "error": "missing_splashes",
+                        "detail": "Both portrait and landscape splashes must be set before starting an event.",
+                    }, status=400); return
                 targets = _target_screen_ids_for_event(ev)
                 if not targets:
                     self._send_json({"error": "no_targets",
@@ -5742,12 +5878,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             "error": "forbidden_while_active",
                             "detail": f"Cannot change {sorted(forbidden)} while event is active. Stop it first.",
                         }, status=409); return
-                    # Playlist / overrides CAN change — push the new
-                    # values onto every targeted screen so the fleet
+                    # splashes / splashOn / screenAssignments / overrides
+                    # CAN change mid-event — push the new values onto
+                    # every currently-overridden screen so the fleet
                     # picks them up on the next poll.
                     ev.update(patch)
                     ev["updatedAt"] = _now_utc().isoformat()
-                    if "playlist" in patch or "overrides" in patch:
+                    if any(k in patch for k in ("splashes", "splashOn", "screenAssignments", "overrides")):
                         for device_id in list((ev.get("snapshots") or {}).keys()):
                             _apply_event_override_to_screen(ev, device_id)
                         _save_per_screen_soon()
