@@ -400,6 +400,16 @@ EXPERIENCES_JSON = Path(os.environ.get(
     "SCREENS_EXPERIENCES_PATH",
     _state_path_default("experiences.json"),
 ))
+# v0.2.15: events — a scheduled OR manual TAKEOVER on targeted screens.
+# While an event is active, its playlist + settings replace the screen's
+# normal state; on deactivation, the screen is restored exactly as it was
+# (snapshot captured at activation). One file for the whole event index;
+# per-event snapshots live inside each event record so a deploy / restart
+# never loses the restore info.
+EVENTS_JSON = Path(os.environ.get(
+    "SCREENS_EVENTS_PATH",
+    _state_path_default("events.json"),
+))
 # v0.1.56: city → brand splash mapping. The dict is mutated by the
 # Settings → Splashes UI; pre-v0.1.56 it lived only in memory, so any
 # Cloud Run redeploy silently reset it to defaults. Now persisted
@@ -445,6 +455,17 @@ _custom_stores: dict[str, dict] = {}
 # in here — see _list_experiences). {id, name, brand, filename, sizeBytes,
 # uploadedAt, uploadedBy}
 _experiences: list[dict] = []
+# v0.2.15: list of event records. Shape:
+#   {id, name, startAt, endAt (both nullable for manual-only),
+#    targetMode: "stores"|"screens", stores: [], screens: [deviceIds],
+#    playlist: [item dicts in the pushed-item shape],
+#    overrides: {mixSplash, audioOn, productCard, ...} (optional),
+#    state: "draft"|"scheduled"|"active"|"ended",
+#    snapshots: {deviceId: {items, mixSplash, productCard, ...}},
+#    createdBy, createdAt, updatedAt, startedAt, endedAt}
+# `snapshots` is only populated while state=="active" — on stop/end it's
+# consumed by _restore_screen_from_event and cleared.
+_events: list[dict] = []
 
 
 # ── State persistence ────────────────────────────────────────────────
@@ -680,6 +701,250 @@ def _save_city_brand() -> None:
 def _save_experiences() -> None:
     """Persist _experiences. Call inside _STATE_LOCK after any mutation."""
     _atomic_write_json(EXPERIENCES_JSON, _experiences)
+
+
+def _save_events() -> None:
+    """Persist _events. Call inside _STATE_LOCK after any mutation.
+
+    Low write frequency (operator CRUD + start/stop lifecycle), so the
+    inline write is safe (unlike _screens/_per_screen which must defer
+    via *_soon savers — see _save_screens_soon). Snapshots travel with
+    the event record itself, so a Cloud Run restart mid-event doesn't
+    orphan them."""
+    _atomic_write_json(EVENTS_JSON, _events)
+
+
+# ── Event helpers ─────────────────────────────────────────────────────
+# What a snapshot of a screen's state captures when an event activates.
+# Chosen fields = every per-screen setting the operator can set via the
+# CMS, plus `items` (the current pushed playlist) and `revision` (so the
+# tablet re-fetches cleanly on restore). Everything else — pushedAt,
+# pendingCommands, lastHeartbeat — isn't operator-settable and either
+# gets rebuilt naturally or doesn't matter for playback continuity.
+_EVENT_SNAPSHOT_FIELDS = (
+    "items", "mixSplash", "productCard", "rotation",
+    "experienceUrl", "experiencePromptPos",
+    "tapNext", "progressBar", "audioOn", "pollMode",
+    "syncGroup", "displayMode", "revision",
+)
+
+
+def _target_screen_ids_for_event(event: dict) -> list[str]:
+    """Flatten an event's targeting into a concrete list of deviceIds
+    at this moment. For targetMode='screens' it's just event['screens'];
+    for 'stores' we resolve every registered screen whose location
+    storeId is in event['stores']. Called at START time to decide which
+    screens to snapshot + override, and at STOP time to decide which
+    screens to restore."""
+    if event.get("targetMode") == "screens":
+        return list(event.get("screens") or [])
+    stores = set(event.get("stores") or [])
+    if not stores:
+        return []
+    out = []
+    for device_id, meta in _screens.items():
+        loc = meta.get("location") or {}
+        if (loc.get("storeId") or "") in stores:
+            out.append(device_id)
+    return out
+
+
+def _snapshot_screen_for_event(event: dict, device_id: str) -> None:
+    """Capture the current per-screen state onto the event record so
+    we can restore it when the event ends. Must be called inside
+    _STATE_LOCK. Idempotent — a re-snapshot overwrites the previous
+    one, which happens if a screen is re-added to an active event's
+    target list after a transient drop."""
+    s = _ensure_screen_state(device_id)
+    snap = {k: s.get(k) for k in _EVENT_SNAPSHOT_FIELDS}
+    event.setdefault("snapshots", {})[device_id] = snap
+
+
+def _restore_screen_from_event(event: dict, device_id: str) -> None:
+    """Reverse of _snapshot_. Writes the snapshot back onto the live
+    per-screen state and bumps revision so the tablet sees the change
+    on its next /api/state poll. Must be called inside _STATE_LOCK.
+    Pops the snapshot off the event record so a re-start of the same
+    event takes a fresh snapshot (vs restoring stale pre-event state)."""
+    snaps = event.get("snapshots") or {}
+    snap = snaps.pop(device_id, None)
+    if snap is None:
+        return
+    s = _ensure_screen_state(device_id)
+    for k in _EVENT_SNAPSHOT_FIELDS:
+        if k == "revision":
+            continue  # bumped separately below
+        if k in snap:
+            s[k] = snap[k]
+    # Bump revision so the tablet detects the change immediately.
+    s["revision"] = int(s.get("revision") or 0) + 1
+    s["pushedAt"] = int(time.time() * 1000)
+
+
+def _apply_event_override_to_screen(event: dict, device_id: str) -> None:
+    """Overwrite the live per-screen playlist + settings with the
+    event's values. Does NOT persist the snapshot — call
+    _snapshot_screen_for_event FIRST. Must be inside _STATE_LOCK."""
+    s = _ensure_screen_state(device_id)
+    s["items"] = list(event.get("playlist") or [])
+    overrides = event.get("overrides") or {}
+    # mixSplash defaults to False during an event — the event stands
+    # alone, no splash interleave unless the operator explicitly asked.
+    s["mixSplash"] = bool(overrides.get("mixSplash", False))
+    for key in ("productCard", "audioOn", "tapNext", "progressBar",
+                "experienceUrl", "experiencePromptPos", "rotation",
+                "pollMode", "syncGroup", "displayMode"):
+        if key in overrides:
+            s[key] = overrides[key]
+    # Clear pending commands so a stale command from before doesn't
+    # fire during the event — restore after the event brings the
+    # pre-event queue back if any.
+    s["pendingCommands"] = []
+    s["revision"] = int(s.get("revision") or 0) + 1
+    s["pushedAt"] = int(time.time() * 1000)
+
+
+def _active_event_for_screen(device_id: str, store_id: str | None) -> dict | None:
+    """Find the active event that targets this screen, if any. Events
+    take precedence over the base playlist and over any campaign
+    overlay (campaigns can't layer onto a takeover — that defeats the
+    'perfect restore' guarantee). Only one event may target a given
+    screen at a time (enforced at start-time)."""
+    for ev in _events:
+        if ev.get("state") != "active":
+            continue
+        if ev.get("targetMode") == "screens":
+            if device_id in (ev.get("screens") or []):
+                return ev
+        else:
+            if store_id and store_id in (ev.get("stores") or []):
+                return ev
+    return None
+
+
+def _validate_event_payload(body: dict, *, require_name: bool = True) -> tuple[dict | None, str | None]:
+    """Shape-check POST/PATCH input. Returns (clean_patch, None) on
+    success or (None, error) on invalid. require_name=False lets a
+    PATCH update any subset of fields."""
+    out: dict = {}
+
+    name = (body.get("name") or "").strip() if isinstance(body.get("name"), str) else ""
+    if require_name and not name:
+        return None, "Missing 'name'"
+    if name:
+        if len(name) > 120:
+            return None, "name too long (max 120 chars)"
+        out["name"] = name
+
+    for date_field in ("startAt", "endAt"):
+        if date_field in body:
+            raw = body.get(date_field)
+            if raw is None:
+                out[date_field] = None  # manual-only mode
+            else:
+                parsed = _parse_iso_utc(raw) if isinstance(raw, str) else None
+                if parsed is None:
+                    return None, f"Invalid {date_field} (ISO-8601 UTC expected or null)"
+                out[date_field] = parsed.isoformat()
+
+    if "targetMode" in body:
+        tm = body.get("targetMode")
+        if tm not in ("stores", "screens"):
+            return None, "targetMode must be 'stores' or 'screens'"
+        out["targetMode"] = tm
+
+    if "stores" in body:
+        stores = body.get("stores") or []
+        if not isinstance(stores, list) or not all(isinstance(s, str) and s for s in stores):
+            return None, "stores must be a list of storeId strings"
+        out["stores"] = list(dict.fromkeys(stores))
+
+    if "screens" in body:
+        screens = body.get("screens") or []
+        if not isinstance(screens, list) or not all(isinstance(s, str) and s for s in screens):
+            return None, "screens must be a list of deviceId strings"
+        out["screens"] = list(dict.fromkeys(screens))
+
+    if "playlist" in body:
+        playlist = body.get("playlist") or []
+        if not isinstance(playlist, list):
+            return None, "playlist must be a list"
+        cleaned = []
+        for i, item in enumerate(playlist):
+            if not isinstance(item, dict):
+                return None, f"playlist[{i}] must be an object"
+            if not item.get("id") or not item.get("url"):
+                return None, f"playlist[{i}] needs id and url"
+            cleaned.append({
+                "id":          item.get("id"),
+                "title":       item.get("title") or item.get("id"),
+                "brand":       item.get("brand"),
+                "product":     item.get("product"),
+                "durationSec": item.get("durationSec") or 15,
+                "url":         item.get("url"),
+                "sizeMb":      item.get("sizeMb"),
+                "width":       item.get("width"),
+                "height":      item.get("height"),
+                "type":        item.get("type") or "video",
+            })
+        out["playlist"] = cleaned
+
+    if "overrides" in body:
+        ov = body.get("overrides")
+        if ov is not None and not isinstance(ov, dict):
+            return None, "overrides must be an object or null"
+        out["overrides"] = ov or {}
+
+    # endAt > startAt when both set.
+    if "startAt" in out and "endAt" in out and out["startAt"] and out["endAt"]:
+        s_dt = _parse_iso_utc(out["startAt"]) ; e_dt = _parse_iso_utc(out["endAt"])
+        if s_dt and e_dt and e_dt <= s_dt:
+            return None, "endAt must be after startAt"
+
+    return out, None
+
+
+def _public_event(event: dict) -> dict:
+    """CMS-shape projection. Strips snapshots (not useful on the wire)
+    and attaches a computed `effectiveScreenCount` so the list view
+    can show how many screens an event targets right now (resolving
+    stores against the live fleet for targetMode='stores')."""
+    out = {k: v for k, v in event.items() if k != "snapshots"}
+    try:
+        with _STATE_LOCK:
+            out["effectiveScreenCount"] = len(_target_screen_ids_for_event(event))
+    except Exception:
+        out["effectiveScreenCount"] = len(event.get("screens") or []) or len(event.get("stores") or [])
+    return out
+
+
+# _parse_iso_utc + _now_utc are defined by the campaigns PR when it
+# lands; include a local alternative here so the events branch builds
+# standalone if campaigns hasn't merged yet. The campaigns version
+# wins at import time if both are present (Python's "last wins" rule).
+try:
+    _parse_iso_utc  # noqa: F821
+except NameError:
+    def _parse_iso_utc(value):
+        import datetime
+        if not isinstance(value, str) or not value:
+            return None
+        s = value.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.datetime.fromisoformat(s)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc)
+try:
+    _now_utc  # noqa: F821
+except NameError:
+    def _now_utc():
+        import datetime
+        return datetime.datetime.now(datetime.timezone.utc)
 
 
 # v0.1.96 — the self-containment check. This is the rule that makes a guided
@@ -1594,6 +1859,22 @@ def _load_state_from_disk() -> None:
                     print(f"[state] {EXPERIENCES_JSON}: top-level isn't a list, skipping", file=sys.stderr)
             except Exception as e:
                 print(f"[state] load {EXPERIENCES_JSON} failed: {e}", file=sys.stderr)
+
+        # v0.2.15: events — same list-shaped pattern. Active events
+        # carry their snapshots inline, so a crash/restart mid-event
+        # restores the full event state (including which screens are
+        # overridden and what to restore them to).
+        global _events
+        if EVENTS_JSON.is_file():
+            try:
+                raw = json.loads(EVENTS_JSON.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    _events = raw
+                    print(f"[state] loaded {len(raw)} events from {EVENTS_JSON}", file=sys.stderr)
+                else:
+                    print(f"[state] {EVENTS_JSON}: top-level isn't a list, skipping", file=sys.stderr)
+            except Exception as e:
+                print(f"[state] load {EVENTS_JSON} failed: {e}", file=sys.stderr)
 
 
 # ── Activity log ─────────────────────────────────────────────────────
@@ -3996,6 +4277,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"experiences": _list_experiences()})
             return
 
+        if path == "/api/events":
+            # v0.2.15: list events, newest first. Permission-gated: events
+            # viewing is admin+manager only because it reveals pending
+            # takeovers (the window-display pop-up on the 14th) that a
+            # regular user shouldn't be privy to.
+            if self._require_perm("events.view") is None:
+                return
+            with _STATE_LOCK:
+                items = [_public_event(e) for e in _events]
+            items.sort(key=lambda e: e.get("createdAt", ""), reverse=True)
+            self._send_json({"events": items})
+            return
+
         if path == "/api/library/info":
             if self._require_perm("library.sync") is None:
                 return
@@ -4716,6 +5010,158 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"ok": True, "store": store})
             return
 
+        # v0.2.15: create an event. Admin-scoped (events.edit); starts in
+        # state="draft" and does nothing to the fleet until POST
+        # /api/events/<id>/start fires. targetMode defaults to "stores"
+        # with an empty list — the operator fills in details via PATCH
+        # before activating. Deliberately permissive on create to support
+        # multi-step wizards in the CMS; the real validation happens at
+        # start-time (empty playlist / empty targets refused there).
+        if path == "/api/events":
+            if self._require_perm("events.edit") is None:
+                return
+            patch, err = _validate_event_payload(body, require_name=True)
+            if err:
+                self._send_json({"error": "invalid", "detail": err}, status=400); return
+            patch.setdefault("targetMode", "stores")
+            patch.setdefault("stores", [])
+            patch.setdefault("screens", [])
+            patch.setdefault("playlist", [])
+            patch.setdefault("overrides", {})
+            patch.setdefault("startAt", None)
+            patch.setdefault("endAt", None)
+            base_slug = _slug(patch["name"]) or "event"
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                existing_ids = {e.get("id") for e in _events}
+                ev_id = base_slug
+                suffix = 2
+                while ev_id in existing_ids:
+                    ev_id = f"{base_slug}-{suffix}"
+                    suffix += 1
+                now_iso = _now_utc().isoformat()
+                record = {
+                    "id":           ev_id,
+                    "name":         patch["name"],
+                    "startAt":      patch["startAt"],
+                    "endAt":        patch["endAt"],
+                    "targetMode":   patch["targetMode"],
+                    "stores":       patch["stores"],
+                    "screens":      patch["screens"],
+                    "playlist":     patch["playlist"],
+                    "overrides":    patch["overrides"],
+                    "state":        "draft",
+                    "snapshots":    {},
+                    "createdBy":    actor.get("email") or actor.get("display_name"),
+                    "createdAt":    now_iso,
+                    "updatedAt":    now_iso,
+                    "startedAt":    None,
+                    "endedAt":      None,
+                }
+                _events.append(record)
+                _save_events()
+            _log_activity(
+                kind="event",
+                text=f"Created event '{record['name']}'",
+                icon="plus",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(record)})
+            return
+
+        # v0.2.15: start an event. Takes a snapshot of every targeted
+        # screen's state, overrides each with the event's playlist +
+        # settings, flips the event to state="active". Operator-friendly
+        # permission (events.activate) so a store manager can trigger a
+        # pre-staged event without having edit rights on the record.
+        m_ev_start = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)/start$", path)
+        if m_ev_start:
+            if self._require_perm("events.activate") is None:
+                return
+            ev_id = m_ev_start.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") == "active":
+                    self._send_json({"error": "already_active"}, status=409); return
+                if not ev.get("playlist"):
+                    self._send_json({"error": "empty_playlist",
+                                     "detail": "An event needs at least one playlist item"},
+                                    status=400); return
+                targets = _target_screen_ids_for_event(ev)
+                if not targets:
+                    self._send_json({"error": "no_targets",
+                                     "detail": "No screens match this event's target"},
+                                    status=400); return
+                # Reject if any target screen is already in another live
+                # event — events can't nest. Operator gets a readable
+                # error naming the conflict so they can resolve it.
+                for other in _events:
+                    if other.get("id") == ev_id or other.get("state") != "active":
+                        continue
+                    other_targets = set(_target_screen_ids_for_event(other))
+                    overlap = other_targets.intersection(targets)
+                    if overlap:
+                        self._send_json({
+                            "error": "target_conflict",
+                            "detail": f"{len(overlap)} screen(s) already in event '{other.get('name') or other.get('id')}'",
+                            "conflictingEventId": other.get("id"),
+                        }, status=409); return
+                # Snapshot + apply override, per target.
+                for device_id in targets:
+                    _snapshot_screen_for_event(ev, device_id)
+                    _apply_event_override_to_screen(ev, device_id)
+                ev["state"] = "active"
+                ev["startedAt"] = _now_utc().isoformat()
+                ev["updatedAt"] = ev["startedAt"]
+                _save_events()
+                _save_per_screen_soon()
+            _log_activity(
+                kind="event",
+                text=f"Started event '{ev['name']}' on {len(targets)} screen(s)",
+                icon="check",
+                tone="ok",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(ev)})
+            return
+
+        # v0.2.15: stop an event. Restores every targeted screen's
+        # pre-event state from the snapshots stored on the event
+        # record, flips the event to state="ended". Idempotent on
+        # already-ended events (no-op + 409 so the operator knows).
+        m_ev_stop = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)/stop$", path)
+        if m_ev_stop:
+            if self._require_perm("events.activate") is None:
+                return
+            ev_id = m_ev_stop.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") != "active":
+                    self._send_json({"error": "not_active"}, status=409); return
+                snaps = dict(ev.get("snapshots") or {})
+                for device_id in snaps.keys():
+                    _restore_screen_from_event(ev, device_id)
+                ev["state"] = "ended"
+                ev["endedAt"] = _now_utc().isoformat()
+                ev["updatedAt"] = ev["endedAt"]
+                ev["snapshots"] = {}
+                _save_events()
+                _save_per_screen_soon()
+            _log_activity(
+                kind="event",
+                text=f"Ended event '{ev['name']}' — {len(snaps)} screen(s) restored",
+                icon="check",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(ev)})
+            return
+
         # ── Splash mapping update ────────────────────────────────
         # POST /api/splashes/mapping  { city: "NYC", brand: "tmrw"|"smartech"|null }
         if path == "/api/splashes/mapping":
@@ -5264,6 +5710,60 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         body = self._read_json()
 
+        # v0.2.15: PATCH /api/events/<id> — partial update. Only fields
+        # in the body are touched. `state` isn't editable here — use
+        # /start and /stop. If the event is currently ACTIVE, we accept
+        # most edits (operator may want to swap in new content mid-event)
+        # but refuse structural ones that would break the restore guarantee.
+        m_ev = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)$", path)
+        if m_ev:
+            if self._require_perm("events.edit") is None:
+                return
+            ev_id = m_ev.group(1)
+            patch, err = _validate_event_payload(body, require_name=False)
+            if err:
+                self._send_json({"error": "invalid", "detail": err}, status=400); return
+            if not patch:
+                self._send_json({"error": "nothing_to_update"}, status=400); return
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") == "active":
+                    # While live, targetMode / stores / screens are fixed
+                    # — those drive which screens we've already snapshotted,
+                    # and changing them mid-event would orphan snapshots
+                    # (or miss restoring screens that no longer match the
+                    # new target). Operator must stop → edit → start.
+                    forbidden = {k for k in ("targetMode", "stores", "screens") if k in patch}
+                    if forbidden:
+                        self._send_json({
+                            "error": "forbidden_while_active",
+                            "detail": f"Cannot change {sorted(forbidden)} while event is active. Stop it first.",
+                        }, status=409); return
+                    # Playlist / overrides CAN change — push the new
+                    # values onto every targeted screen so the fleet
+                    # picks them up on the next poll.
+                    ev.update(patch)
+                    ev["updatedAt"] = _now_utc().isoformat()
+                    if "playlist" in patch or "overrides" in patch:
+                        for device_id in list((ev.get("snapshots") or {}).keys()):
+                            _apply_event_override_to_screen(ev, device_id)
+                        _save_per_screen_soon()
+                else:
+                    ev.update(patch)
+                    ev["updatedAt"] = _now_utc().isoformat()
+                _save_events()
+            _log_activity(
+                kind="event",
+                text=f"Updated event '{ev['name']}'",
+                icon="check",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(ev)})
+            return
+
         # v0.1.58: PATCH /api/integrations/<name> { value: "<key>" }.
         # Owner-only — checked here, not via PERMISSIONS, because it's
         # a deliberate single-role gate. Empty string clears the secret.
@@ -5411,6 +5911,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _serve_api_delete(self) -> None:
         path = self.path.split("?", 1)[0]
+        # v0.2.15: DELETE /api/events/<id>. Refuses while active — the
+        # operator must /stop first (which restores screens) so a
+        # delete can never silently leave screens in override state.
+        ev_m = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)$", path)
+        if ev_m:
+            if self._require_perm("events.edit") is None:
+                return
+            ev_id = ev_m.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") == "active":
+                    self._send_json({
+                        "error": "active",
+                        "detail": "Stop the event before deleting it so overridden screens are restored.",
+                    }, status=409); return
+                _events.remove(ev)
+                _save_events()
+            _log_activity(
+                kind="event",
+                text=f"Deleted event '{ev.get('name') or ev_id}'",
+                icon="offline",
+                tone="warn",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"ok": True, "id": ev_id})
+            return
+
         # v0.1.96: DELETE /api/experiences/<id> removes an UPLOADED experience.
         # Vendored interactive/*.html aren't in _experiences, so this 404s for
         # them — they're part of the repo, not something the CMS can delete.
