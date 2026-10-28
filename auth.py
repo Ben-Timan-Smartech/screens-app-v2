@@ -117,6 +117,16 @@ PERMISSIONS: dict[str, set[str]] = {
     "schedules.view":  {"owner", "super_admin", "admin", "manager", "user", "viewer"},
     "schedules.edit":  {"owner", "super_admin", "admin", "manager", "user"},
 
+    # v0.2.15: events mode — a temporary playlist TAKEOVER on targeted screens
+    # with a perfect restore when the event ends. Blast radius is bigger than
+    # a campaign (replaces rather than appends, plus mutates per-screen
+    # settings), so view+edit are tighter than their campaign siblings would
+    # be. Start/stop is its own permission so an on-floor manager can activate
+    # a pre-staged event without being allowed to re-wire its targets.
+    "events.view":     {"owner", "super_admin", "admin", "manager"},
+    "events.edit":     {"owner", "super_admin", "admin"},
+    "events.activate": {"owner", "super_admin", "admin", "manager"},
+
     "settings.view":   {"owner", "super_admin", "admin"},
     "settings.edit":   {"owner", "super_admin"},
 
