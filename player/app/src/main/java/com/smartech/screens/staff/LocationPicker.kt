@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,7 +41,7 @@ internal val LpMuted    = Color(0xFF6E6B62)
  * Cascading location form — region → city → store → concept → floor → table → screen code.
  * Used by both the on-tablet first-run onboarding and the super-admin Device admin.
  *
- * Required fields (region, city, store, concept, screen code) are marked with a red dot.
+ * Required fields (store, concept where it applies, screen code) are marked with a red dot.
  * Floor and Table are optional. Each value persists immediately via the supplied callbacks.
  */
 /**
@@ -53,6 +54,8 @@ internal val LpMuted    = Color(0xFF6E6B62)
  *   • Concept dropdown only renders when the city has multiple in-store
  *     concepts (NYC, LDN). For BER and ROM the store IS the concept, so
  *     showing it would be noise.
+ *   • v0.2.15: offices (added in the CMS) never show Concept or Floor.
+ *     Retail stores are listed first, then offices, marked "· Office".
  *   • Floor / Table / Screen Code unchanged.
  */
 @Composable
@@ -64,23 +67,27 @@ fun LocationPicker(
     onScreenCode: (String) -> Unit,
     showRequiredMarkers: Boolean = false,
 ) {
-    val store = remember(storeId) { LocationTaxonomy.storeById(storeId) }
-    val showConcept = city != null && city in LocationTaxonomy.MULTI_CONCEPT_CITIES
+    // Collected (not read once) so a location added in the CMS mid-setup
+    // appears in the list and an office drops its Concept row straight away.
+    val stores by LocationTaxonomy.storesFlow.collectAsState()
+    val store = stores.firstOrNull { it.id == storeId }
+    val showConcept = LocationTaxonomy.conceptApplies(city, storeId)
     // Floor only applies to NYC right now. LDN and the EU stores are
     // single-floor so the question would just be noise. Table is always
     // hidden for now (TBD when we have real table layouts).
-    val showFloor = city == "NYC"
+    val showFloor = LocationTaxonomy.floorApplies(city, storeId)
 
     // Store is the single authority for region + city. The call site (onboarding
     // / admin) is expected to atomically write all three keys via
     // DeviceStore.setLocStoreCascade so we don't trip the cascade-clear in the
     // individual setters. This callback just hands the chosen storeId up.
     LpDropdownRow(
-        "Store",
+        "Store / office",
         storeId,
-        LocationTaxonomy.stores.map { it.id to it.name },
+        stores.sortedBy { it.isOffice }
+            .map { it.id to if (it.isOffice) "${it.name} · Office" else it.name },
         onStore,
-        currentLabel = store?.name,
+        currentLabel = store?.let { if (it.isOffice) "${it.name} · Office" else it.name },
         required = showRequiredMarkers,
     )
     LpDivider()

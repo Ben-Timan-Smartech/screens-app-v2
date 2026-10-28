@@ -392,6 +392,9 @@ CUSTOM_STORES_JSON = Path(os.environ.get(
     "SCREENS_CUSTOM_STORES_PATH",
     _state_path_default("custom_stores.json"),
 ))
+# v0.2.15: what a location is. "retail" (the default, and what every store
+# saved before this had) or "office" — offices have no in-store concept.
+_STORE_KINDS = ("retail", "office")
 # v0.1.96: index of CMS-uploaded guided experiences. One entry per uploaded
 # file: {id, name, brand, filename, sizeBytes, uploadedAt, uploadedBy}. The
 # vendored interactive/*.html are listed alongside these at runtime (see
@@ -4671,10 +4674,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         # ── Custom stores (v0.1.38) ──────────────────────────────
-        # POST /api/stores  { id, name, address, city }
+        # POST /api/stores  { id, name, address, city, kind? }
         # Adds a store to the dynamic taxonomy used by both clients.
         # Built-ins live in app/components/data.jsx + LocationTaxonomy.kt
         # and can't be edited from here — the form just appends.
+        # v0.2.15: kind "office" marks a non-retail location; the tablet
+        # skips the concept question for it at setup.
         if path == "/api/stores":
             if self._require_perm("settings.edit") is None:
                 return
@@ -4682,6 +4687,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             name = (body.get("name") or "").strip()
             address = (body.get("address") or "").strip()
             city = (body.get("city") or "").strip()
+            kind = (body.get("kind") or "retail").strip().lower()
+            if kind not in _STORE_KINDS:
+                self._send_json({"error": "bad_kind", "detail": "kind must be 'retail' or 'office'"}, status=400); return
             # Slug: only kebab-case lowercase alnum + hyphens. Anything
             # else would clash with existing built-in ids that this
             # shape expects ("smartech-selfridges", "tmrw-rinascente").
@@ -4705,12 +4713,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self._send_json({"error": "reserved_id"}, status=409); return
                 if raw_id in _custom_stores:
                     self._send_json({"error": "duplicate_id"}, status=409); return
-                store = {"id": raw_id, "name": name, "address": address, "city": city}
+                store = {"id": raw_id, "name": name, "address": address, "city": city, "kind": kind}
                 _custom_stores[raw_id] = store
                 _save_custom_stores()
             _log_activity(
                 kind="settings",
-                text=f"Added store '{name}' ({raw_id})",
+                text=f"Added {'office' if kind == 'office' else 'store'} '{name}' ({raw_id})",
                 icon="plus",
             )
             self._send_json({"ok": True, "store": store})
@@ -5336,6 +5344,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 who=actor.get("display_name"),
             )
             self._send_json({"video": updated})
+            return
+
+        # v0.2.15: PATCH /api/stores/<id> { kind?, name?, address?, city? }
+        # edits a custom store — mainly to flip one between store and
+        # office. Built-ins aren't in _custom_stores, so they 404 here.
+        m_store = re.match(r"^/api/stores/([A-Za-z0-9_-]+)$", path)
+        if m_store:
+            if self._require_perm("settings.edit") is None:
+                return
+            store_id = m_store.group(1)
+            patch = {}
+            if "kind" in body:
+                kind = str(body.get("kind") or "").strip().lower()
+                if kind not in _STORE_KINDS:
+                    self._send_json({"error": "bad_kind", "detail": "kind must be 'retail' or 'office'"}, status=400); return
+                patch["kind"] = kind
+            for key in ("name", "address", "city"):
+                if key in body:
+                    val = str(body.get(key) or "").strip()
+                    if key != "address" and not val:
+                        self._send_json({"error": f"bad_{key}"}, status=400); return
+                    patch[key] = val
+            if not patch:
+                self._send_json({"error": "empty_patch"}, status=400); return
+            with _STATE_LOCK:
+                if store_id not in _custom_stores:
+                    self._send_json({"error": "not_found"}, status=404); return
+                store = {**_custom_stores[store_id], **patch}
+                _custom_stores[store_id] = store
+                _save_custom_stores()
+            what = ", ".join(f"{k} → {v}" for k, v in patch.items())
+            _log_activity(
+                kind="settings",
+                text=f"Updated '{store.get('name') or store_id}': {what}",
+                icon="edit",
+            )
+            self._send_json({"ok": True, "store": store})
             return
 
         m = re.match(r"^/api/users/([A-Za-z0-9_-]+)$", path)

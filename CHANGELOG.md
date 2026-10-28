@@ -18,6 +18,26 @@ Rules:
 
 ---
 
+## v0.2.15
+
+- **Office locations.** In Settings → Locations, "Add location" now asks
+  whether it's a Store or an Office. When you set up a tablet at an office, it
+  doesn't ask for a concept (or a floor). Stores in New York and London still
+  ask for a concept, as before. An existing location can be switched with
+  "Make office" / "Make store".
+- **Fixed: some screens got stuck on the setup screen.** At any location
+  without a concept (Berlin, Rome, Events, Test and now offices), pressing
+  "Register screen" registered the tablet but left the setup screen showing.
+  It now goes straight to playback. Clearing a screen's concept from Device
+  admin no longer re-opens setup either.
+- **New locations reach the setup screen without a restart.** A tablet sitting
+  on the setup screen re-checks for new stores and offices every 30 seconds,
+  so one you've just added in the CMS shows up in the dropdown.
+- Screen detail's Location card hides Concept for screens at an office, and
+  the Stores list labels offices.
+- Needs the new APK on the tablet for the setup changes; the CMS side works as
+  soon as it deploys.
+
 ## v0.2.14
 
 - **Brand images now sync and play on screens, just like videos.** Drop a still

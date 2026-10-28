@@ -189,7 +189,15 @@ const slugify = (s) => (s || '')
   .replace(/^-+|-+$/g, '')
   .slice(0, 60);
 
+// v0.2.15: Store vs Office. Offices skip the concept question when a
+// tablet is set up there.
+const STORE_KIND_OPTIONS = [
+  { value: 'retail', label: 'Store' },
+  { value: 'office', label: 'Office' },
+];
+
 const AddStoreForm = ({ cities, onAdded, onCancel }) => {
+  const [kind, setKind] = React.useState('retail');
   const [name, setName] = React.useState('');
   const [id, setId] = React.useState('');
   const [idTouched, setIdTouched] = React.useState(false);
@@ -206,7 +214,7 @@ const AddStoreForm = ({ cities, onAdded, onCancel }) => {
     if (!valid || busy) return;
     setBusy(true); setErr(null);
     try {
-      const store = await addStore({ id: autoId, name: name.trim(), address: address.trim(), city });
+      const store = await addStore({ id: autoId, name: name.trim(), address: address.trim(), city, kind });
       showToast(`Added '${store.name}'`, 'ok');
       onAdded(store);
     } catch (e) {
@@ -217,16 +225,40 @@ const AddStoreForm = ({ cities, onAdded, onCancel }) => {
   };
   return (
     <div style={{ border: 'var(--border)', borderRadius: 10, padding: 16, background: 'var(--ink-9)', marginBottom: 12 }}>
-      <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 10 }}>New store</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>New location</div>
+        <div role="radiogroup" aria-label="Location type" style={{
+          display: 'inline-flex', gap: 2, padding: 2, border: 'var(--border)', borderRadius: 4,
+        }}>
+          {STORE_KIND_OPTIONS.map((o) => {
+            const on = kind === o.value;
+            return (
+              <button key={o.value} type="button" role="radio" aria-checked={on}
+                onClick={() => setKind(o.value)}
+                style={{
+                  minWidth: 64, height: 26, padding: '0 10px', borderRadius: 2,
+                  fontSize: 12, fontWeight: on ? 500 : 400, cursor: 'pointer',
+                  background: on ? 'var(--ink-8)' : 'transparent',
+                  color: on ? 'var(--ink-1)' : 'var(--ink-3)',
+                }}>{o.label}</button>
+            );
+          })}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>
+          {kind === 'office'
+            ? 'Screens here are set up without a concept.'
+            : 'Screens at a New York or London store also pick a concept.'}
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10, marginBottom: 10 }}>
         <div>
           <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 4 }}>Name</label>
-          <Input placeholder="e.g. Smartech · Battersea" value={name} onChange={(e) => setName(e.target.value)} size="sm" />
+          <Input placeholder={kind === 'office' ? 'e.g. Smartech HQ · London' : 'e.g. Smartech · Battersea'} value={name} onChange={(e) => setName(e.target.value)} size="sm" />
         </div>
         <div>
           <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 4 }}>ID <span style={{ color: 'var(--ink-4)', fontWeight: 400 }}>· kebab-case, unique</span></label>
           <Input
-            placeholder={slugify(name) || 'store-slug'}
+            placeholder={slugify(name) || (kind === 'office' ? 'office-slug' : 'store-slug')}
             value={autoId}
             onChange={(e) => { setIdTouched(true); setId(e.target.value); }}
             size="sm"
@@ -234,7 +266,7 @@ const AddStoreForm = ({ cities, onAdded, onCancel }) => {
           />
         </div>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10, marginBottom: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10, marginBottom: 10 }}>
         <div>
           <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--ink-3)', marginBottom: 4 }}>Address</label>
           <Input placeholder="Street, postcode" value={address} onChange={(e) => setAddress(e.target.value)} size="sm" />
@@ -250,11 +282,11 @@ const AddStoreForm = ({ cities, onAdded, onCancel }) => {
       </div>
       {err && <div style={{ fontSize: 11, color: 'var(--err-1, #A63824)', marginBottom: 8 }}>{err}</div>}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Button size="sm" disabled={!valid || busy} onClick={submit}>{busy ? 'Saving…' : 'Add store'}</Button>
+        <Button size="sm" disabled={!valid || busy} onClick={submit}>{busy ? 'Saving…' : (kind === 'office' ? 'Add office' : 'Add store')}</Button>
         <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
         <div style={{ flex: 1 }} />
         <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>
-          Stores propagate to tablets on next launch (or via Refresh now).
+          Shows on a tablet's setup screen within 30 seconds; running screens pick it up on next launch.
         </div>
       </div>
     </div>
@@ -274,6 +306,19 @@ const LocationsTab = () => {
     return () => window.removeEventListener('stores-refresh', bump);
   }, []);
   const [adding, setAdding] = React.useState(false);
+  const [retyping, setRetyping] = React.useState(null);
+  const toggleKind = async (s) => {
+    const next = s.kind === 'office' ? 'retail' : 'office';
+    setRetyping(s.id);
+    try {
+      await updateStore(s.id, { kind: next });
+      showToast(`'${s.name}' is now ${next === 'office' ? 'an office' : 'a store'}`, 'ok');
+    } catch (e) {
+      showToast(`Couldn't change it: ${e.message}`, 'err');
+    } finally {
+      setRetyping(null);
+    }
+  };
   const removeStore = async (id, name) => {
     if (!confirm(`Remove store '${name}'?\n\nAny screen still linked to it will fall back to its raw id until reassigned.`)) return;
     try {
@@ -306,10 +351,10 @@ const LocationsTab = () => {
 
       <div style={{ border: 'var(--border)', borderRadius: 10, background: 'var(--ink-10)', marginBottom: 12 }}>
         <div style={{ padding: '12px 16px', borderBottom: 'var(--border-faint)', display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>Stores</div>
+          <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>Stores &amp; offices</div>
           <span className="tnum" style={{ fontSize: 11, color: 'var(--ink-4)' }}>{t.stores.length}</span>
           {!adding && (
-            <Button size="sm" onClick={() => setAdding(true)}>+ Add store</Button>
+            <Button size="sm" onClick={() => setAdding(true)}>+ Add location</Button>
           )}
         </div>
         {adding && (
@@ -324,26 +369,40 @@ const LocationsTab = () => {
         {t.stores.map((s, i) => {
           const builtIn = BUILTIN_STORE_IDS.has(s.id);
           return (
-            <div key={s.id} style={{ padding: '12px 16px', borderBottom: i < t.stores.length - 1 ? 'var(--border-faint)' : 'none', display: 'flex', alignItems: 'center', gap: 12 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
+            <div key={s.id} style={{ padding: '12px 16px', borderBottom: i < t.stores.length - 1 ? 'var(--border-faint)' : 'none', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 200px', minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{s.name}</div>
                 <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>
                   <span style={{ fontFamily: 'var(--font-mono)' }}>{s.id}</span>
                   {s.address ? <> · {s.address}</> : null}
                 </div>
               </div>
+              {s.kind === 'office' && <Chip tone="info">Office</Chip>}
               <Chip tone="outline">{s.city}</Chip>
               {builtIn
                 ? <Chip tone="neutral">built-in</Chip>
                 : (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => removeStore(s.id, s.name)}
-                    title="Delete this custom store"
-                  >
-                    Remove
-                  </Button>
+                  <>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={retyping === s.id}
+                      onClick={() => toggleKind(s)}
+                      title={s.kind === 'office'
+                        ? 'Treat as a store: screens here can pick a concept'
+                        : 'Treat as an office: screens here skip the concept'}
+                    >
+                      {retyping === s.id ? 'Saving…' : (s.kind === 'office' ? 'Make store' : 'Make office')}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => removeStore(s.id, s.name)}
+                      title="Delete this custom location"
+                    >
+                      Remove
+                    </Button>
+                  </>
                 )
               }
             </div>
