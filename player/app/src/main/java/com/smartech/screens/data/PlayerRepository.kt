@@ -556,6 +556,8 @@ class PlayerRepository(
         val url: String? = null,
         val host: String? = null,
         val reloadEveryMin: Int = WebPageConfig.DEFAULT_RELOAD_MIN,
+        /** v0.2.17. An older server omits it → the 1920 default. */
+        val pageWidth: Int = WebPageConfig.DEFAULT_PAGE_WIDTH,
     )
 
     /** v0.1.35: a sibling in this screen's sync group. The Device
@@ -694,7 +696,7 @@ class PlayerRepository(
 
     private fun applyContentMode(mode: String, web: LiveWeb?) {
         val m = if (mode == "web") "web" else "playlist"
-        val sig = "$m|${web?.url?.hashCode()}|${web?.reloadEveryMin}|${web == null}"
+        val sig = "$m|${web?.url?.hashCode()}|${web?.reloadEveryMin}|${web?.pageWidth}|${web == null}"
         if (sig == _contentModeApplied) return
         _contentModeApplied = sig
         liveScope.launch {
@@ -702,6 +704,7 @@ class PlayerRepository(
                 mode = m,
                 url = web?.url,
                 reloadEveryMin = web?.reloadEveryMin ?: WebPageConfig.DEFAULT_RELOAD_MIN,
+                pageWidth = web?.pageWidth ?: WebPageConfig.DEFAULT_PAGE_WIDTH,
                 // No web block at all = the server holds no URL for us.
                 // A block with url=null = it couldn't verify our secret;
                 // keep what we have rather than blanking the board.
@@ -724,6 +727,8 @@ class PlayerRepository(
         val lastLoadAtMs: Long? = null,
         val lastError: String? = null,
         val lastErrorAtMs: Long? = null,
+        /** v0.2.17: what the page sees after page-width scaling, "1920x1080". */
+        val viewport: String? = null,
     )
     private val _webHealth = MutableStateFlow(WebHealth())
     val webHealthFlow: StateFlow<WebHealth> = _webHealth.asStateFlow()
@@ -738,6 +743,10 @@ class PlayerRepository(
 
     fun reportWebLoaded(host: String) {
         _webHealth.value = _webHealth.value.copy(loadedHost = host, lastLoadAtMs = System.currentTimeMillis())
+    }
+
+    fun reportWebViewport(viewport: String) {
+        if (_webHealth.value.viewport != viewport) _webHealth.value = _webHealth.value.copy(viewport = viewport)
     }
 
     /** [message] must not contain the page URL (it carries a token) — the
@@ -2298,7 +2307,8 @@ class PlayerRepository(
               "webLoadedHost": ${qOrNull(web.loadedHost)},
               "webLastLoadAt": ${web.lastLoadAtMs?.let { it / 1000.0 } ?: "null"},
               "webLastError": ${qOrNull(web.lastError)},
-              "webLastErrorAt": ${web.lastErrorAtMs?.let { it / 1000.0 } ?: "null"}
+              "webLastErrorAt": ${web.lastErrorAtMs?.let { it / 1000.0 } ?: "null"},
+              "webViewport": ${qOrNull(web.viewport)}
             }
         """.trimIndent()
         runCatching {

@@ -22,13 +22,18 @@ data class WebPageConfig(
     val url: String,
     /** Scheduled full reload interval; 0 = never (watchdog reloads still happen). */
     val reloadEveryMin: Int,
+    /** v0.2.17: CSS width the page is laid out at, then scaled to fit the
+     *  screen. 0 = no override (the box's own density-adjusted width). */
+    val pageWidth: Int = DEFAULT_PAGE_WIDTH,
 ) {
     val host: String get() = runCatching { android.net.Uri.parse(url).host }.getOrNull() ?: "?"
 
-    override fun toString(): String = "WebPageConfig(host=$host, reloadEveryMin=$reloadEveryMin)"
+    override fun toString(): String =
+        "WebPageConfig(host=$host, reloadEveryMin=$reloadEveryMin, pageWidth=$pageWidth)"
 
     companion object {
         const val DEFAULT_RELOAD_MIN = 240
+        const val DEFAULT_PAGE_WIDTH = 1920
     }
 }
 
@@ -63,6 +68,7 @@ class DeviceStore(private val context: Context) {
         val ContentMode = stringPreferencesKey("content_mode")      // "playlist" | "web"
         val WebUrl = stringPreferencesKey("web_url")
         val WebReloadMin = intPreferencesKey("web_reload_min")
+        val WebPageWidth = intPreferencesKey("web_page_width")      // v0.2.17
 
         // Structured location — set via the cascading dropdowns in Device admin.
         val LocRegion     = stringPreferencesKey("loc_region")       // "USA" | "UK" | "EU"
@@ -116,6 +122,7 @@ class DeviceStore(private val context: Context) {
         else WebPageConfig(
             url = url,
             reloadEveryMin = prefs[Keys.WebReloadMin] ?: WebPageConfig.DEFAULT_RELOAD_MIN,
+            pageWidth = prefs[Keys.WebPageWidth] ?: WebPageConfig.DEFAULT_PAGE_WIDTH,
         )
     }
 
@@ -174,6 +181,7 @@ class DeviceStore(private val context: Context) {
         mode: String,
         url: String?,
         reloadEveryMin: Int,
+        pageWidth: Int,
         clearUrl: Boolean = false,
     ) {
         context.dataStore.edit { prefs ->
@@ -181,6 +189,7 @@ class DeviceStore(private val context: Context) {
             if (clearUrl) prefs.remove(Keys.WebUrl)
             else if (!url.isNullOrBlank()) prefs[Keys.WebUrl] = url
             prefs[Keys.WebReloadMin] = reloadEveryMin
+            prefs[Keys.WebPageWidth] = pageWidth
         }
     }
 

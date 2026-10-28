@@ -18,6 +18,23 @@ Rules:
 
 ---
 
+## v0.2.17
+
+- **Web pages now fit the screen.** A page built for a 1920 × 1080 TV, like
+  the London office board, came out too big on some boxes: Android showed it
+  as if the screen were only about 960 pixels wide, so the right and bottom
+  edges were cut off. The screen now lays the page out at 1920 pixels wide
+  and scales it to fit. A new **Page width** setting in the screen's
+  **Content** card changes that width if a page was built for a different
+  size.
+- **The CMS shows the size the page sees**, for example "1920 × 1080", under
+  the screen's on-screen status, so you can check the layout without
+  walking over to the screen.
+- **Android's navigation buttons stay hidden.** If another window took over
+  the screen briefly, such as an install prompt, the back/home buttons
+  could stay on top of the content afterwards. They now hide again as soon
+  as the player is back.
+
 ## v0.2.16
 
 - **Screens can now show a web page instead of a playlist.** In a screen's new
