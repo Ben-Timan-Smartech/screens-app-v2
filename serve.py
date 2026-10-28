@@ -5272,43 +5272,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         body = self._read_json()
 
-        # v0.2.15: PATCH /api/stores/<id> { kind?, name?, address?, city? }
-        # edits a custom store — mainly to flip one between store and
-        # office. Built-ins aren't in _custom_stores, so they 404 here.
-        m_store = re.match(r"^/api/stores/([A-Za-z0-9_-]+)$", path)
-        if m_store:
-            if self._require_perm("settings.edit") is None:
-                return
-            store_id = m_store.group(1)
-            patch = {}
-            if "kind" in body:
-                kind = str(body.get("kind") or "").strip().lower()
-                if kind not in _STORE_KINDS:
-                    self._send_json({"error": "bad_kind", "detail": "kind must be 'retail' or 'office'"}, status=400); return
-                patch["kind"] = kind
-            for key in ("name", "address", "city"):
-                if key in body:
-                    val = str(body.get(key) or "").strip()
-                    if key != "address" and not val:
-                        self._send_json({"error": f"bad_{key}"}, status=400); return
-                    patch[key] = val
-            if not patch:
-                self._send_json({"error": "empty_patch"}, status=400); return
-            with _STATE_LOCK:
-                if store_id not in _custom_stores:
-                    self._send_json({"error": "not_found"}, status=404); return
-                store = {**_custom_stores[store_id], **patch}
-                _custom_stores[store_id] = store
-                _save_custom_stores()
-            what = ", ".join(f"{k} → {v}" for k, v in patch.items())
-            _log_activity(
-                kind="settings",
-                text=f"Updated '{store.get('name') or store_id}': {what}",
-                icon="edit",
-            )
-            self._send_json({"ok": True, "store": store})
-            return
-
         # v0.1.58: PATCH /api/integrations/<name> { value: "<key>" }.
         # Owner-only — checked here, not via PERMISSIONS, because it's
         # a deliberate single-role gate. Empty string clears the secret.
@@ -5381,6 +5344,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 who=actor.get("display_name"),
             )
             self._send_json({"video": updated})
+            return
+
+        # v0.2.15: PATCH /api/stores/<id> { kind?, name?, address?, city? }
+        # edits a custom store — mainly to flip one between store and
+        # office. Built-ins aren't in _custom_stores, so they 404 here.
+        m_store = re.match(r"^/api/stores/([A-Za-z0-9_-]+)$", path)
+        if m_store:
+            if self._require_perm("settings.edit") is None:
+                return
+            store_id = m_store.group(1)
+            patch = {}
+            if "kind" in body:
+                kind = str(body.get("kind") or "").strip().lower()
+                if kind not in _STORE_KINDS:
+                    self._send_json({"error": "bad_kind", "detail": "kind must be 'retail' or 'office'"}, status=400); return
+                patch["kind"] = kind
+            for key in ("name", "address", "city"):
+                if key in body:
+                    val = str(body.get(key) or "").strip()
+                    if key != "address" and not val:
+                        self._send_json({"error": f"bad_{key}"}, status=400); return
+                    patch[key] = val
+            if not patch:
+                self._send_json({"error": "empty_patch"}, status=400); return
+            with _STATE_LOCK:
+                if store_id not in _custom_stores:
+                    self._send_json({"error": "not_found"}, status=404); return
+                store = {**_custom_stores[store_id], **patch}
+                _custom_stores[store_id] = store
+                _save_custom_stores()
+            what = ", ".join(f"{k} → {v}" for k, v in patch.items())
+            _log_activity(
+                kind="settings",
+                text=f"Updated '{store.get('name') or store_id}': {what}",
+                icon="edit",
+            )
+            self._send_json({"ok": True, "store": store})
             return
 
         m = re.match(r"^/api/users/([A-Za-z0-9_-]+)$", path)
