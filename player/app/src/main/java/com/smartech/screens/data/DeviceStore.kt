@@ -15,6 +15,24 @@ import java.util.UUID
 private val Context.dataStore by preferencesDataStore(name = "screens_device")
 
 /**
+ * v0.2.16: web page mode — one live URL shown full screen instead of the
+ * playlist. [url] carries a display token: keep it out of logs and toString.
+ */
+data class WebPageConfig(
+    val url: String,
+    /** Scheduled full reload interval; 0 = never (watchdog reloads still happen). */
+    val reloadEveryMin: Int,
+) {
+    val host: String get() = runCatching { android.net.Uri.parse(url).host }.getOrNull() ?: "?"
+
+    override fun toString(): String = "WebPageConfig(host=$host, reloadEveryMin=$reloadEveryMin)"
+
+    companion object {
+        const val DEFAULT_RELOAD_MIN = 240
+    }
+}
+
+/**
  * Persistent device-local state. Small — token, deviceId, last-applied settings,
  * playlist ETag. Anything bigger (videos, playlist JSON) lives on disk as files.
  */
@@ -37,6 +55,14 @@ class DeviceStore(private val context: Context) {
         // output. The server value (set from the CMS) is authoritative and
         // refreshes this each poll.
         val Rotation = intPreferencesKey("rotation")
+        // v0.2.16: web page mode. Persisted for the same reason as Rotation:
+        // a reboot (or a launch with the network down) must come straight
+        // back to the page, not flash the playlist until the first poll.
+        // The URL carries a display token — it lives here and in the
+        // WebView only; never logged.
+        val ContentMode = stringPreferencesKey("content_mode")      // "playlist" | "web"
+        val WebUrl = stringPreferencesKey("web_url")
+        val WebReloadMin = intPreferencesKey("web_reload_min")
 
         // Structured location — set via the cascading dropdowns in Device admin.
         val LocRegion     = stringPreferencesKey("loc_region")       // "USA" | "UK" | "EU"
@@ -81,6 +107,17 @@ class DeviceStore(private val context: Context) {
     val orientationOverride: Flow<String?> = context.dataStore.data.map { it[Keys.OrientationOverride] }
     /** v0.2.8: display rotation in degrees (0/90/180/270). 0 = none. */
     val rotation: Flow<Int> = context.dataStore.data.map { it[Keys.Rotation] ?: 0 }
+
+    /** v0.2.16: the persisted web page config, or null when this screen is
+     *  in playlist mode (or web mode with no URL yet). */
+    val webPage: Flow<WebPageConfig?> = context.dataStore.data.map { prefs ->
+        val url = prefs[Keys.WebUrl]
+        if (prefs[Keys.ContentMode] != "web" || url.isNullOrBlank()) null
+        else WebPageConfig(
+            url = url,
+            reloadEveryMin = prefs[Keys.WebReloadMin] ?: WebPageConfig.DEFAULT_RELOAD_MIN,
+        )
+    }
 
     // Structured location flows
     val locRegion: Flow<String?>     = context.dataStore.data.map { it[Keys.LocRegion] }
@@ -128,6 +165,23 @@ class DeviceStore(private val context: Context) {
     suspend fun setRotation(degrees: Int) {
         val norm = if (degrees in intArrayOf(90, 180, 270)) degrees else 0
         context.dataStore.edit { it[Keys.Rotation] = norm }
+    }
+
+    /** v0.2.16: persist the content mode + web settings in one edit. A null
+     *  [url] keeps whatever URL is already stored (the server omits it when
+     *  it can't verify the device secret); [clearUrl] removes it. */
+    suspend fun setContentMode(
+        mode: String,
+        url: String?,
+        reloadEveryMin: Int,
+        clearUrl: Boolean = false,
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.ContentMode] = if (mode == "web") "web" else "playlist"
+            if (clearUrl) prefs.remove(Keys.WebUrl)
+            else if (!url.isNullOrBlank()) prefs[Keys.WebUrl] = url
+            prefs[Keys.WebReloadMin] = reloadEveryMin
+        }
     }
 
     /** Persist the server-issued device secret. Blank/null clears it. */

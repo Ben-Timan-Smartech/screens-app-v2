@@ -8,10 +8,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
@@ -539,6 +541,21 @@ class PlayerRepository(
          *  read-only decoration and group members share a position, so their
          *  bars agree rather than fight. */
         val progressBar: Boolean = false,
+        /** v0.2.16: "playlist" (default — and what an older server implies by
+         *  omitting it) or "web". Web = show [web]'s URL full screen instead
+         *  of the playlist. Modern flavor only. */
+        val contentMode: String = "playlist",
+        val web: LiveWeb? = null,
+    )
+
+    /** v0.2.16: web page mode settings. [url] carries a display token and
+     *  is only sent when this poll presented the device secret; null means
+     *  "keep the URL you already have". */
+    @Serializable
+    private data class LiveWeb(
+        val url: String? = null,
+        val host: String? = null,
+        val reloadEveryMin: Int = WebPageConfig.DEFAULT_RELOAD_MIN,
     )
 
     /** v0.1.35: a sibling in this screen's sync group. The Device
@@ -660,6 +677,82 @@ class PlayerRepository(
      *  neither. */
     private val _progressBar = MutableStateFlow(false)
     val progressBarFlow: StateFlow<Boolean> = _progressBar.asStateFlow()
+
+    // ── v0.2.16: web page mode ───────────────────────────────────────────
+    // One live URL full screen instead of the playlist (first use: the London
+    // office board). The config is persisted in DeviceStore and rendered from
+    // there, so a reboot comes straight back to the page even offline. Modern
+    // build only: on legacy the flow is always null and the playlist plays.
+
+    /** What MainActivity renders: non-null = show this page, null = playlist. */
+    val webPageFlow: Flow<WebPageConfig?> =
+        if (WEB_MODE_SUPPORTED) store.webPage else flowOf(null)
+
+    /** Signature of the last content mode we persisted, so the 3s poll only
+     *  writes DataStore on a real change (same idea as _rotationApplied). */
+    private var _contentModeApplied: String? = null
+
+    private fun applyContentMode(mode: String, web: LiveWeb?) {
+        val m = if (mode == "web") "web" else "playlist"
+        val sig = "$m|${web?.url?.hashCode()}|${web?.reloadEveryMin}|${web == null}"
+        if (sig == _contentModeApplied) return
+        _contentModeApplied = sig
+        liveScope.launch {
+            store.setContentMode(
+                mode = m,
+                url = web?.url,
+                reloadEveryMin = web?.reloadEveryMin ?: WebPageConfig.DEFAULT_RELOAD_MIN,
+                // No web block at all = the server holds no URL for us.
+                // A block with url=null = it couldn't verify our secret;
+                // keep what we have rather than blanking the board.
+                clearUrl = web == null,
+            )
+        }
+        // Host only — the URL carries a display token.
+        LogBuffer.i(TAG, "Content mode → $m${web?.host?.let { " ($it)" } ?: ""}")
+        if (m == "web" && web?.url == null) {
+            LogBuffer.w(TAG, "Web page mode without a URL in the state response — using the stored one, if any")
+        }
+    }
+
+    /** Health of the web page, written by WebPageScreen, read by the heartbeat. */
+    data class WebHealth(
+        val showing: Boolean = false,
+        /** "loading" | "showing" | "offline" | "reconnecting"; null when not showing. */
+        val status: String? = null,
+        val loadedHost: String? = null,
+        val lastLoadAtMs: Long? = null,
+        val lastError: String? = null,
+        val lastErrorAtMs: Long? = null,
+    )
+    private val _webHealth = MutableStateFlow(WebHealth())
+    val webHealthFlow: StateFlow<WebHealth> = _webHealth.asStateFlow()
+
+    fun reportWebShowing(showing: Boolean) {
+        _webHealth.value = _webHealth.value.copy(showing = showing)
+    }
+
+    fun reportWebStatus(status: String?) {
+        _webHealth.value = _webHealth.value.copy(status = status)
+    }
+
+    fun reportWebLoaded(host: String) {
+        _webHealth.value = _webHealth.value.copy(loadedHost = host, lastLoadAtMs = System.currentTimeMillis())
+    }
+
+    /** [message] must not contain the page URL (it carries a token) — the
+     *  caller passes error codes/descriptions only. */
+    fun reportWebError(message: String) {
+        _webHealth.value = _webHealth.value.copy(lastError = message, lastErrorAtMs = System.currentTimeMillis())
+    }
+
+    /** Bumped by the CMS "Refresh" command (reload the page) and "Restart
+     *  player" (tear the WebView down and build a fresh one). WebPageScreen
+     *  watches these; they're inert in playlist mode. */
+    private val _webReloadRequests = MutableStateFlow(0)
+    val webReloadRequests: StateFlow<Int> = _webReloadRequests.asStateFlow()
+    private val _webRebuildRequests = MutableStateFlow(0)
+    val webRebuildRequests: StateFlow<Int> = _webRebuildRequests.asStateFlow()
 
     /** Poll cadence the server has assigned to this screen. The polling
      *  loop reads this on every tick. SLOW also skips the per-location
@@ -936,7 +1029,12 @@ class PlayerRepository(
         // caller's context. (Mirrors pushPlaylistToServer.)
         val resp = runCatching {
             kotlinx.coroutines.withContext(Dispatchers.IO) {
-                val req = Request.Builder().url("$base/api/state?screenId=$deviceId").build()
+                // v0.2.16: the modern build presents its device secret on the
+                // state poll — the server only includes a web page mode URL
+                // (which carries a display token) for the screen itself.
+                val req = Request.Builder().url("$base/api/state?screenId=$deviceId")
+                    .apply { if (WEB_MODE_SUPPORTED) withDeviceSecret() }
+                    .build()
                 t1Local = System.currentTimeMillis()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) throw IllegalStateException("HTTP ${r.code}")
@@ -1020,6 +1118,10 @@ class PlayerRepository(
             _experiencePromptPos.value = pos
             LogBuffer.i(TAG, "Experience prompt position → $pos")
         }
+
+        // v0.2.16: content mode (playlist | web page). Modern build only —
+        // the legacy build ignores it and keeps playing its playlist.
+        if (WEB_MODE_SUPPORTED) applyContentMode(state.contentMode, state.web)
 
         // v0.1.98: customer-facing tap-to-skip control. The server already
         // forces this false for a screen in a sync group, so no extra check
@@ -1888,9 +1990,11 @@ class PlayerRepository(
 
     /**
      * Attach the server-issued device secret as `X-Device-Secret` to a
-     * self-edit request when we have one. Only the tablet's own no-login
+     * self-edit request when we have one. The tablet's own no-login
      * self-edit POSTs (playlist/audio/poll-mode/sync-group/display-mode/
-     * mix-splash) should carry this — NOT heartbeat/register/state. If the
+     * mix-splash) carry this, and since v0.2.16 so does the modern build's
+     * /api/state poll (the server gates the web page mode URL on it) —
+     * NOT heartbeat/register. If the
      * secret is null/blank the header is omitted (the server currently
      * grace-allows a missing header). Reads the stored secret via a suspend
      * flow, so call from inside the existing IO coroutine of each sender.
@@ -2092,6 +2196,8 @@ class PlayerRepository(
                 // missed gets re-applied on the very next tick.
                 LogBuffer.i(TAG, "Refresh command — kicking next poll")
                 refreshNow()
+                // v0.2.16: in web page mode "Refresh" also reloads the page.
+                if (_webHealth.value.showing) _webReloadRequests.value += 1
             }
             "restartPlayer" -> {
                 // CMS "Restart player" — the light recovery for a screen
@@ -2100,6 +2206,8 @@ class PlayerRepository(
                 // stuck, the watchdog escalates to a full reboot.
                 LogBuffer.i(TAG, "Restart-player command — re-applying the player")
                 restartPlayer()
+                // v0.2.16: in web page mode, rebuild the WebView from scratch.
+                if (_webHealth.value.showing) _webRebuildRequests.value += 1
             }
             "sendLogs" -> {
                 // CMS "Request logs" — upload the full current log buffer
@@ -2155,6 +2263,10 @@ class PlayerRepository(
             """{"id":${m.id},"w":${m.width},"h":${m.height},"hz":${m.refreshHz}}"""
         }
         val activeModeId = com.smartech.screens.util.DisplayModes.active(appContext)
+        // v0.2.16: OS + WebView versions (reported by every screen — it's how
+        // we check a box can run web page mode) and web page health.
+        val webView = com.smartech.screens.util.WebViewInfo.current(appContext)
+        val web = _webHealth.value
         val body = """
             {
               "deviceId": "$deviceId",
@@ -2176,7 +2288,17 @@ class PlayerRepository(
               "freeStorageBytes": ${appContext.filesDir.usableSpace},
               "cachedVideoIds": [${cachedIds}],
               "supportedModes": [${supportedModesJson}],
-              "activeDisplayMode": ${activeModeId}
+              "activeDisplayMode": ${activeModeId},
+              "androidVersion": ${q(android.os.Build.VERSION.RELEASE ?: "")},
+              "androidSdk": ${android.os.Build.VERSION.SDK_INT},
+              "webViewPackage": ${qOrNull(webView?.packageName)},
+              "webViewVersion": ${qOrNull(webView?.versionName)},
+              "playerContentMode": ${q(if (web.showing) "web" else "playlist")},
+              "webStatus": ${qOrNull(web.status)},
+              "webLoadedHost": ${qOrNull(web.loadedHost)},
+              "webLastLoadAt": ${web.lastLoadAtMs?.let { it / 1000.0 } ?: "null"},
+              "webLastError": ${qOrNull(web.lastError)},
+              "webLastErrorAt": ${web.lastErrorAtMs?.let { it / 1000.0 } ?: "null"}
             }
         """.trimIndent()
         runCatching {
@@ -2372,6 +2494,12 @@ class PlayerRepository(
     /** Cheap JSON-string quoter — avoids pulling kotlinx.serialization for trivial bodies. */
     private fun q(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
+    /** [q] for an optional, free-text value: null → JSON null, and control
+     *  characters (newlines in a WebView error description) flattened so the
+     *  hand-built heartbeat JSON stays valid. */
+    private fun qOrNull(s: String?) =
+        if (s == null) "null" else q(s.replace(Regex("[\\u0000-\\u001f]"), " "))
+
     // ── Demo mode (Cloudflare sample clips) ──────────────────────────────
 
     /**
@@ -2418,6 +2546,9 @@ class PlayerRepository(
         private const val SPLASH_BASE_BACKOFF_MS = 30_000L
         private const val SPLASH_MAX_BACKOFF_MS = 1_800_000L   // 30 min
         private const val MAX_SPLASH_ATTEMPTS = 6
+
+        /** v0.2.16: web page mode ships on the modern build only. */
+        val WEB_MODE_SUPPORTED = com.smartech.screens.BuildConfig.FLAVOR != "legacy"
     }
 }
 
