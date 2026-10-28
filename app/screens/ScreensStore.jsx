@@ -210,7 +210,7 @@ const ScreensStoreView = ({ storeId }) => {
       <PageHeader
         crumbs={[{ label: 'Screens', href: '/screens' }, store.name]}
         title={store.name}
-        subtitle={`${store.city} · ${store.country} · ${store.region}`}
+        subtitle={`${store.kind === 'office' ? 'Office · ' : ''}${store.city} · ${store.country} · ${store.region}`}
       />
       <div style={{ flex: 1, overflow: 'auto', padding: isMobile ? '14px 12px 32px' : '20px 24px 40px' }}>
         {/* Store stats strip */}
@@ -419,7 +419,7 @@ const StoresIndex = () => {
                 <StatusDot status={health === 'ok' ? 'online' : health === 'warn' ? 'warn' : 'offline'} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{store.name}</div>
-                  <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>{store.city} · {store.country} · {store.region}</div>
+                  <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1 }}>{store.kind === 'office' ? 'Office · ' : ''}{store.city} · {store.country} · {store.region}</div>
                 </div>
                 <div className="scr-mobile-hide" style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--ink-3)' }}>
                   <span className="tnum"><span style={{ color: 'var(--ok)' }}>●</span> {store.online} online</span>

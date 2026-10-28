@@ -203,10 +203,16 @@ const allStores = () => {
     .map(s => ({
       id: s.id, name: s.name || s.id,
       city: s.city || 'Global', country: '—', region: 'Global',
+      kind: s.kind || 'retail',
       total: 0, online: 0, warn: 0, offline: 0,
     }));
   return [...MOCK_STORES, ...extra];
 };
+
+// v0.2.15: offices are locations with no in-store concept. Built-ins are
+// all retail; only CMS-added locations can be offices.
+const isOfficeStore = (storeId) =>
+  !!storeId && (LOCATION_TAXONOMY.stores || []).some(s => s.id === storeId && s.kind === 'office');
 
 // v0.2.x: flag videos that can choke a screen. Two independent problems, both
 // meaning the clip needs re-encoding before it's safe on the fleet:
@@ -242,4 +248,4 @@ const heavyBadge = (v) => {
   return null;
 };
 
-Object.assign(window, { MOCK_BRANDS, MOCK_STORES, MOCK_VIDEOS, MOCK_ACTIVITY, MOCK_SCREENS_STORE, MOCK_SCHEDULES, MOCK_USERS, ROLE_LABEL, LOCATION_TAXONOMY, liveScreenToRow, allStores, heavyReasons, isHeavy, heavyBadge });
+Object.assign(window, { MOCK_BRANDS, MOCK_STORES, MOCK_VIDEOS, MOCK_ACTIVITY, MOCK_SCREENS_STORE, MOCK_SCHEDULES, MOCK_USERS, ROLE_LABEL, LOCATION_TAXONOMY, liveScreenToRow, allStores, isOfficeStore, heavyReasons, isHeavy, heavyBadge });

@@ -1713,10 +1713,15 @@ class PlayerRepository(
                             name = name,
                             address = s.address.orEmpty(),
                             cityCode = city,
+                            kind = if (s.kind.equals(LocationTaxonomy.KIND_OFFICE, ignoreCase = true))
+                                LocationTaxonomy.KIND_OFFICE else LocationTaxonomy.KIND_RETAIL,
                         )
                     }
-                    LocationTaxonomy.setCustomStores(mapped)
-                    LogBuffer.i(TAG, "Loaded ${mapped.size} custom stores from server")
+                    // Only log a change — the setup screen re-polls this.
+                    if (LocationTaxonomy.setCustomStores(mapped)) {
+                        LogBuffer.i(TAG, "Loaded ${mapped.size} custom stores from server " +
+                            "(${mapped.count { it.isOffice }} offices)")
+                    }
                 }
             }.onFailure {
                 LogBuffer.w(TAG, "refreshStoresFromServer failed: ${it.message}")
@@ -1733,7 +1738,17 @@ class PlayerRepository(
         val name: String? = null,
         val address: String? = null,
         val city: String? = null,
+        val kind: String? = null,
     )
+
+    /** v0.2.15: re-pull the store/office list on demand. The setup screen
+     *  calls this while it's open, so a location added in the CMS shows up
+     *  without restarting the tablet. */
+    suspend fun refreshStores() {
+        val base = store.liveServerUrl.first()?.takeIf { it.isNotBlank() }
+            ?: com.smartech.screens.BuildConfig.API_BASE.removeSuffix("/api")
+        refreshStoresFromServer(base.trimEnd('/'))
+    }
 
     /** v0.1.29: tablet-driven calibration trigger for the on-device
      *  command palette. Hits the server's own

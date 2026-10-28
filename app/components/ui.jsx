@@ -666,11 +666,12 @@ const setScreenLocation = async (deviceId, fields) => {
 // any tablet that fetches /api/stores at launch see it.
 // Built-in stores can't be edited from here; the server rejects
 // reserved ids with HTTP 409.
-const addStore = async ({ id, name, address, city }) => {
+// v0.2.15: kind is 'retail' (default) or 'office'.
+const addStore = async ({ id, name, address, city, kind = 'retail' }) => {
   const res = await fetch('/api/stores', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, name, address, city }),
+    body: JSON.stringify({ id, name, address, city, kind }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -682,6 +683,25 @@ const addStore = async ({ id, name, address, city }) => {
   if (out.store && !LOCATION_TAXONOMY.stores.some(s => s.id === out.store.id)) {
     LOCATION_TAXONOMY.stores.push(out.store);
   }
+  window.dispatchEvent(new CustomEvent('stores-refresh'));
+  return out.store;
+};
+
+// updateStore — v0.2.15. PATCH /api/stores/<id>, e.g. { kind: 'office' }.
+// Custom stores only; built-ins 404.
+const updateStore = async (id, patch) => {
+  const res = await fetch(`/api/stores/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `update-store failed: ${res.status}`);
+  }
+  const out = await res.json();
+  const i = LOCATION_TAXONOMY.stores.findIndex(s => s.id === id);
+  if (i >= 0 && out.store) LOCATION_TAXONOMY.stores[i] = out.store;
   window.dispatchEvent(new CustomEvent('stores-refresh'));
   return out.store;
 };
@@ -1673,7 +1693,7 @@ Object.assign(window, {
   useExperiences, uploadExperience, deleteExperience,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,
-  addStore, deleteStore, refreshStoresFromServer,
+  addStore, updateStore, deleteStore, refreshStoresFromServer,
 });
 
 // v0.1.38: pull any custom stores the server has on boot so the

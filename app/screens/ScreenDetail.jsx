@@ -1172,20 +1172,27 @@ const LocationCard = ({ location, canEdit, onSave }) => {
     return next;
   });
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(baselineRef.current);
+  // v0.2.15: offices have no concept, so the field is hidden and any old
+  // value is cleared when the screen is saved against an office.
+  const atOffice = isOfficeStore(draft.storeId);
+  // A leftover concept on an office screen counts as unsaved, so Save is
+  // offered and clears it.
+  const dirty = JSON.stringify(atOffice ? { ...draft, concept: '' } : draft)
+    !== JSON.stringify(baselineRef.current);
   const save = async () => {
     setSaving(true);
     try {
-      await onSave({ ...draft });
+      await onSave(atOffice ? { ...draft, concept: '' } : { ...draft });
       // Adopt the just-saved values as the new baseline so the form is no
       // longer "dirty" and Reset returns here — not to stale pre-save
       // values that only disappear once the poll catches up.
-      baselineRef.current = { ...draft };
+      baselineRef.current = atOffice ? { ...draft, concept: '' } : { ...draft };
+      if (atOffice) setDraft(baselineRef.current);
     }
     finally { setSaving(false); }
   };
 
-  const summary = [draft.city, draft.concept].filter(Boolean).join(' · ') || 'Not set';
+  const summary = [draft.city, atOffice ? 'Office' : draft.concept].filter(Boolean).join(' · ') || 'Not set';
   return (
     <CollapsibleCard title="Location" summary={summary}>
       <LocField label="Region">
@@ -1206,16 +1213,18 @@ const LocationCard = ({ location, canEdit, onSave }) => {
         <select style={LOC_SELECT_STYLE} value={draft.storeId} disabled={!canEdit || saving}
           onChange={e => set({ storeId: e.target.value })}>
           <option value="">—</option>
-          {stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          {stores.map(s => <option key={s.id} value={s.id}>{s.kind === 'office' ? `${s.name} · Office` : s.name}</option>)}
         </select>
       </LocField>
-      <LocField label="Concept" hint="Sets the splash. A concept with no splash uploaded falls back to the city's default.">
-        <select style={LOC_SELECT_STYLE} value={draft.concept} disabled={!canEdit || saving}
-          onChange={e => set({ concept: e.target.value })}>
-          <option value="">None (use city default)</option>
-          {tax.concepts.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-      </LocField>
+      {!atOffice && (
+        <LocField label="Concept" hint="Sets the splash. A concept with no splash uploaded falls back to the city's default.">
+          <select style={LOC_SELECT_STYLE} value={draft.concept} disabled={!canEdit || saving}
+            onChange={e => set({ concept: e.target.value })}>
+            <option value="">None (use city default)</option>
+            {tax.concepts.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </LocField>
+      )}
       <LocField label="Screen code">
         <input type="text" value={draft.screenCode} disabled={!canEdit || saving} maxLength={40}
           onChange={e => set({ screenCode: e.target.value })}
@@ -1329,7 +1338,9 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   const liveScreen = isOnline ? lastKnown : null;
   const hasHistory = !!lastKnown;
 
-  const store = MOCK_STORES.find(s => s.id === storeId) || MOCK_STORES[0];
+  // allStores() includes CMS-added stores and offices; MOCK_STORES alone
+  // made their breadcrumb fall back to the first built-in store.
+  const store = allStores().find(s => s.id === storeId) || MOCK_STORES[0];
   // Build a screen-row from the live record, or stub a placeholder when the
   // tablet has been removed from the registry entirely (URL still old).
   const screen = lastKnown
