@@ -798,7 +798,30 @@ def _restore_screen_from_event(event: dict, device_id: str) -> None:
             s[k] = snap[k]
     # Bump revision so the tablet detects the change immediately.
     s["revision"] = int(s.get("revision") or 0) + 1
-    s["pushedAt"] = int(time.time() * 1000)
+    s["pushedAt"] = time.time()
+
+
+def _cancel_preview_on(s: dict) -> bool:
+    """End a running content test on one screen's state dict: put the
+    pre-test fields back and drop the preview markers. Returns True if a
+    test was running. Doesn't touch revision; the caller bumps it.
+    Must be inside _STATE_LOCK.
+
+    Called by the scheduler at expiry, by DELETE /api/screens/<id>/preview,
+    and before any real edit to the screen. An edit made during a test
+    would otherwise be overwritten by the timed restore: test, like it,
+    push it, and 40 seconds later the screen snaps back."""
+    snap = s.pop("_previewSnapshot", None)
+    expires = s.pop("_previewExpiresAtMs", None)
+    if snap is None and expires is None:
+        return False
+    if snap:
+        for k in _EVENT_SNAPSHOT_FIELDS:
+            if k == "revision":
+                continue
+            if k in snap:
+                s[k] = snap[k]
+    return True
 
 
 def _resolve_event_items_for_screen(event: dict, device_id: str) -> list[dict]:
@@ -869,7 +892,7 @@ def _apply_event_override_to_screen(event: dict, device_id: str) -> None:
     # pre-event queue back if any.
     s["pendingCommands"] = []
     s["revision"] = int(s.get("revision") or 0) + 1
-    s["pushedAt"] = int(time.time() * 1000)
+    s["pushedAt"] = time.time()
 
 
 def _active_event_for_screen(device_id: str, store_id: str | None) -> dict | None:
@@ -1052,19 +1075,13 @@ def _event_scheduler_loop() -> None:
                         continue
                     if expires_ms > int(now_dt.timestamp() * 1000):
                         continue
-                    snap = s.pop("_previewSnapshot", None)
-                    s.pop("_previewExpiresAtMs", None)
-                    if snap:
-                        for k in _EVENT_SNAPSHOT_FIELDS:
-                            if k == "revision":
-                                continue
-                            if k in snap:
-                                s[k] = snap[k]
+                    _cancel_preview_on(s)
                     s["revision"] = int(s.get("revision") or 0) + 1
-                    s["pushedAt"] = int(now_dt.timestamp() * 1000)
+                    s["pushedAt"] = now_dt.timestamp()
                     touched_per_screen = True
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     activity_messages.append((
-                        f"Preview on {device_id} ended — restored",
+                        f"Test on {screen_name} finished — back to its playlist",
                         "preview",
                     ))
 
@@ -4439,6 +4456,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # green") so old consumers keep working.
                     pm = state.get("pollMode", DEFAULT_POLL_MODE)
                     live_flag, online_flag = _presence(last, pm, now)
+                    # While a content test runs, the live items are the test
+                    # clip. Report the screen's real playlist as currentItems
+                    # (what the CMS shows and edits) and the test separately.
+                    preview_snap = state.get("_previewSnapshot")
+                    preview_exp_ms = state.get("_previewExpiresAtMs")
+                    real_state = preview_snap if preview_snap else state
                     record = {
                         **s,
                         "online":                online_flag,
@@ -4448,8 +4471,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "liveThresholdSec":      int(_live_threshold_sec(pm)),
                         "secondsSinceHeartbeat": round(now - last, 1) if last else None,
                         "currentRevision":       state.get("revision", 0),
-                        "currentItems":          state.get("items", []),
-                        "mixSplash":             state.get("mixSplash", True),
+                        "currentItems":          real_state.get("items") or [],
+                        "previewItems":          (state.get("items") or []) if preview_snap else None,
+                        "previewRemainingSec":   (max(0, int(round(preview_exp_ms / 1000 - now)))
+                                                  if preview_exp_ms else None),
+                        "mixSplash":             real_state.get("mixSplash", True),
                         "productCard":           bool(state.get("productCard")),   # v0.1.86
                         "rotation":              int(state.get("rotation") or 0),  # v0.2.8
                         "experienceUrl":         state.get("experienceUrl"),       # v0.1.92
@@ -4885,6 +4911,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 pushed = 0
                 for device_id in targets:
                     s = _ensure_screen_state(device_id)
+                    # A real push ends any content test on this screen first,
+                    # so it lands on the real playlist (and appends to it,
+                    # not to the test clip) instead of being undone at expiry.
+                    _cancel_preview_on(s)
                     if mode == "append":
                         # Dedupe by id when appending so the same clip can't
                         # show up twice in a row.
@@ -5472,15 +5502,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     s["_previewSnapshot"] = {k: s.get(k) for k in _EVENT_SNAPSHOT_FIELDS}
                 s["items"] = cleaned_items
                 s["mixSplash"] = False  # test content alone, no splash interleave
-                s["pendingCommands"] = []
                 s["revision"] = int(s.get("revision") or 0) + 1
-                s["pushedAt"] = int(time.time() * 1000)
-                expires_at_ms = s["pushedAt"] + run_sec * 1000
+                now_s = time.time()
+                s["pushedAt"] = now_s
+                expires_at_ms = int(now_s * 1000) + run_sec * 1000
                 s["_previewExpiresAtMs"] = expires_at_ms
                 _save_per_screen_soon()
+                screen_name = (_screens.get(device_id) or {}).get("name") or device_id
             _log_activity(
                 kind="preview",
-                text=f"Preview on {device_id} — {len(cleaned_items)} clip(s) for {run_sec}s",
+                text=f"Testing {len(cleaned_items)} clip{'' if len(cleaned_items) == 1 else 's'} on {screen_name} for {run_sec}s",
                 icon="check",
                 who=actor.get("display_name"),
                 target=device_id,
@@ -5756,6 +5787,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if self._require_perm(need) is None:
                     return
             with _STATE_LOCK:
+                # Any edit to what the screen plays or how (playlist, toggles,
+                # rotation, sync group...) ends a running content test first.
+                # Otherwise the timed restore would overwrite the edit. Commands,
+                # renames and location changes don't touch playback state.
+                if action not in ("command", "name", "location"):
+                    _ps = _per_screen.get(device_id)
+                    if _ps is not None and _cancel_preview_on(_ps):
+                        _ps["revision"] = int(_ps.get("revision") or 0) + 1
+                        _save_per_screen_soon()
+                        print(f"[preview] {device_id}: test ended early by a {action} edit", file=sys.stderr)
                 if action == "command":
                     cmd = body.get("command")
                     if cmd not in ("reboot", "restartPlayer", "clearCache", "unregister", "update", "refresh", "sendLogs"):
@@ -5841,6 +5882,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         targets = [device_id]
                     for tid in targets:
                         st = _ensure_screen_state(tid)
+                        _cancel_preview_on(st)  # sync-group fan-out: same rule as above
                         if mode == "append":
                             existing = {x.get("id") for x in st["items"]}
                             for v in items:
@@ -6420,6 +6462,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _serve_api_delete(self) -> None:
         path = self.path.split("?", 1)[0]
+        # v0.2.15: DELETE /api/screens/<id>/preview ends a content test now
+        # instead of waiting for it to time out. 404 no_preview when nothing
+        # is running (already expired, or ended by an edit).
+        m_prev_end = re.match(r"^/api/screens/([^/]+)/preview$", path)
+        if m_prev_end:
+            if self._require_perm("screens.push") is None:
+                return
+            device_id = m_prev_end.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                s = _per_screen.get(device_id)
+                if s is None or not _cancel_preview_on(s):
+                    self._send_json({"error": "no_preview",
+                                     "detail": "No test is running on this screen."},
+                                    status=404); return
+                s["revision"] = int(s.get("revision") or 0) + 1
+                s["pushedAt"] = time.time()
+                _save_per_screen_soon()
+                screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+            _log_activity(
+                kind="preview",
+                text=f"Ended test on {screen_name} early — back to its playlist",
+                icon="check",
+                who=actor.get("display_name"),
+                target=device_id,
+            )
+            self._send_json({"ok": True, "deviceId": device_id})
+            return
+
         # v0.2.15: DELETE /api/events/<id>. Refuses while active — the
         # operator must /stop first (which restores screens) so a
         # delete can never silently leave screens in override state.

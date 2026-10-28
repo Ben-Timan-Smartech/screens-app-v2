@@ -548,7 +548,8 @@ const PreviewModal = ({ video, onClose }) => {
   // PATCHes the server and optimistically mutates the in-memory entry.
   const [defaultUnmute, setDefaultUnmute] = React.useState(!!video?.defaultUnmute);
   const [unmuteBusy, setUnmuteBusy] = React.useState(false);
-  React.useEffect(() => { setDefaultUnmute(!!video?.defaultUnmute); }, [video]);
+  const [testing, setTesting] = React.useState(false);
+  React.useEffect(() => { setDefaultUnmute(!!video?.defaultUnmute); setTesting(false); }, [video]);
   const onToggleUnmute = async (next) => {
     if (!video || unmuteBusy) return;
     setUnmuteBusy(true);
@@ -573,10 +574,10 @@ const PreviewModal = ({ video, onClose }) => {
   const videoRef = React.useRef(null);
 
   React.useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e) => { if (e.key === 'Escape' && !testing) onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, testing]);
 
   React.useEffect(() => {
     if (!video) return setDims(null);
@@ -602,6 +603,8 @@ const PreviewModal = ({ video, onClose }) => {
 
   if (!video) return null;
   return (
+    <>
+    {testing && <TestOnScreenModal videos={[video]} onClose={() => setTesting(false)} />}
     <div
       onClick={onClose}
       style={{
@@ -705,19 +708,27 @@ const PreviewModal = ({ video, onClose }) => {
                 </span>
               </div>
 
-              {driveLink && (
-                <a href={driveLink} target="_blank" rel="noopener noreferrer"
-                   style={{
-                     alignSelf: 'flex-start',
-                     display: 'inline-flex', alignItems: 'center', gap: 8,
-                     padding: '8px 14px', borderRadius: 6,
-                     background: 'var(--ink-0)', color: 'var(--on-accent)',
-                     fontSize: 13, fontWeight: 500, textDecoration: 'none',
-                   }}>
-                  <Icon.drive size={14} />
-                  <span>Open in Google Drive</span>
-                </a>
-              )}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                {driveLink && (
+                  <a href={driveLink} target="_blank" rel="noopener noreferrer"
+                     style={{
+                       display: 'inline-flex', alignItems: 'center', gap: 8,
+                       padding: '8px 14px', borderRadius: 6,
+                       background: 'var(--ink-0)', color: 'var(--on-accent)',
+                       fontSize: 13, fontWeight: 500, textDecoration: 'none',
+                     }}>
+                    <Icon.drive size={14} />
+                    <span>Open in Google Drive</span>
+                  </a>
+                )}
+                {video.mediaUrl && !video.pendingSync && (
+                  <Button variant="secondary" size="md" icon={<Icon.play size={11} />}
+                    onClick={() => setTesting(true)}
+                    title="Play this on one real screen for a short time, then put it back">
+                    Test on a screen
+                  </Button>
+                )}
+              </div>
             </div>
           );
         })()}
@@ -756,6 +767,7 @@ const PreviewModal = ({ video, onClose }) => {
         )}
       </div>
     </div>
+    </>
   );
 };
 
@@ -814,6 +826,11 @@ const UploadPanel = ({ open, onClose }) => {
   const [uploading, setUploading] = React.useState(false);
   const [progress, setProgress] = React.useState(0);    // 0..1
   const [error, setError] = React.useState(null);
+  // After a successful upload the panel stays open on a "test it first?" step
+  // instead of closing, so a new clip can be checked on real hardware before
+  // it is pushed anywhere.
+  const [uploaded, setUploaded] = React.useState(null);
+  const [testingUpload, setTestingUpload] = React.useState(false);
   const inflightRef = React.useRef(null);
   const fileInputRef = React.useRef(null);
 
@@ -834,8 +851,14 @@ const UploadPanel = ({ open, onClose }) => {
       inflightRef.current = null;
       setFile(null); setBrand(''); setTitle(''); setProduct('');
       setUploading(false); setProgress(0); setError(null);
+      setUploaded(null); setTestingUpload(false);
     }
   }, [open]);
+
+  const startAnother = () => {
+    setFile(null); setTitle(''); setProduct('');
+    setProgress(0); setError(null); setUploaded(null);
+  };
 
   const onPickFile = (f) => {
     setFile(f);
@@ -874,7 +897,8 @@ const UploadPanel = ({ open, onClose }) => {
         detail: { video: result?.video },
       }));
       showToast(`Uploaded "${result?.video?.title || file.name}"`, 'ok');
-      onClose();
+      if (result?.video?.mediaUrl) setUploaded(result.video);
+      else onClose();
     } catch (e) {
       setError(e.message || 'Upload failed.');
     } finally {
@@ -904,6 +928,35 @@ const UploadPanel = ({ open, onClose }) => {
         <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} disabled={uploading} />
       </div>
 
+      {uploaded ? (
+        <>
+          <div style={{ flex: 1, overflow: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 15, fontWeight: 500, color: 'var(--ink-1)' }}>
+              <span style={{ color: 'var(--ok)', display: 'flex' }}><Icon.check size={16} /></span>
+              Uploaded
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.5 }}>
+              <b style={{ fontWeight: 500, color: 'var(--ink-1)' }}>{uploaded.title}</b> is in the library
+              {uploaded.sizeMb ? <span className="tnum" style={{ color: 'var(--ink-4)' }}> · {uploaded.sizeMb} MB</span> : null}.
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.5 }}>
+              Test it on one screen before it goes anywhere else. It plays for a minute or two, then the screen goes back to its own playlist.
+            </div>
+          </div>
+          <div style={{ padding: '14px 20px', borderTop: 'var(--border)', display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Button variant="ghost" size="sm" onClick={startAnother}>Upload another</Button>
+            <div style={{ flex: 1 }} />
+            <Button variant="secondary" size="sm" onClick={onClose}>Done</Button>
+            <Button variant="primary" size="sm" icon={<Icon.play size={11} />} onClick={() => setTestingUpload(true)}>
+              Test on a screen
+            </Button>
+          </div>
+          {testingUpload && (
+            <TestOnScreenModal videos={[uploaded]} onClose={() => setTestingUpload(false)} />
+          )}
+        </>
+      ) : (
+      <>
       <div style={{ flex: 1, overflow: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
         {/* File picker — visual dropzone with hidden native input. */}
         <div
@@ -1053,6 +1106,8 @@ const UploadPanel = ({ open, onClose }) => {
           {uploading ? 'Uploading…' : 'Upload'}
         </Button>
       </div>
+      </>
+      )}
     </div>
   </div>
   );
@@ -1290,6 +1345,7 @@ const ContentLibrary = () => {
     return () => window.removeEventListener('open-video-preview', onPreview);
   }, []);
   const [pushPickerOpen, setPushPickerOpen] = React.useState(false);
+  const [testSelectedOpen, setTestSelectedOpen] = React.useState(false);
   // Brand sidebar search + grid/list view toggle + pagination.
   const [brandQuery, setBrandQuery] = React.useState('');
   // Main library search — filters the visible videos by title / brand /
@@ -1756,8 +1812,29 @@ const ContentLibrary = () => {
             zIndex: 5,
           }}>
             <span style={{ fontSize: 12, fontWeight: 500 }} className="tnum">{selected.size} selected</span>
-            <span style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.18)' }} />
-            <button onClick={() => setSelected(new Set())} style={{ fontSize: 12, color: 'rgba(250,250,250,0.7)', padding: '4px 6px' }}>Clear</button>
+            <span style={{ width: 1, height: 16, background: 'currentColor', opacity: 0.2 }} />
+            <button onClick={() => setSelected(new Set())} style={{ fontSize: 12, color: 'var(--on-accent)', opacity: 0.7, padding: '4px 6px' }}>Clear</button>
+            {(() => {
+              // Only clips that have actually landed can be tested; Drive
+              // items still syncing have nothing for a screen to fetch yet.
+              const testable = MOCK_VIDEOS.filter((v) => selected.has(v.id) && v.mediaUrl && !v.pendingSync);
+              return (
+                <button
+                  onClick={() => setTestSelectedOpen(true)}
+                  disabled={testable.length === 0}
+                  title={testable.length === 0 ? 'None of these have finished syncing yet' : 'Play on one screen for a minute or two, then it goes back to its playlist'}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    fontSize: 12, color: 'var(--on-accent)', padding: '6px 10px', borderRadius: 6,
+                    border: '1px solid currentColor', background: 'transparent',
+                    opacity: testable.length === 0 ? 0.35 : 0.85,
+                    cursor: testable.length === 0 ? 'default' : 'pointer',
+                  }}>
+                  <Icon.play size={10} />
+                  Test on a screen
+                </button>
+              );
+            })()}
             {/* "Add to schedule" removed in v0.1.6 — scheduling lands in
                 v0.1.7. Hidden rather than disabled to keep the action bar
                 short. */}
@@ -1808,6 +1885,13 @@ const ContentLibrary = () => {
               setPushPickerOpen(false);
               if (success) setSelected(new Set());
             }}
+          />
+        )}
+        {testSelectedOpen && (
+          <TestOnScreenModal
+            videos={MOCK_VIDEOS.filter((v) => selected.has(v.id) && v.mediaUrl && !v.pendingSync)}
+            deviceId={targetDeviceId || undefined}
+            onClose={() => setTestSelectedOpen(false)}
           />
         )}
       </div>

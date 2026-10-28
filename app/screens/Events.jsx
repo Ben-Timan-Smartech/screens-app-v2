@@ -41,7 +41,7 @@ const useEvents = () => {
 //   draft (incomplete)       — neutral grey
 //   past (ended)             — muted
 // ─────────────────────────────────────────────────────────────
-const statusOf = (e) => {
+const eventStatusOf = (e) => {
   const s = e.state;
   if (s === 'active') return 'live';
   if (s === 'signed-off') return 'signed-off';
@@ -50,7 +50,7 @@ const statusOf = (e) => {
 };
 
 const EventChip = ({ event }) => {
-  const s = statusOf(event);
+  const s = eventStatusOf(event);
   const map = {
     live:         { bg: 'var(--warn-bg)', fg: 'var(--warn)', label: 'Live', pulse: true  },
     'signed-off': { bg: 'var(--info-bg)', fg: 'var(--info)', label: 'Signed off', pulse: false },
@@ -681,7 +681,7 @@ const Events = () => {
   const grouped = useMemo(() => {
     const live = [], signedOff = [], draft = [], past = [];
     for (const e of items) {
-      const s = statusOf(e);
+      const s = eventStatusOf(e);
       if (s === 'live') live.push(e);
       else if (s === 'signed-off') signedOff.push(e);
       else if (s === 'past') past.push(e);
