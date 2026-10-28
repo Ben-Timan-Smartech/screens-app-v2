@@ -903,22 +903,80 @@ def _save_secrets() -> None:
 # a logoUrl, breaking ties on higher liveCount.
 _BRAND_LOGO_CACHE: dict = {"fetchedAt": 0.0, "map": {}, "hash": "0"}
 _BRAND_LOGO_TTL = 6 * 60 * 60   # 6 hours
+# v0.2.15: non-blocking refresh. Request threads NEVER hold the Cloud Run
+# instance while this cache is being hydrated — if the TTL has expired, the
+# caller returns the stale map immediately and a single background thread
+# refreshes. Fixes the 2026-10-16 incident where N screens polling in
+# parallel each ran a synchronous `/brands` fetch under `_STATE_LOCK`, and
+# with the tm:rw index API 429-ing, every one of them held the lock for
+# ~8s × retry chain → fleet-wide pile-up → Cloud Run 300s timeouts.
+_BRAND_LOGO_REFRESH_LOCK = threading.Lock()
+# Timestamp of the last 429 from tm:rw; if we got rate-limited, wait at
+# least this long before trying again (seconds). Prevents the caller's own
+# refresh storms from compounding the problem we're mitigating.
+_TMRW_RATE_LIMIT_BACKOFF_SEC = 300.0   # 5 min
+_BRAND_LOGO_429_UNTIL = 0.0
 
 
 def _brand_logo_map() -> dict:
-    """Return {brandNameLower: logoUrl}. Best-effort: a missing key,
-    network error, or unexpected shape leaves the previous map in place
-    (or an empty one) so the library still serves — brands just render
-    their generated letter mark instead of a logo."""
+    """Return {brandNameLower: logoUrl}. Non-blocking: on TTL expiry
+    returns the current (stale) map and kicks a background refresh.
+    Best-effort: a missing key, network error, or unexpected shape
+    leaves the previous map in place (or an empty one) so the library
+    still serves — brands just render their generated letter mark."""
     now = time.time()
     cached = _BRAND_LOGO_CACHE["map"]
-    if cached and (now - _BRAND_LOGO_CACHE["fetchedAt"]) < _BRAND_LOGO_TTL:
+    fresh_enough = cached and (now - _BRAND_LOGO_CACHE["fetchedAt"]) < _BRAND_LOGO_TTL
+    if fresh_enough:
         return cached
+    # Need to refresh. Return current cache immediately; a background
+    # thread does the slow HTTP work. First-ever call (no cache at all)
+    # waits for the synchronous one-shot hydrate so startup doesn't
+    # serve a totally empty map — subsequent calls return instantly.
+    if cached:
+        _schedule_brand_logo_refresh()
+        return cached
+    # Cold hydrate — one-shot, synchronous, serialised so N parallel
+    # callers don't all fire a /brands request.
+    with _BRAND_LOGO_REFRESH_LOCK:
+        if _BRAND_LOGO_CACHE["map"]:
+            return _BRAND_LOGO_CACHE["map"]
+        _brand_logo_refresh_now()
+    return _BRAND_LOGO_CACHE["map"]
+
+
+def _schedule_brand_logo_refresh() -> None:
+    """Fire a one-shot background refresh if nothing's running already.
+    Request threads never block on this — they continue with the stale
+    map."""
+    if not _BRAND_LOGO_REFRESH_LOCK.acquire(blocking=False):
+        return
+    def _worker():
+        try:
+            _brand_logo_refresh_now()
+        except Exception as e:
+            print(f"[brandlogos] background refresh crashed: {e}", file=sys.stderr)
+        finally:
+            _BRAND_LOGO_REFRESH_LOCK.release()
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _brand_logo_refresh_now() -> None:
+    """Does the actual /brands fetch + map rebuild. Must only be called
+    with _BRAND_LOGO_REFRESH_LOCK held (either the cold-hydrate path
+    above or the background worker)."""
+    global _BRAND_LOGO_429_UNTIL
+    now = time.time()
+    cached = _BRAND_LOGO_CACHE["map"]
+    # Honour 429 backoff — don't hammer tm:rw while it's rate-limiting us.
+    if now < _BRAND_LOGO_429_UNTIL:
+        _BRAND_LOGO_CACHE["fetchedAt"] = now
+        return
     entry = _secrets.get("brandApiKey") or {}
     key = (entry.get("value") or "").strip()
     if not key:
         _BRAND_LOGO_CACHE["fetchedAt"] = now   # don't retry every poll
-        return cached
+        return
     req = urllib.request.Request(
         f"{BRAND_API_BASE}/brands",
         headers={"X-API-Key": key, "Accept": "application/json"},
@@ -926,10 +984,18 @@ def _brand_logo_map() -> dict:
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
             rows = json.loads(resp.read().decode("utf-8") or "[]")
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            _BRAND_LOGO_429_UNTIL = now + _TMRW_RATE_LIMIT_BACKOFF_SEC
+            print(f"[brandlogos] /brands rate-limited; backing off {_TMRW_RATE_LIMIT_BACKOFF_SEC:.0f}s", file=sys.stderr)
+        else:
+            print(f"[brandlogos] /brands fetch failed: HTTP {e.code}", file=sys.stderr)
+        _BRAND_LOGO_CACHE["fetchedAt"] = now
+        return
     except Exception as e:
         print(f"[brandlogos] /brands fetch failed: {e}", file=sys.stderr)
         _BRAND_LOGO_CACHE["fetchedAt"] = now
-        return cached
+        return
     best: dict[str, dict] = {}
     for r in rows if isinstance(rows, list) else []:
         name = (r.get("name") or "").strip()
@@ -952,7 +1018,6 @@ def _brand_logo_map() -> dict:
     ).hexdigest()[:8]
     _BRAND_LOGO_CACHE.update({"map": new_map, "fetchedAt": now, "hash": new_hash})
     print(f"[brandlogos] {len(new_map)} brand logo(s) from tm:rw", file=sys.stderr)
-    return new_map
 
 
 # v0.1.64: assigned-video map from the tm:rw index /videos feed. Lets
@@ -1033,28 +1098,72 @@ def _extract_prices(row: dict) -> dict | None:
     return out or None
 
 
+# v0.2.15: non-blocking refresh for _tmrw_videos_map, same pattern as
+# _brand_logo_map above. The refresh is particularly brutal — one GET
+# /videos + N × 2 GET /product + /description calls (per unique SKU) each
+# with a 6s timeout. On 2026-10-16, when tm:rw's index API started 429-ing
+# us, a single refresh ran for minutes while holding _STATE_LOCK on the
+# fleet-wide /api/state path. The whole Cloud Run instance stalled, every
+# request hit the 300s request timeout, service dark. Fix: request threads
+# NEVER wait for the refresh — they get the stale map immediately; a
+# single background worker rebuilds; 429s trigger a 5-min backoff so we
+# don't hammer tm:rw while it's catching its breath.
+_TMRW_VIDEOS_REFRESH_LOCK = threading.Lock()
+_TMRW_VIDEOS_429_UNTIL = 0.0
+
+
 def _tmrw_videos_map() -> dict:
-    """Return {brandLower: {"display": <brand>, "videos": {fileNameLower:
-    {fileName, productName, active, orientation, resolution, sku, scope}}}}.
-
-    v0.1.65: one GET /videos call for the whole assigned-video set
-    (marketing videos are few relative to products), grouped by brand —
-    so a tm:rw brand with assigned videos shows up even if it has no
-    Drive folder yet (e.g. "Moods"). Brand-scope rows carry the brand in
-    scopeKey; family/product-scope rows fall back to an explicit `brand`
-    field if present, else scopeKey.
-
-    Best-effort: missing key / network error leaves the previous map in
-    place so the library still serves."""
+    """Non-blocking entry point. Returns the current (possibly stale)
+    brand → videos map immediately; on TTL expiry fires a background
+    refresh. First call ever cold-hydrates once (serialised across
+    callers) so we don't serve an empty map at startup."""
     now = time.time()
     cached = _TMRW_VIDEOS_CACHE["byBrand"]
-    if cached and (now - _TMRW_VIDEOS_CACHE["fetchedAt"]) < _TMRW_VIDEOS_TTL:
+    fresh_enough = cached and (now - _TMRW_VIDEOS_CACHE["fetchedAt"]) < _TMRW_VIDEOS_TTL
+    if fresh_enough:
         return cached
+    if cached:
+        _schedule_tmrw_videos_refresh()
+        return cached
+    # Cold hydrate — serialised so N parallel callers run ONE refresh.
+    with _TMRW_VIDEOS_REFRESH_LOCK:
+        if _TMRW_VIDEOS_CACHE["byBrand"]:
+            return _TMRW_VIDEOS_CACHE["byBrand"]
+        _tmrw_videos_refresh_now()
+    return _TMRW_VIDEOS_CACHE["byBrand"]
+
+
+def _schedule_tmrw_videos_refresh() -> None:
+    """Fire a one-shot background refresh if nothing's running. Request
+    threads NEVER block on this — they continue with the stale map."""
+    if not _TMRW_VIDEOS_REFRESH_LOCK.acquire(blocking=False):
+        return
+    def _worker():
+        try:
+            _tmrw_videos_refresh_now()
+        except Exception as e:
+            print(f"[tmrwvideos] background refresh crashed: {e}", file=sys.stderr)
+        finally:
+            _TMRW_VIDEOS_REFRESH_LOCK.release()
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _tmrw_videos_refresh_now() -> None:
+    """Does the actual /videos + per-SKU enrichment fetch. Must only be
+    called with _TMRW_VIDEOS_REFRESH_LOCK held (cold-hydrate or
+    background worker). Writes into _TMRW_VIDEOS_CACHE in place."""
+    global _TMRW_VIDEOS_429_UNTIL
+    now = time.time()
+    cached = _TMRW_VIDEOS_CACHE["byBrand"]
+    # Honour 429 backoff — don't hammer tm:rw while it's rate-limiting us.
+    if now < _TMRW_VIDEOS_429_UNTIL:
+        _TMRW_VIDEOS_CACHE["fetchedAt"] = now
+        return
     entry = _secrets.get("brandApiKey") or {}
     key = (entry.get("value") or "").strip()
     if not key:
         _TMRW_VIDEOS_CACHE["fetchedAt"] = now
-        return cached
+        return
     req = urllib.request.Request(
         f"{BRAND_API_BASE}/videos",
         headers={"X-API-Key": key, "Accept": "application/json"},
@@ -1062,10 +1171,18 @@ def _tmrw_videos_map() -> dict:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             rows = json.loads(resp.read().decode("utf-8") or "[]")
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            _TMRW_VIDEOS_429_UNTIL = now + _TMRW_RATE_LIMIT_BACKOFF_SEC
+            print(f"[tmrwvideos] /videos rate-limited; backing off {_TMRW_RATE_LIMIT_BACKOFF_SEC:.0f}s", file=sys.stderr)
+        else:
+            print(f"[tmrwvideos] /videos fetch failed: HTTP {e.code}", file=sys.stderr)
+        _TMRW_VIDEOS_CACHE["fetchedAt"] = now
+        return
     except Exception as e:
         print(f"[tmrwvideos] /videos fetch failed: {e}", file=sys.stderr)
         _TMRW_VIDEOS_CACHE["fetchedAt"] = now
-        return cached
+        return
     # v0.1.70: brand attribution. Brand-scope rows carry the brand in
     # scopeKey, but product/family-scope rows carry the SKU / familyId
     # there and have NO brand field — so the old "group by scopeKey"
@@ -1078,11 +1195,32 @@ def _tmrw_videos_map() -> dict:
     # refresh via a single /product?sku= call and shared by both brand
     # resolution AND the Content Library packshot thumbnails.
     _sku_detail: dict[str, dict] = {}
+    # v0.2.15: fail-fast flag — if tm:rw starts rate-limiting us mid-refresh,
+    # abort instead of grinding through N × (/product + /description) calls
+    # that will all 429 anyway. Caller's 5-min backoff then prevents the
+    # next refresh from piling on top. We use a dict instead of a bare bool
+    # so the closure writes propagate (no `nonlocal` boilerplate).
+    _state = {"ratelimited": False}
+
+    def _tmrw_backoff_now() -> None:
+        """Trigger the shared 429 backoff — one scare is enough to stop
+        the whole refresh. The next scheduled refresh is deferred by
+        _TMRW_RATE_LIMIT_BACKOFF_SEC seconds."""
+        global _TMRW_VIDEOS_429_UNTIL
+        _TMRW_VIDEOS_429_UNTIL = time.time() + _TMRW_RATE_LIMIT_BACKOFF_SEC
+        _state["ratelimited"] = True
+        print(f"[tmrwvideos] 429 observed — aborting this refresh, backing off {_TMRW_RATE_LIMIT_BACKOFF_SEC:.0f}s", file=sys.stderr)
 
     def _product_detail(sku: str) -> dict:
         if sku not in _sku_detail:
             d: dict = {"brand": None, "packshot": None,
                        "descShort": None, "descLong": None, "prices": None}
+            # Short-circuit — if a prior call this refresh already saw a
+            # 429, don't make more calls. Caller treats the empty dict
+            # as "unresolved".
+            if _state["ratelimited"]:
+                _sku_detail[sku] = d
+                return d
             try:
                 preq = urllib.request.Request(
                     f"{BRAND_API_BASE}/product?sku={urllib.parse.quote(sku)}",
@@ -1106,22 +1244,33 @@ def _tmrw_videos_map() -> dict:
                     # lives in driveUrl; for others (e.g. Foreo) filePath itself
                     # is the Drive URL and driveUrl is null. Try driveUrl first.
                     d["packshot"] = _drive_thumb_url(main.get("driveUrl") or main.get("filePath"))
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    _tmrw_backoff_now()
+                else:
+                    print(f"[tmrwvideos] product lookup for sku {sku} failed: HTTP {e.code}", file=sys.stderr)
             except Exception as e:
                 print(f"[tmrwvideos] product lookup for sku {sku} failed: {e}", file=sys.stderr)
             # v0.1.86: short/long marketing copy for the product card, from the
             # dedicated /description endpoint. Separate best-effort call so a
             # description miss never loses the packshot/brand fetched above.
-            try:
-                dreq = urllib.request.Request(
-                    f"{BRAND_API_BASE}/description?sku={urllib.parse.quote(sku)}",
-                    headers={"X-API-Key": key, "Accept": "application/json"},
-                )
-                with urllib.request.urlopen(dreq, timeout=6) as dresp:
-                    ddata = json.loads(dresp.read().decode("utf-8") or "{}")
-                d["descShort"] = (ddata.get("short") or "").strip() or None
-                d["descLong"] = (ddata.get("long") or "").strip() or None
-            except Exception as e:
-                print(f"[tmrwvideos] description lookup for sku {sku} failed: {e}", file=sys.stderr)
+            if not _state["ratelimited"]:
+                try:
+                    dreq = urllib.request.Request(
+                        f"{BRAND_API_BASE}/description?sku={urllib.parse.quote(sku)}",
+                        headers={"X-API-Key": key, "Accept": "application/json"},
+                    )
+                    with urllib.request.urlopen(dreq, timeout=6) as dresp:
+                        ddata = json.loads(dresp.read().decode("utf-8") or "{}")
+                    d["descShort"] = (ddata.get("short") or "").strip() or None
+                    d["descLong"] = (ddata.get("long") or "").strip() or None
+                except urllib.error.HTTPError as e:
+                    if e.code == 429:
+                        _tmrw_backoff_now()
+                    else:
+                        print(f"[tmrwvideos] description lookup for sku {sku} failed: HTTP {e.code}", file=sys.stderr)
+                except Exception as e:
+                    print(f"[tmrwvideos] description lookup for sku {sku} failed: {e}", file=sys.stderr)
             _sku_detail[sku] = d
         return _sku_detail[sku]
 
@@ -1139,6 +1288,11 @@ def _tmrw_videos_map() -> dict:
         if not bl:
             return []
         if bl not in _brand_products_cache:
+            # v0.2.15: honour the shared 429 abort flag — don't ask tm:rw
+            # for more while it's rate-limiting us.
+            if _state["ratelimited"]:
+                _brand_products_cache[bl] = []
+                return []
             got: list = []
             try:
                 preq = urllib.request.Request(
@@ -1147,6 +1301,12 @@ def _tmrw_videos_map() -> dict:
                 )
                 with urllib.request.urlopen(preq, timeout=8) as presp:
                     got = json.loads(presp.read().decode("utf-8") or "[]")
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    _tmrw_backoff_now()
+                else:
+                    print(f"[tmrwvideos] products for brand {brand!r} failed: HTTP {e.code}", file=sys.stderr)
+                got = []
             except Exception as e:
                 print(f"[tmrwvideos] products for brand {brand!r} failed: {e}", file=sys.stderr)
                 got = []
@@ -1276,7 +1436,6 @@ def _tmrw_videos_map() -> dict:
     _TMRW_VIDEOS_CACHE.update({"byBrand": by_brand, "fetchedAt": now, "hash": new_hash})
     total = sum(len(v["videos"]) for v in by_brand.values())
     print(f"[tmrwvideos] {total} assigned video(s) across {len(by_brand)} brand(s) from tm:rw", file=sys.stderr)
-    return by_brand
 
 
 def _library_with_logos() -> tuple[dict, str]:
