@@ -462,6 +462,22 @@ const setScreenRotation = async (deviceId, rotation) => {
   return res.json();
 };
 
+// v0.2.16: setScreenContentMode — POST /api/screens/<id>/content-mode.
+// `patch` is { mode: 'playlist'|'web', url?, reloadEveryMin? }; leave `url` out
+// to keep the stored one (the CMS never holds it after save — the URL carries
+// a display token, so the server only ever returns host + a short hint).
+// Server 400s carry a readable `error`, which we surface as the message.
+const setScreenContentMode = async (deviceId, patch) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/content-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body.ok === false) throw new Error(body.error || `content mode failed: ${res.status}`);
+  return body;
+};
+
 // v0.1.97: useExperiences — the guided-experience library (vendored + uploaded).
 // Small payload, so no ETag dance like useLibrary; refetch on demand via
 // reload(). Returns { experiences, loading, error, reload }.
@@ -1652,7 +1668,7 @@ Object.assign(window, {
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenProductCard, setScreenRotation,
+  setScreenProductCard, setScreenRotation, setScreenContentMode,
   setScreenExperience, setScreenTapNext, setScreenProgressBar,
   useExperiences, uploadExperience, deleteExperience,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,

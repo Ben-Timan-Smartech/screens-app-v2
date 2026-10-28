@@ -18,6 +18,34 @@ Rules:
 
 ---
 
+## v0.2.16
+
+- **Screens can now show a web page instead of a playlist.** In a screen's new
+  **Content** card, pick **Web page**, paste the page's link and press **Show
+  web page**: the screen switches within a minute and shows that one page full
+  screen, kept live. Switch back to **Playlist** and the playlist returns
+  exactly as it was. First use is the London office board.
+- **The link stays private.** Board links carry a display token, so the CMS
+  hides it as you paste it and never shows it again, only the site name and
+  the last four characters. Only the screen itself receives the full link, and
+  it's never written to the logs.
+- **It looks after itself.** If the page fails to load, comes up blank or the
+  network drops, the screen shows a quiet "Reconnecting…" (never a white page)
+  and keeps retrying until the page is back. If the network drops while the
+  page is up, the page stays on screen with a small "Reconnecting…" badge and
+  reloads itself when the network returns. It comes straight back to the page
+  after a reboot, even with no network. It also does a clean reload on a timer
+  (every 4 hours by default, adjustable).
+- **Refresh** and **Restart player** work on web page screens too: Refresh
+  reloads the page, Restart player rebuilds it from scratch.
+- The Content card shows what the screen is doing: whether the page is up, when
+  it last loaded, and the last problem it hit.
+- Every screen now reports its **Android and WebView versions** in the Status
+  card, so you can check whether a box can run web pages without walking up to
+  it.
+- Web pages need the modern player (this APK or later). Legacy-build screens
+  keep their playlist, and the CMS won't switch them.
+
 ## v0.2.14
 
 - **Brand images now sync and play on screens, just like videos.** Drop a still

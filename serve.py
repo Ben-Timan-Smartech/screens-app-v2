@@ -1946,6 +1946,17 @@ def _ensure_screen_state(device_id: str) -> dict:
             # calibrate to (now + duration). The tablet renders the
             # overlay until `correctedNow()` passes this value.
             "calibrateUntilMs": None,
+            # v0.2.16: what the screen shows. "playlist" (default, every
+            # existing screen) or "web" — one live URL full screen, for
+            # dashboards like the London office board. `web` holds
+            # {url, reloadEveryMin}; it survives a switch back to
+            # playlist so flipping to web again doesn't need the URL
+            # re-pasted. The URL carries a display token: it is only ever
+            # sent to the screen itself (device secret required, see
+            # /api/state) and never to the CMS or the logs. Modern player
+            # only. Set via /api/screens/<id>/content-mode.
+            "contentMode": "playlist",
+            "web": None,
             "pendingCommands": [],                 # list of pending commands for this screen
         }
         _per_screen[device_id] = s
@@ -1969,6 +1980,43 @@ def _ensure_screen_state(device_id: str) -> dict:
     if "calibrateUntilMs" not in s:
         s["calibrateUntilMs"] = None
     return s
+
+
+# ── Web page mode (v0.2.16) ──────────────────────────────────────────
+# The web URL carries a display token, so it's treated like a secret:
+# stored server-side, sent only to the screen that owns it, and shown to
+# the CMS (and the activity log) as host + a short tail hint only.
+WEB_RELOAD_DEFAULT_MIN = 240           # full reload every 4h unless set
+WEB_RELOAD_MAX_MIN = 1440
+
+
+def _web_host(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        return urllib.parse.urlparse(url).hostname or None
+    except ValueError:
+        return None
+
+
+def _web_url_hint(url: str | None) -> str | None:
+    """Host plus the last 4 characters, so an operator can tell two
+    pasted URLs apart without the CMS ever holding the token."""
+    if not url:
+        return None
+    host = _web_host(url) or "?"
+    return f"{host}/…{url[-4:]}" if len(url) > len(host) + 12 else host
+
+
+def _web_public(state: dict) -> dict:
+    """CMS-safe view of a screen's web settings — never the URL."""
+    web = state.get("web") or {}
+    return {
+        "contentMode": state.get("contentMode") or "playlist",
+        "webHost": _web_host(web.get("url")),
+        "webUrlHint": _web_url_hint(web.get("url")),
+        "webReloadEveryMin": web.get("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN) if web else None,
+    }
 
 
 # ── Sync groups ──────────────────────────────────────────────────────
@@ -3723,8 +3771,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         available_groups.values(), key=lambda g: g["id"],
                     )
                     poll_mode = s.get("pollMode", DEFAULT_POLL_MODE)
+                    # v0.2.16: web page mode. /api/state is readable by
+                    # anyone who knows a deviceId (CMS viewers can list
+                    # them), so the token-bearing URL is only included when
+                    # the caller is the screen itself — i.e. it presents the
+                    # deviceSecret issued at /register. Everyone else gets
+                    # the mode + host, never the URL.
+                    web_cfg = s.get("web") or None
+                    web_payload = None
+                    if web_cfg:
+                        provided = self.headers.get("X-Device-Secret") or ""
+                        expected = screen_meta.get("deviceSecret") or ""
+                        is_device = bool(expected) and hmac.compare_digest(
+                            provided.encode(), expected.encode(),
+                        )
+                        web_payload = {
+                            "url":            web_cfg.get("url") if is_device else None,
+                            "host":           _web_host(web_cfg.get("url")),
+                            "reloadEveryMin": int(web_cfg.get("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN)),
+                        }
                     payload = {
                         "screenId":    screen_id,
+                        "contentMode": s.get("contentMode") or "playlist",   # v0.2.16: "playlist" | "web"
+                        "web":         web_payload,                          # v0.2.16: see above
                         "revision":    s["revision"],
                         "items":       enriched_items,
                         "pushedAt":    s["pushedAt"],
@@ -3862,6 +3931,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # effect yet because the tablet hasn't seen
                         # the new /api/state poll.
                         "displayMode":           state.get("displayMode"),
+                        # v0.2.16: content mode + masked web settings. The
+                        # URL itself carries a display token and is never
+                        # sent to the CMS — host + tail hint only.
+                        **_web_public(state),
                     }
                     # v0.1.84: never expose the per-device secret to CMS
                     # clients (the **s spread above would otherwise include it).
@@ -4471,10 +4544,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # operator pushes them. The tablet itself enforces
                     # the cap; reporting it is just so the CMS can warn.
                     "decoderTier", "safeBitrateMbps",
+                    # v0.2.16: OS + WebView versions (the office-board ask:
+                    # we couldn't tell remotely which WebView a box had),
+                    # and web page mode health. playerContentMode is what
+                    # the player is ACTUALLY showing, vs contentMode which
+                    # is what the CMS asked for. Host only — never the URL.
+                    "androidVersion", "androidSdk", "webViewPackage", "webViewVersion",
+                    "playerContentMode", "webStatus", "webLoadedHost", "webLastLoadAt",
+                    "webLastError", "webLastErrorAt",
                 ):
                     val = body.get(key)
                     if val is None:
                         continue
+                    # Belt and braces: the player already reports errors
+                    # without the page URL, but strip any URL that slips
+                    # into the error text so a display token can't end up
+                    # in the CMS.
+                    if key == "webLastError" and isinstance(val, str):
+                        val = re.sub(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+", "<url>", val)[:300]
                     # v0.1.81: a CMS rename sets nameSetByOperator. The tablet
                     # keeps reporting its *local* name on every heartbeat, so
                     # skip the name merge once an operator has overridden it —
@@ -4758,7 +4845,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/rotation        { rotation: 0|90|180|270 }
         # POST /api/screens/<deviceId>/name            { name: string }
         # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|display-mode|rotation|name|location)$", path)
+        # POST /api/screens/<deviceId>/content-mode    { mode: "playlist"|"web", url?, reloadEveryMin? }
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|display-mode|rotation|content-mode|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -4781,7 +4869,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             #    is allowed + logged; a *wrong* secret is always rejected;
             #    ENFORCE_DEVICE_SECRET flips grace→required once the fleet ships
             #    the header.
-            need = "screens.command" if action in ("command", "mix-splash") else "screens.push"
+            # content-mode replaces everything on the screen with a live web
+            # page, so it sits with the privileged actions (and, like
+            # `command`, is never a tablet self-edit).
+            need = "screens.command" if action in ("command", "mix-splash", "content-mode") else "screens.push"
             user = self._current_user()
             if user is not None:
                 if self._require_perm(need) is None:
@@ -4971,6 +5062,81 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     state["revision"] += 1
                     _save_per_screen_soon()
                     self._send_json({"ok": True, "rotation": state["rotation"]})
+                    return
+                if action == "content-mode":
+                    # v0.2.16: playlist vs web page. Partial update like
+                    # `experience`: `url` / `reloadEveryMin` are only
+                    # touched when present, so the CMS can flip the mode
+                    # (or change the reload interval) without re-sending the
+                    # token-bearing URL, which it never holds after save.
+                    # The URL is never echoed back, printed or logged.
+                    state = _ensure_screen_state(device_id)
+                    mode = (body.get("mode") or "").strip().lower()
+                    if mode not in ("playlist", "web"):
+                        self._send_json({"ok": False, "error": "mode must be 'playlist' or 'web'"}, status=400)
+                        return
+                    if mode == "web" and (_screens.get(device_id) or {}).get("appFlavor") == "legacy":
+                        self._send_json(
+                            {"ok": False, "error": "Web page mode needs the modern player — this screen runs the legacy build"},
+                            status=400,
+                        )
+                        return
+                    web = dict(state.get("web") or {})
+                    if "url" in body:
+                        url = (body.get("url") or "").strip()
+                        if url:
+                            try:
+                                parsed = urllib.parse.urlparse(url)
+                            except ValueError:
+                                parsed = None
+                            # https only (the token would otherwise cross store
+                            # wifi in the clear); no user:pass@ — credentials
+                            # belong in the display token, not the authority.
+                            if (parsed is None or parsed.scheme != "https" or not parsed.hostname
+                                    or parsed.username or parsed.password or len(url) > 2048):
+                                self._send_json(
+                                    {"ok": False, "error": "url must be an absolute https:// URL (no user:password@, max 2048 chars)"},
+                                    status=400,
+                                )
+                                return
+                            web["url"] = url
+                        else:
+                            web.pop("url", None)
+                    if "reloadEveryMin" in body:
+                        try:
+                            reload_min = int(body.get("reloadEveryMin"))
+                        except (TypeError, ValueError):
+                            reload_min = -1
+                        # 0 = never do a scheduled full reload (the watchdog
+                        # still reloads on errors / network return).
+                        if not 0 <= reload_min <= WEB_RELOAD_MAX_MIN:
+                            self._send_json(
+                                {"ok": False, "error": f"reloadEveryMin must be 0–{WEB_RELOAD_MAX_MIN}"},
+                                status=400,
+                            )
+                            return
+                        web["reloadEveryMin"] = reload_min
+                    if mode == "web" and not web.get("url"):
+                        self._send_json({"ok": False, "error": "Paste the page URL to switch this screen to web page mode"}, status=400)
+                        return
+                    web.setdefault("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN)
+                    prev_mode = state.get("contentMode") or "playlist"
+                    state["web"] = web if web.get("url") else None
+                    state["contentMode"] = mode
+                    state["revision"] += 1      # bump so the tablet re-polls promptly
+                    _save_per_screen_soon()
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    actor = (user or {}).get("display_name")
+                    if mode == "web" and prev_mode != "web":
+                        text = f"{screen_name} switched to web page ({_web_host(web.get('url'))})"
+                    elif mode == "web":
+                        text = f"Web page settings updated on {screen_name} ({_web_host(web.get('url'))})"
+                    elif prev_mode == "web":
+                        text = f"{screen_name} switched back to its playlist"
+                    else:
+                        text = f"Web page settings saved on {screen_name}"
+                    _log_activity(kind="settings", text=text, who=actor, icon="settings", target=device_id)
+                    self._send_json({"ok": True, **_web_public(state)})
                     return
                 if action == "experience":
                     # v0.1.92: point this screen at a guided brand experience

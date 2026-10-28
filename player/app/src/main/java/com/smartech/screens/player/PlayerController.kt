@@ -263,6 +263,20 @@ class PlayerController(context: Context) {
     }
 
     /**
+     * v0.2.16: web page mode took over the screen. Stop decoding (a hidden
+     * video loop would burn the box's CPU/GPU under the WebView) and drop the
+     * queue. Resetting [currentSource] means the next [apply] / [playSplash]
+     * — PlayerScreen re-runs one as soon as it's composed again — rebuilds the
+     * queue from scratch, so switching back restores the playlist.
+     */
+    fun suspendForWebPage() {
+        if (currentSource == Source.NONE && player.mediaItemCount == 0) return
+        player.stop()
+        player.clearMediaItems()
+        currentSource = Source.NONE
+    }
+
+    /**
      * Replace the queue if the playlist revision changed. When [mixSplash] is
      * true, the bundled splash is prepended so it plays first before the
      * pushed content; the loop then cycles splash → item 1 → item 2 → … →

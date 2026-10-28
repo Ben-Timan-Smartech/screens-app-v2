@@ -91,8 +91,13 @@ const liveScreenToRow = (ls) => {
     appVersion: ls.appVersion || null,
     registeredAt: ls.registeredAt || 0,
     secondsSinceHeartbeat: ls.secondsSinceHeartbeat != null ? ls.secondsSinceHeartbeat : null,
-    playing:    currentItem?.title || null,
-    brand:      currentItem?.brand || null,
+    // v0.2.16: a screen in web page mode shows a live page, not its playlist.
+    contentMode: ls.contentMode || 'playlist',
+    webHost:    ls.webHost || null,
+    playing:    ls.contentMode === 'web'
+                  ? `Web page · ${ls.webHost || 'no URL'}`
+                  : (currentItem?.title || null),
+    brand:      ls.contentMode === 'web' ? null : (currentItem?.brand || null),
     status:     ls.online ? 'online' : 'offline',
     // v0.1.60: server now emits a stricter `live` flag — true when the
     // tablet is currently polling actively (within ~1.25× its poll
