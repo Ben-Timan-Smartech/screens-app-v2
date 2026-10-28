@@ -305,7 +305,7 @@ private class WebPageSession(
                 networkCallback,
             )
         }.onFailure { LogBuffer.w(TAG, "Network callback unavailable: ${it.message}") }
-        setStatus(WebStatus.LOADING)
+        updateStatus(WebStatus.LOADING)
         handler.postDelayed({ load("start") }, startDelayMs)
         handler.postDelayed(probeTick, PROBE_INTERVAL_MS)
         scheduleRefresh()
@@ -349,7 +349,7 @@ private class WebPageSession(
         if (attempt > 0) LogBuffer.i(TAG, "Web page recovered ($host) after $attempt failed attempt(s)")
         attempt = 0
         missedProbes = 0
-        setStatus(if (networkUp) WebStatus.SHOWING else WebStatus.OFFLINE)
+        updateStatus(if (networkUp) WebStatus.SHOWING else WebStatus.OFFLINE)
         repository.reportWebLoaded(host)
         onLoaded()
     }
@@ -363,7 +363,7 @@ private class WebPageSession(
         handler.removeCallbacks(loadTimeout)
         handler.removeCallbacks(retry)
         attempt++
-        setStatus(WebStatus.RECONNECTING)
+        updateStatus(WebStatus.RECONNECTING)
         repository.reportWebError(reason)
         val wait = backoffMs(attempt)
         LogBuffer.w(TAG, "Web page problem ($host): $reason — retry ${attempt} in ${wait / 1000}s")
@@ -450,11 +450,11 @@ private class WebPageSession(
         if (!networkUp && status == WebStatus.SHOWING) {
             LogBuffer.w(TAG, "Network lost — keeping the page up, will reload when it returns ($host)")
             repository.reportWebError("Network lost")
-            setStatus(WebStatus.OFFLINE)
+            updateStatus(WebStatus.OFFLINE)
         }
     }
 
-    private fun setStatus(s: WebStatus) {
+    private fun updateStatus(s: WebStatus) {
         status = s
         repository.reportWebStatus(s.name.lowercase())
     }
