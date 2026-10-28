@@ -592,13 +592,14 @@ const webViewLabel = (s) => {
 };
 const agoFromEpoch = (at) => (at ? formatSecondsAgo(Date.now() / 1000 - at) : 'never');
 
-const ContentModeCard = ({ screen, canEdit, isLive, onSave }) => {
+const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
   const mode = screen?.contentMode || 'playlist';
   const savedReload = screen?.webReloadEveryMin ?? 240;
   const [tab, setTab] = React.useState(mode);
   const [url, setUrl] = React.useState('');
   const [reload, setReload] = React.useState(savedReload);
   const [saving, setSaving] = React.useState(false);
+  const [reloading, setReloading] = React.useState(false);
   // Follow the server when the mode moves (our save landing, or another
   // operator) — but never yank the operator off a half-typed URL.
   React.useEffect(() => { if (!url) setTab(mode); }, [mode]); // eslint-disable-line
@@ -629,6 +630,10 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave }) => {
     reloadEveryMin: Number(reload),
   });
   const backToPlaylist = () => submit({ mode: 'playlist' });
+  const reloadNow = async () => {
+    setReloading(true);
+    try { await onReload(); } finally { setReloading(false); }
+  };
 
   const onScreen = screen?.playerContentMode === 'web'
     ? (WEB_STATUS[screen?.webStatus] || WEB_STATUS.showing)
@@ -737,6 +742,18 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave }) => {
               value={`${screen.webLastError} · ${agoFromEpoch(screen.webLastErrorAt)}`} />
           )}
           <StatusLine label="WebView" value={webViewLabel(screen) || '—'} mono />
+          {/* Manual reload — rides the refresh command, which a v0.2.16+
+              player in web page mode answers by reloading the page (skipping
+              any reconnect backoff). Restart player rebuilds the WebView. */}
+          {mode === 'web' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
+              <Button variant="secondary" size="sm" icon={<Icon.refresh size={12} />}
+                disabled={!canEdit || reloading || !!blockedWhy} onClick={reloadNow}>
+                {reloading ? 'Reloading…' : 'Reload page'}
+              </Button>
+              <span style={hint}>Loads a fresh copy of the page on the screen now.</span>
+            </div>
+          )}
         </div>
       )}
     </CollapsibleCard>
@@ -1557,6 +1574,25 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
+  // Content card "Reload page": the same refresh command as "Refresh now",
+  // which the player answers in web page mode by reloading the page.
+  const handleReloadWebPage = async () => {
+    if (!targetDeviceId) return;
+    try {
+      await sendScreenCommand(targetDeviceId, 'refresh');
+      const mode = hasHistory ? lastKnown.pollMode : 'normal';
+      const eta = { fast: '~10 s', normal: '~60 s', slow: '~10 min' }[mode] || '~60 s';
+      showToast(
+        isLive
+          ? `Page reload queued — the screen picks it up in ${eta}`
+          : 'Page reload queued — runs when the screen reconnects',
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
   // v0.1.98: show/hide the customer-facing "next video" control.
   const handleTapNextToggle = async (next) => {
     if (!targetDeviceId) return;
@@ -2131,6 +2167,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               canEdit={canEdit}
               isLive={isLive}
               onSave={handleSetContentMode}
+              onReload={handleReloadWebPage}
             />
 
             {/* v0.1.81: edit region/city/store/concept/screen code from the
