@@ -798,7 +798,30 @@ def _restore_screen_from_event(event: dict, device_id: str) -> None:
             s[k] = snap[k]
     # Bump revision so the tablet detects the change immediately.
     s["revision"] = int(s.get("revision") or 0) + 1
-    s["pushedAt"] = int(time.time() * 1000)
+    s["pushedAt"] = time.time()
+
+
+def _cancel_preview_on(s: dict) -> bool:
+    """End a running content test on one screen's state dict: put the
+    pre-test fields back and drop the preview markers. Returns True if a
+    test was running. Doesn't touch revision; the caller bumps it.
+    Must be inside _STATE_LOCK.
+
+    Called by the scheduler at expiry, by DELETE /api/screens/<id>/preview,
+    and before any real edit to the screen. An edit made during a test
+    would otherwise be overwritten by the timed restore: test, like it,
+    push it, and 40 seconds later the screen snaps back."""
+    snap = s.pop("_previewSnapshot", None)
+    expires = s.pop("_previewExpiresAtMs", None)
+    if snap is None and expires is None:
+        return False
+    if snap:
+        for k in _EVENT_SNAPSHOT_FIELDS:
+            if k == "revision":
+                continue
+            if k in snap:
+                s[k] = snap[k]
+    return True
 
 
 def _resolve_event_items_for_screen(event: dict, device_id: str) -> list[dict]:
@@ -869,7 +892,7 @@ def _apply_event_override_to_screen(event: dict, device_id: str) -> None:
     # pre-event queue back if any.
     s["pendingCommands"] = []
     s["revision"] = int(s.get("revision") or 0) + 1
-    s["pushedAt"] = int(time.time() * 1000)
+    s["pushedAt"] = time.time()
 
 
 def _active_event_for_screen(device_id: str, store_id: str | None) -> dict | None:
@@ -888,6 +911,191 @@ def _active_event_for_screen(device_id: str, store_id: str | None) -> dict | Non
             if store_id and store_id in (ev.get("stores") or []):
                 return ev
     return None
+
+
+# v0.2.15: preload window — a signed-off event's content is advertised
+# to its targeted screens this far before startAt so tablets have time
+# to pre-cache. 24h is plenty for the usual signage asset (50-800MB)
+# over a store wifi; smaller for a last-minute sign-off still works
+# because the tablet polls every 3-30s and starts caching as soon as it
+# sees the preload list.
+_EVENT_PRELOAD_WINDOW_SEC = 24 * 60 * 60
+
+
+def _preload_items_for_screen(device_id: str, store_id: str | None, now_dt=None) -> list[dict]:
+    """Return the de-duped list of pushed-item shapes a tablet should
+    pre-cache ahead of upcoming events. Used by the /api/state resolver
+    (which already runs under _STATE_LOCK, so this stays lock-free).
+    Order of items doesn't matter — the tablet treats this as a cache
+    hint, not a playlist.
+
+    Events qualify when:
+      - state == "signed-off"
+      - startAt is set AND now < startAt <= now + _EVENT_PRELOAD_WINDOW_SEC
+      - this screen is in the event's target set
+    Each item is deduplicated across events by its `url`, so a shared
+    splash file isn't downloaded twice."""
+    now_dt = now_dt or _now_utc()
+    try:
+        import datetime
+        window_end = now_dt + datetime.timedelta(seconds=_EVENT_PRELOAD_WINDOW_SEC)
+    except Exception:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def _consider(item):
+        url = (item or {}).get("url")
+        if not url or url in seen:
+            return
+        seen.add(url)
+        out.append(item)
+
+    for ev in _events:
+        if ev.get("state") != "signed-off":
+            continue
+        start = _parse_iso_utc(ev.get("startAt", ""))
+        if not start:
+            continue  # manual-only sign-off; no preload window to key off
+        if not (now_dt < start <= window_end):
+            continue
+        # Target match
+        if ev.get("targetMode") == "screens":
+            if device_id not in (ev.get("screens") or []):
+                continue
+        else:
+            if not store_id or store_id not in (ev.get("stores") or []):
+                continue
+        # Collect every item the resolver might play on this screen.
+        splashes = ev.get("splashes") or {}
+        for sp in (splashes.get("portrait"), splashes.get("landscape")):
+            if sp:
+                _consider(sp)
+        assignment = (ev.get("screenAssignments") or {}).get(device_id) or {}
+        for it in (assignment.get("items") or []):
+            _consider(it)
+    return out
+
+
+# v0.2.15: scheduler daemon tick interval. 5s balances freshness
+# (worst-case 5s lag between startAt and auto-start) against work on
+# small fleets (iterate _events + check previews, O(N) over tiny lists).
+_EVENT_SCHEDULER_TICK_SEC = 5.0
+
+
+def _event_scheduler_loop() -> None:
+    """Background daemon:
+      - auto-start signed-off events whose startAt has passed
+      - auto-stop active events whose endAt has passed
+      - auto-restore screen previews whose window has expired (E2.5)
+
+    All work runs under _STATE_LOCK but the operations are tiny CPU
+    passes — no I/O inside the lock. The actual flush of events.json
+    and _per_screen happens from _save_events / _save_per_screen_soon
+    which this daemon triggers.
+    """
+    import datetime
+    while True:
+        time.sleep(_EVENT_SCHEDULER_TICK_SEC)
+        try:
+            now_dt = _now_utc()
+            now_iso = now_dt.isoformat()
+            touched_events = False
+            touched_per_screen = False
+            activity_messages: list[tuple[str, str]] = []  # (text, kind) to log after lock release
+            with _STATE_LOCK:
+                for ev in _events:
+                    state = ev.get("state")
+                    # Auto-start
+                    if state == "signed-off":
+                        start_dt = _parse_iso_utc(ev.get("startAt", ""))
+                        if start_dt and start_dt <= now_dt:
+                            targets = _target_screen_ids_for_event(ev)
+                            # Mirror the /start endpoint's conflict check:
+                            # if any target is already in another live event,
+                            # SKIP (log + leave in signed-off). Operator must
+                            # intervene.
+                            conflict = None
+                            for other in _events:
+                                if other.get("id") == ev.get("id") or other.get("state") != "active":
+                                    continue
+                                other_t = set(_target_screen_ids_for_event(other))
+                                if other_t.intersection(targets):
+                                    conflict = other.get("id")
+                                    break
+                            if conflict:
+                                print(f"[event-scheduler] {ev.get('id')} not auto-started: targets conflict with active event {conflict}", file=sys.stderr)
+                                continue
+                            if not targets:
+                                print(f"[event-scheduler] {ev.get('id')} not auto-started: no targets resolved", file=sys.stderr)
+                                continue
+                            # Splashes already validated at sign-off time;
+                            # defensively re-check so a mid-flight PATCH
+                            # that cleared one doesn't crash the daemon.
+                            sp = ev.get("splashes") or {}
+                            if not sp.get("portrait") or not sp.get("landscape"):
+                                print(f"[event-scheduler] {ev.get('id')} not auto-started: splashes missing", file=sys.stderr)
+                                continue
+                            for device_id in targets:
+                                _snapshot_screen_for_event(ev, device_id)
+                                _apply_event_override_to_screen(ev, device_id)
+                            ev["state"] = "active"
+                            ev["startedAt"] = now_iso
+                            ev["updatedAt"] = now_iso
+                            touched_events = True
+                            touched_per_screen = True
+                            activity_messages.append((
+                                f"Auto-started event '{ev.get('name') or ev.get('id')}' on {len(targets)} screen(s)",
+                                "event",
+                            ))
+                    # Auto-stop
+                    elif state == "active":
+                        end_dt = _parse_iso_utc(ev.get("endAt", ""))
+                        if end_dt and end_dt <= now_dt:
+                            snaps = dict(ev.get("snapshots") or {})
+                            for device_id in snaps.keys():
+                                _restore_screen_from_event(ev, device_id)
+                            ev["state"] = "ended"
+                            ev["endedAt"] = now_iso
+                            ev["updatedAt"] = now_iso
+                            ev["snapshots"] = {}
+                            touched_events = True
+                            touched_per_screen = True
+                            activity_messages.append((
+                                f"Auto-ended event '{ev.get('name') or ev.get('id')}' — {len(snaps)} screen(s) restored",
+                                "event",
+                            ))
+
+                # E2.5 preview auto-restore. Each per-screen state can
+                # carry a `_previewExpiresAtMs` + `_previewSnapshot` set
+                # by the preview endpoint; when expiry passes, restore.
+                for device_id, s in list(_per_screen.items()):
+                    expires_ms = s.get("_previewExpiresAtMs")
+                    if not expires_ms:
+                        continue
+                    if expires_ms > int(now_dt.timestamp() * 1000):
+                        continue
+                    _cancel_preview_on(s)
+                    s["revision"] = int(s.get("revision") or 0) + 1
+                    s["pushedAt"] = now_dt.timestamp()
+                    touched_per_screen = True
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    activity_messages.append((
+                        f"Test on {screen_name} finished — back to its playlist",
+                        "preview",
+                    ))
+
+                if touched_events:
+                    _save_events()
+                if touched_per_screen:
+                    _save_per_screen_soon()
+            # Log activity outside the lock so a slow activity sink
+            # (future webhook, etc.) can't stall the daemon.
+            for text, kind in activity_messages:
+                _log_activity(kind=kind, text=text, icon="check")
+        except Exception as e:
+            print(f"[event-scheduler] tick failed: {e}", file=sys.stderr)
+            # Keep looping — daemon must never die silently.
 
 
 def _validate_event_payload(body: dict, *, require_name: bool = True) -> tuple[dict | None, str | None]:
@@ -4175,6 +4383,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # tablets can render a Join picker without typing.
                         "availableSyncGroups": available_sync_groups,
                         "playback":    playback,
+                        # v0.2.15: preload — a cache hint, not a playlist.
+                        # Items from signed-off events this screen will be
+                        # in during the next 24h; tablet downloads them
+                        # off the hot path so when the event activates
+                        # there's no download gap. Empty list is the
+                        # common case (no signed-off events relevant to
+                        # this screen); older tablets ignore the field.
+                        "preload":     _preload_items_for_screen(
+                            screen_id,
+                            (location or {}).get("storeId"),
+                        ),
                         "serverNowMs": int(time.time() * 1000),
                         # Display mode override (v0.1.14). null means
                         # "leave it alone." Non-null is a modeId the
@@ -4237,6 +4456,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # green") so old consumers keep working.
                     pm = state.get("pollMode", DEFAULT_POLL_MODE)
                     live_flag, online_flag = _presence(last, pm, now)
+                    # While a content test runs, the live items are the test
+                    # clip. Report the screen's real playlist as currentItems
+                    # (what the CMS shows and edits) and the test separately.
+                    preview_snap = state.get("_previewSnapshot")
+                    preview_exp_ms = state.get("_previewExpiresAtMs")
+                    real_state = preview_snap if preview_snap else state
                     record = {
                         **s,
                         "online":                online_flag,
@@ -4246,8 +4471,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "liveThresholdSec":      int(_live_threshold_sec(pm)),
                         "secondsSinceHeartbeat": round(now - last, 1) if last else None,
                         "currentRevision":       state.get("revision", 0),
-                        "currentItems":          state.get("items", []),
-                        "mixSplash":             state.get("mixSplash", True),
+                        "currentItems":          real_state.get("items") or [],
+                        "previewItems":          (state.get("items") or []) if preview_snap else None,
+                        "previewRemainingSec":   (max(0, int(round(preview_exp_ms / 1000 - now)))
+                                                  if preview_exp_ms else None),
+                        "mixSplash":             real_state.get("mixSplash", True),
                         "productCard":           bool(state.get("productCard")),   # v0.1.86
                         "rotation":              int(state.get("rotation") or 0),  # v0.2.8
                         "experienceUrl":         state.get("experienceUrl"),       # v0.1.92
@@ -4683,6 +4911,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 pushed = 0
                 for device_id in targets:
                     s = _ensure_screen_state(device_id)
+                    # A real push ends any content test on this screen first,
+                    # so it lands on the real playlist (and appends to it,
+                    # not to the test clip) instead of being undone at expiry.
+                    _cancel_preview_on(s)
                     if mode == "append":
                         # Dedupe by id when appending so the same clip can't
                         # show up twice in a row.
@@ -5199,11 +5431,182 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"event": _public_event(record)})
             return
 
+        # v0.2.15 E2.5: Preview content on one screen. Snapshots the
+        # screen's current state, overrides with the supplied items,
+        # sets an expiry timestamp that the event-scheduler daemon
+        # watches — on expiry the snapshot is restored automatically.
+        # Lets operators verify a new clip plays correctly on real
+        # hardware before pushing it to the fleet.
+        #
+        # Body: { items: [{id, url, durationSec, type?, ...}, ...],
+        #         durationSec: int (how long to run the preview; capped
+        #                           at 1800 so a forgotten preview can't
+        #                           hold a screen hostage) }
+        # Refuses if the screen is currently in an active event
+        # (preview over a takeover would double-snapshot).
+        m_screen_preview = re.match(r"^/api/screens/([^/]+)/preview$", path)
+        if m_screen_preview:
+            if self._require_perm("screens.push") is None:
+                return
+            device_id = m_screen_preview.group(1)
+            raw_items = body.get("items") or []
+            if not isinstance(raw_items, list) or not raw_items:
+                self._send_json({"error": "no_items",
+                                 "detail": "items[] is required (at least one)"},
+                                status=400); return
+            try:
+                run_sec = int(body.get("durationSec") or 60)
+            except (TypeError, ValueError):
+                run_sec = 60
+            run_sec = max(10, min(1800, run_sec))
+            # Validate the items.
+            cleaned_items = []
+            for i, raw in enumerate(raw_items):
+                if not isinstance(raw, dict) or not raw.get("url"):
+                    self._send_json({"error": "invalid_item",
+                                     "detail": f"items[{i}] needs a url"},
+                                    status=400); return
+                cleaned_items.append({
+                    "id":          raw.get("id") or f"preview-{int(time.time()*1000)}-{i}",
+                    "title":       raw.get("title") or "Preview",
+                    "brand":       raw.get("brand"),
+                    "product":     raw.get("product"),
+                    "durationSec": raw.get("durationSec") or 15,
+                    "url":         raw.get("url"),
+                    "sizeMb":      raw.get("sizeMb"),
+                    "width":       raw.get("width"),
+                    "height":      raw.get("height"),
+                    "type":        raw.get("type") or "video",
+                })
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                if device_id not in _screens:
+                    self._send_json({"error": "unknown_screen"}, status=404); return
+                # Refuse while a real event is active for this screen —
+                # preview overriding an event would corrupt the event's
+                # snapshot. Operator must stop the event first.
+                active = _active_event_for_screen(
+                    device_id,
+                    (_screens.get(device_id, {}).get("location") or {}).get("storeId"),
+                )
+                if active:
+                    self._send_json({"error": "event_active",
+                                     "detail": f"'{active.get('name')}' is live on this screen; stop it first."},
+                                    status=409); return
+                s = _ensure_screen_state(device_id)
+                # If a preview is ALREADY in progress on this screen,
+                # keep the ORIGINAL snapshot (so restore still works)
+                # and just swap the live items — the operator is
+                # iterating on the test, not nesting.
+                if not s.get("_previewSnapshot"):
+                    s["_previewSnapshot"] = {k: s.get(k) for k in _EVENT_SNAPSHOT_FIELDS}
+                s["items"] = cleaned_items
+                s["mixSplash"] = False  # test content alone, no splash interleave
+                s["revision"] = int(s.get("revision") or 0) + 1
+                now_s = time.time()
+                s["pushedAt"] = now_s
+                expires_at_ms = int(now_s * 1000) + run_sec * 1000
+                s["_previewExpiresAtMs"] = expires_at_ms
+                _save_per_screen_soon()
+                screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+            _log_activity(
+                kind="preview",
+                text=f"Testing {len(cleaned_items)} clip{'' if len(cleaned_items) == 1 else 's'} on {screen_name} for {run_sec}s",
+                icon="check",
+                who=actor.get("display_name"),
+                target=device_id,
+            )
+            self._send_json({
+                "ok": True,
+                "deviceId": device_id,
+                "expiresAtMs": expires_at_ms,
+                "durationSec": run_sec,
+            })
+            return
+
+        # v0.2.15: sign off an event. Flips state draft -> signed-off,
+        # locks the record as ready-to-run, and starts advertising its
+        # content as a preload hint to targeted screens in their
+        # /api/state response (see _preload_items_for_screen). Caches
+        # ahead of startAt so there's no download gap when the event
+        # auto-activates. Validation mirrors /start: splashes required,
+        # at least one target, no overlap with another already-live
+        # event.
+        m_ev_signoff = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)/sign-off$", path)
+        if m_ev_signoff:
+            if self._require_perm("events.edit") is None:
+                return
+            ev_id = m_ev_signoff.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") == "active":
+                    self._send_json({"error": "already_active"}, status=409); return
+                if ev.get("state") == "signed-off":
+                    self._send_json({"error": "already_signed_off"}, status=409); return
+                sp = ev.get("splashes") or {}
+                if not sp.get("portrait") or not sp.get("landscape"):
+                    self._send_json({"error": "missing_splashes",
+                                     "detail": "Both portrait and landscape splashes must be set before sign-off."},
+                                    status=400); return
+                targets = _target_screen_ids_for_event(ev)
+                if not targets:
+                    self._send_json({"error": "no_targets",
+                                     "detail": "No screens match this event's target"},
+                                    status=400); return
+                ev["state"] = "signed-off"
+                ev["signedOffAt"] = _now_utc().isoformat()
+                ev["signedOffBy"] = actor.get("email") or actor.get("display_name")
+                ev["updatedAt"] = ev["signedOffAt"]
+                _save_events()
+            _log_activity(
+                kind="event",
+                text=f"Signed off event '{ev['name']}' — content will preload to {len(targets)} screen(s)",
+                icon="check",
+                tone="ok",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(ev)})
+            return
+
+        # v0.2.15: un-sign-off an event. Flips signed-off -> draft so
+        # the operator can edit targets/dates again. Refuses if already
+        # active (operator should /stop + edit + sign-off again).
+        m_ev_unsign = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)/un-sign-off$", path)
+        if m_ev_unsign:
+            if self._require_perm("events.edit") is None:
+                return
+            ev_id = m_ev_unsign.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") != "signed-off":
+                    self._send_json({"error": "not_signed_off"}, status=409); return
+                ev["state"] = "draft"
+                ev["updatedAt"] = _now_utc().isoformat()
+                ev.pop("signedOffAt", None)
+                ev.pop("signedOffBy", None)
+                _save_events()
+            _log_activity(
+                kind="event",
+                text=f"Un-signed-off event '{ev['name']}'",
+                icon="check",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(ev)})
+            return
+
         # v0.2.15: start an event. Takes a snapshot of every targeted
         # screen's state, overrides each with the event's playlist +
         # settings, flips the event to state="active". Operator-friendly
         # permission (events.activate) so a store manager can trigger a
         # pre-staged event without having edit rights on the record.
+        # Accepts events in state="draft" (manual) OR "signed-off"
+        # (operator chose to start early, before the scheduler would).
         m_ev_start = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)/start$", path)
         if m_ev_start:
             if self._require_perm("events.activate") is None:
@@ -5384,6 +5787,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if self._require_perm(need) is None:
                     return
             with _STATE_LOCK:
+                # Any edit to what the screen plays or how (playlist, toggles,
+                # rotation, sync group...) ends a running content test first.
+                # Otherwise the timed restore would overwrite the edit. Commands,
+                # renames and location changes don't touch playback state.
+                if action not in ("command", "name", "location"):
+                    _ps = _per_screen.get(device_id)
+                    if _ps is not None and _cancel_preview_on(_ps):
+                        _ps["revision"] = int(_ps.get("revision") or 0) + 1
+                        _save_per_screen_soon()
+                        print(f"[preview] {device_id}: test ended early by a {action} edit", file=sys.stderr)
                 if action == "command":
                     cmd = body.get("command")
                     if cmd not in ("reboot", "restartPlayer", "clearCache", "unregister", "update", "refresh", "sendLogs"):
@@ -5469,6 +5882,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         targets = [device_id]
                     for tid in targets:
                         st = _ensure_screen_state(tid)
+                        _cancel_preview_on(st)  # sync-group fan-out: same rule as above
                         if mode == "append":
                             existing = {x.get("id") for x in st["items"]}
                             for v in items:
@@ -6048,6 +6462,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _serve_api_delete(self) -> None:
         path = self.path.split("?", 1)[0]
+        # v0.2.15: DELETE /api/screens/<id>/preview ends a content test now
+        # instead of waiting for it to time out. 404 no_preview when nothing
+        # is running (already expired, or ended by an edit).
+        m_prev_end = re.match(r"^/api/screens/([^/]+)/preview$", path)
+        if m_prev_end:
+            if self._require_perm("screens.push") is None:
+                return
+            device_id = m_prev_end.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                s = _per_screen.get(device_id)
+                if s is None or not _cancel_preview_on(s):
+                    self._send_json({"error": "no_preview",
+                                     "detail": "No test is running on this screen."},
+                                    status=404); return
+                s["revision"] = int(s.get("revision") or 0) + 1
+                s["pushedAt"] = time.time()
+                _save_per_screen_soon()
+                screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+            _log_activity(
+                kind="preview",
+                text=f"Ended test on {screen_name} early — back to its playlist",
+                icon="check",
+                who=actor.get("display_name"),
+                target=device_id,
+            )
+            self._send_json({"ok": True, "deviceId": device_id})
+            return
+
         # v0.2.15: DELETE /api/events/<id>. Refuses while active — the
         # operator must /stop first (which restores screens) so a
         # delete can never silently leave screens in override state.
@@ -6856,6 +7299,12 @@ def main() -> None:
     threading.Thread(target=daily_sync_loop, daemon=True).start()
     # v0.1.85: watch for screens dropping offline and alert (webhook + activity).
     threading.Thread(target=_offline_monitor_loop, daemon=True).start()
+    # v0.2.15: event scheduler — auto-starts signed-off events when their
+    # startAt arrives, auto-stops active events when their endAt passes.
+    # Also drives the preview auto-restore (E2.5). One loop, 5s tick:
+    # cheap because the work per tick is only "iterate _events + a few
+    # per-screen checks," no I/O unless a transition actually fires.
+    threading.Thread(target=_event_scheduler_loop, daemon=True).start()
     # Initial scan if the library is missing or empty. Triggers
     # automatically on fresh deploys so the CMS doesn't show "no
     # content" for up to 24 hours while waiting for the daily timer.

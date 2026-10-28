@@ -1165,7 +1165,10 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   // Use it for offline screens too so the CMS shows the queued playlist.
   const playlist = hasHistory ? (lastKnown.currentItems || []) : [];
   // "Now playing" only makes sense when the tablet is actually online.
-  const current = isLive ? playlist[0] : null;
+  // During a content test the screen is playing the test clip, not the list.
+  const current = isLive
+    ? ((lastKnown?.previewRemainingSec > 0 && lastKnown?.previewItems?.[0]) || playlist[0])
+    : null;
   const totalDurationSec = playlist.reduce((a, v) => a + (v.durationSec || 15), 0);
   // v0.2.x: which playlist items are too heavy for the older screens. Prefer the
   // library record (carries the scanned dims + heavy flag) and fall back to the
@@ -1559,6 +1562,24 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
 
   const [syncOpen, setSyncOpen] = React.useState(false);
   const [addOpen, setAddOpen] = React.useState(false);
+  const [testOpen, setTestOpen] = React.useState(false);
+  const [endingTest, setEndingTest] = React.useState(false);
+  // A content test is running when the server reports time left on it. The
+  // server keeps `currentItems` as the real playlist during a test, so the
+  // list below stays correct; this just drives the banner.
+  const testRemainingSec = lastKnown?.previewRemainingSec || 0;
+  const testItems = testRemainingSec > 0 ? (lastKnown?.previewItems || []) : [];
+  const handleEndTest = async () => {
+    setEndingTest(true);
+    try {
+      await endPreviewOnScreen(targetDeviceId);
+      showToast(`${displayName} is back on its playlist`, 'ok');
+    } catch (e) {
+      showToast(`Couldn't end the test: ${e.message}`, 'err');
+    } finally {
+      setEndingTest(false);
+    }
+  };
   const [previewVideo, setPreviewVideo] = React.useState(null);
   // v0.1.57: sync group modal — opens when the summary pill is tapped.
   const [syncModalOpen, setSyncModalOpen] = React.useState(false);
@@ -1656,6 +1677,9 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
           onClose={() => setAddOpen(false)}
         />
       )}
+      {testOpen && canEdit && (
+        <TestOnScreenModal deviceId={targetDeviceId} onClose={() => setTestOpen(false)} />
+      )}
       <PreviewModal video={previewVideo} onClose={() => setPreviewVideo(null)} />
       {syncJoinTarget && (
         <SyncJoinConfirmModal
@@ -1738,7 +1762,40 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                   onClick={() => canEdit && setAddOpen(true)}>
                   Add content
                 </Button>
+                <Button
+                  variant="secondary" size="sm" icon={<Icon.play size={11} />}
+                  disabled={!canEdit || !isLive}
+                  onClick={() => canEdit && isLive && setTestOpen(true)}
+                  title={isLive
+                    ? 'Play a clip here for a minute or two, then go back to this playlist'
+                    : 'Available once the screen reconnects.'}>
+                  Test content
+                </Button>
               </div>
+              {testRemainingSec > 0 && (
+                <div style={{
+                  padding: '10px 12px', marginBottom: 8, borderRadius: 8,
+                  border: '1px solid var(--accent)', background: 'var(--ink-9)',
+                  display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                  fontSize: 11.5, color: 'var(--ink-2)', lineHeight: 1.45,
+                }}>
+                  <span style={{
+                    width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)', flexShrink: 0,
+                    animation: 'sidebar-live-pulse 1.6s ease-in-out infinite',
+                  }} />
+                  <span style={{ flex: 1, minWidth: 180 }}>
+                    <span style={{ fontWeight: 600, color: 'var(--ink-1)' }}>Test running.</span>{' '}
+                    {testItems.length > 0
+                      ? <>Playing {testItems.map((v) => `"${v.title || v.id}"`).join(', ')}. </>
+                      : null}
+                    Back to this playlist in <span className="tnum">{testOnScreenClock(testRemainingSec)}</span>.
+                    Any edit here ends the test first.
+                  </span>
+                  <Button variant="secondary" size="sm" disabled={!canEdit || endingTest} onClick={handleEndTest}>
+                    {endingTest ? 'Ending…' : 'End test now'}
+                  </Button>
+                </div>
+              )}
               {!isLive && hasHistory && (
                 <div style={{
                   padding: '10px 12px', marginBottom: 8,
@@ -1778,7 +1835,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   {playlist.map((v, i) => (
                     <PlaylistItem
-                      key={v.id || i} v={v} i={i} isCurrent={isLive && i === 0}
+                      key={v.id || i} v={v} i={i} isCurrent={isLive && testRemainingSec <= 0 && i === 0}
                       onPreview={() => openPreview(v)}
                       draggable={canEdit}
                       isDragging={dragIndex === i}

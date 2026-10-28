@@ -157,6 +157,8 @@ const Router = () => {
       return <SyncGroups />;
     case 'schedules':
       return <Schedules initialMode={rest[0] === 'new' ? 'create' : 'list'} />;
+    case 'events':
+      return <Events />;
     case 'activity':
       return <ActivityLog />;
     case 'settings':
