@@ -1991,6 +1991,13 @@ def _ensure_screen_state(device_id: str) -> dict:
 # the CMS (and the activity log) as host + a short tail hint only.
 WEB_RELOAD_DEFAULT_MIN = 240           # full reload every 4h unless set
 WEB_RELOAD_MAX_MIN = 1440
+# v0.2.17: the width (CSS px) the player lays the page out at before scaling
+# it to fit. Without it Android uses the box's density-adjusted width (960 px
+# on a 1080p box at 2x), which crops a page built for 1920x1080. 0 = no
+# override (the device's own width, like a tablet browser).
+WEB_PAGE_WIDTH_DEFAULT = 1920
+WEB_PAGE_WIDTH_MIN = 640
+WEB_PAGE_WIDTH_MAX = 3840
 
 
 def _web_host(url: str | None) -> str | None:
@@ -2019,6 +2026,7 @@ def _web_public(state: dict) -> dict:
         "webHost": _web_host(web.get("url")),
         "webUrlHint": _web_url_hint(web.get("url")),
         "webReloadEveryMin": web.get("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN) if web else None,
+        "webPageWidth": web.get("pageWidth", WEB_PAGE_WIDTH_DEFAULT) if web else None,
     }
 
 
@@ -3792,6 +3800,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             "url":            web_cfg.get("url") if is_device else None,
                             "host":           _web_host(web_cfg.get("url")),
                             "reloadEveryMin": int(web_cfg.get("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN)),
+                            "pageWidth":      int(web_cfg.get("pageWidth", WEB_PAGE_WIDTH_DEFAULT)),   # v0.2.17
                         }
                     payload = {
                         "screenId":    screen_id,
@@ -4555,6 +4564,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "androidVersion", "androidSdk", "webViewPackage", "webViewVersion",
                     "playerContentMode", "webStatus", "webLoadedHost", "webLastLoadAt",
                     "webLastError", "webLastErrorAt",
+                    # v0.2.17: the size the page actually sees ("1920x1080"),
+                    # after the player's page-width scaling.
+                    "webViewport",
                 ):
                     val = body.get(key)
                     if val is None:
@@ -4565,6 +4577,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # in the CMS.
                     if key == "webLastError" and isinstance(val, str):
                         val = re.sub(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+", "<url>", val)[:300]
+                    if key == "webViewport":
+                        val = str(val)[:32]
                     # v0.1.81: a CMS rename sets nameSetByOperator. The tablet
                     # keeps reporting its *local* name on every heartbeat, so
                     # skip the name merge once an operator has overridden it —
@@ -4853,7 +4867,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/rotation        { rotation: 0|90|180|270 }
         # POST /api/screens/<deviceId>/name            { name: string }
         # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
-        # POST /api/screens/<deviceId>/content-mode    { mode: "playlist"|"web", url?, reloadEveryMin? }
+        # POST /api/screens/<deviceId>/content-mode    { mode: "playlist"|"web", url?, reloadEveryMin?, pageWidth? }
         m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|display-mode|rotation|content-mode|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
@@ -5124,10 +5138,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             )
                             return
                         web["reloadEveryMin"] = reload_min
+                    if "pageWidth" in body:
+                        try:
+                            page_width = int(body.get("pageWidth"))
+                        except (TypeError, ValueError):
+                            page_width = -1
+                        if page_width != 0 and not WEB_PAGE_WIDTH_MIN <= page_width <= WEB_PAGE_WIDTH_MAX:
+                            self._send_json(
+                                {"ok": False, "error": f"pageWidth must be 0 or {WEB_PAGE_WIDTH_MIN}–{WEB_PAGE_WIDTH_MAX}"},
+                                status=400,
+                            )
+                            return
+                        web["pageWidth"] = page_width
                     if mode == "web" and not web.get("url"):
                         self._send_json({"ok": False, "error": "Paste the page URL to switch this screen to web page mode"}, status=400)
                         return
                     web.setdefault("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN)
+                    web.setdefault("pageWidth", WEB_PAGE_WIDTH_DEFAULT)
                     prev_mode = state.get("contentMode") or "playlist"
                     state["web"] = web if web.get("url") else None
                     state["contentMode"] = mode

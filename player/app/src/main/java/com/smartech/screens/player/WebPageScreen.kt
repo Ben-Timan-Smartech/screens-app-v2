@@ -54,6 +54,8 @@ import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.data.WebPageConfig
 import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.delay
+import org.json.JSONObject
+import java.util.Locale
 
 /**
  * v0.2.16: web page mode — one live URL full screen instead of the playlist.
@@ -98,7 +100,9 @@ fun WebPageScreen(config: WebPageConfig, repository: PlayerRepository) {
     }
 
     Box(Modifier.fillMaxSize().background(COVER_BG)) {
-        key(config.url, rebuildRequests, rebuildNonce) {
+        // Keyed on the whole config: a new URL, reload interval or page width
+        // from the CMS starts a fresh session with it.
+        key(config, rebuildRequests, rebuildNonce) {
             LiveWebPage(
                 config = config,
                 repository = repository,
@@ -270,6 +274,11 @@ private class WebPageSession(
             domStorageEnabled = true
             loadWithOverviewMode = true
             useWideViewPort = true
+            // v0.2.17: the page is scaled down to fit (see applyPageWidth),
+            // so no text autosizing or system text zoom on top — the board's
+            // text must stay the size its layout expects.
+            layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
+            textZoom = 100
             setSupportZoom(false)
             builtInZoomControls = false
             displayZoomControls = false
@@ -284,6 +293,13 @@ private class WebPageSession(
             setSupportMultipleWindows(false)
         }
         webViewClient = Client()
+    }
+
+    init {
+        // A new size (first layout, or a rotation change) needs a new scale.
+        webView.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (right - left != oldRight - oldLeft) applyPageWidth()
+        }
     }
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -352,6 +368,35 @@ private class WebPageSession(
         updateStatus(if (networkUp) WebStatus.SHOWING else WebStatus.OFFLINE)
         repository.reportWebLoaded(host)
         onLoaded()
+        handler.postDelayed(reportViewport, VIEWPORT_REPORT_DELAY_MS)
+    }
+
+    /**
+     * v0.2.17: lay the page out [WebPageConfig.pageWidth] CSS px wide, scaled
+     * to fit the screen. Android otherwise lays a page out at the box's
+     * density-adjusted width — 960 px on a 1080p box at 2× — which crops a
+     * board built for 1920×1080. WebView has no setting for that, so this
+     * rewrites the page's viewport meta tag (and keeps it rewritten if the
+     * page changes it). Idempotent: run on commit, on finish and on resize.
+     */
+    private fun applyPageWidth() {
+        val width = config.pageWidth
+        if (width <= 0 || stopped || rendererDead) return
+        val metrics = webView.resources.displayMetrics
+        val viewPx = webView.width.takeIf { it > 0 } ?: metrics.widthPixels
+        val scale = String.format(Locale.US, "%.4f", viewPx / metrics.density / width)
+        val content = "width=$width, initial-scale=$scale, minimum-scale=$scale, " +
+            "maximum-scale=$scale, user-scalable=no"
+        runCatching { webView.evaluateJavascript(viewportJs(content), null) }
+    }
+
+    /** Tell the CMS what size the page actually sees, so a wrong layout can
+     *  be spotted remotely. */
+    private val reportViewport = Runnable {
+        if (stopped || rendererDead) return@Runnable
+        runCatching {
+            webView.evaluateJavascript(VIEWPORT_JS) { result -> parseViewport(result)?.let(repository::reportWebViewport) }
+        }
     }
 
     /** Anything that leaves the screen without a good page. [reason] goes to
@@ -410,6 +455,7 @@ private class WebPageSession(
                 runCatching {
                     webView.evaluateJavascript(BLANK_PROBE_JS) { result ->
                         probePending = false
+                        parseViewport(result)?.let(repository::reportWebViewport)
                         if (result?.contains("blank") == true) {
                             blankStreak++
                             if (blankStreak >= 2) fail("Page rendered blank")
@@ -492,8 +538,16 @@ private class WebPageSession(
             }
         }
 
+        /** The new page is about to draw — set its width as early as we can
+         *  reach its document, so a reload barely shows the wrong layout. */
+        override fun onPageCommitVisible(view: WebView?, url: String?) {
+            if (url == null || url.startsWith("about:")) return
+            applyPageWidth()
+        }
+
         override fun onPageFinished(view: WebView?, url: String?) {
             if (url == null || url.startsWith("about:")) return
+            applyPageWidth()
             if (loadInFlight && !failedThisLoad) loaded()
         }
 
@@ -545,15 +599,56 @@ private const val PROBE_INTERVAL_MS = 30_000L
 private const val OFFLINE_GRACE_MS = 10_000L
 private const val NETWORK_SETTLE_MS = 2_000L
 private const val WEBVIEW_UNAVAILABLE_RETRY_MS = 60_000L
+private const val VIEWPORT_REPORT_DELAY_MS = 2_000L
 
 /** "blank" when the page has no visible text and no media/graphics at all —
- *  what a crashed SPA or an empty error body looks like. */
+ *  what a crashed SPA or an empty error body looks like. Followed by the
+ *  layout size the page sees ("ok 1920x1080") for the CMS — the root
+ *  element's client size, which is the layout viewport (innerWidth can
+ *  report a zoomed-out visual size instead). */
 private const val BLANK_PROBE_JS = """
 (function(){
-  var b = document.body;
-  if (!b) return 'blank';
+  var e = document.documentElement, b = document.body, v = ' ' + e.clientWidth + 'x' + e.clientHeight;
+  if (!b) return 'blank' + v;
   var t = (b.innerText || '').trim().length;
   var m = b.querySelectorAll('img,canvas,svg,video,iframe,object,embed').length;
-  return (t > 0 || m > 0) ? 'ok' : 'blank';
+  return ((t > 0 || m > 0) ? 'ok' : 'blank') + v;
 })()
+"""
+
+private const val VIEWPORT_JS =
+    "document.documentElement.clientWidth + 'x' + document.documentElement.clientHeight"
+private val VIEWPORT_RE = Regex("""(\d+)x(\d+)""")
+
+/** "1920x1080" out of an evaluateJavascript result (a JSON string). */
+private fun parseViewport(result: String?): String? = result?.let { VIEWPORT_RE.find(it)?.value }
+
+/**
+ * Sets every viewport meta tag on the page to [content] (adding one if there's
+ * none) and watches the head, so a page or framework that rewrites its own tag
+ * gets ours back. Running it again just updates the content being enforced.
+ */
+private fun viewportJs(content: String): String = """
+(function(c){
+  var w = window, d = document;
+  w.__screensViewport = c;
+  function fix(){
+    var v = w.__screensViewport, ms = d.querySelectorAll('meta[name="viewport"]');
+    if (!ms.length) {
+      var m = d.createElement('meta');
+      m.setAttribute('name', 'viewport');
+      (d.head || d.documentElement).appendChild(m);
+      ms = [m];
+    }
+    for (var i = 0; i < ms.length; i++) {
+      if (ms[i].getAttribute('content') !== v) ms[i].setAttribute('content', v);
+    }
+  }
+  fix();
+  if (!w.__screensViewportObserver && w.MutationObserver) {
+    w.__screensViewportObserver = new MutationObserver(fix);
+    w.__screensViewportObserver.observe(d.head || d.documentElement,
+      { childList: true, subtree: true, attributes: true, attributeFilter: ['content', 'name'] });
+  }
+})(${JSONObject.quote(content)})
 """

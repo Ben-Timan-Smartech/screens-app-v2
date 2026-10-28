@@ -176,11 +176,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        // Keep the screen awake and full-bleed. Retail tablets / TVs should never dim.
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    /** Full-bleed: no status or nav bar. */
+    private fun hideSystemBars() {
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = (
             android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -190,6 +187,23 @@ class MainActivity : ComponentActivity() {
                 or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                 or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
             )
+    }
+
+    /** v0.2.17: Android drops the immersive flags when another window takes
+     *  focus (an install prompt, a system dialog, the notification shade), and
+     *  IMMERSIVE_STICKY doesn't bring them back, so the nav bar could stay up
+     *  over the content. Re-apply on every regain. */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // Keep the screen awake and full-bleed. Retail tablets / TVs should never dim.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        hideSystemBars()
 
         controller = PlayerController(this)
         val repo = (application as ScreensApp).repository

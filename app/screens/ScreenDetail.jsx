@@ -569,6 +569,19 @@ const WEB_RELOAD_OPTIONS = [
   { min: 1440, label: 'Once a day' },
   { min: 0,    label: 'Never — only to recover' },
 ];
+// v0.2.17: the width the page is laid out at, then scaled to fit the screen.
+// Android otherwise uses the box's density-adjusted width (960 px on many
+// 1080p boxes), which crops a page built for a 1920 × 1080 TV.
+const WEB_PAGE_WIDTH_MIN_APP = '0.2.17';
+const WEB_PAGE_WIDTH_OPTIONS = [
+  { px: 1280, label: '1280 px' },
+  { px: 1440, label: '1440 px' },
+  { px: 1600, label: '1600 px' },
+  { px: 1920, label: '1920 px — Full HD (default)' },
+  { px: 2560, label: '2560 px' },
+  { px: 3840, label: '3840 px — 4K' },
+  { px: 0,    label: "The screen's own width (no scaling)" },
+];
 const WEB_STATUS = {
   showing:      { label: 'Showing', tone: 'ok' },
   loading:      { label: 'Loading…' },
@@ -595,15 +608,18 @@ const agoFromEpoch = (at) => (at ? formatSecondsAgo(Date.now() / 1000 - at) : 'n
 const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
   const mode = screen?.contentMode || 'playlist';
   const savedReload = screen?.webReloadEveryMin ?? 240;
+  const savedWidth = screen?.webPageWidth ?? 1920;
   const [tab, setTab] = React.useState(mode);
   const [url, setUrl] = React.useState('');
   const [reload, setReload] = React.useState(savedReload);
+  const [pageWidth, setPageWidth] = React.useState(savedWidth);
   const [saving, setSaving] = React.useState(false);
   const [reloading, setReloading] = React.useState(false);
   // Follow the server when the mode moves (our save landing, or another
   // operator) — but never yank the operator off a half-typed URL.
   React.useEffect(() => { if (!url) setTab(mode); }, [mode]); // eslint-disable-line
   React.useEffect(() => { setReload(savedReload); }, [savedReload]);
+  React.useEffect(() => { setPageWidth(savedWidth); }, [savedWidth]);
 
   const legacy = screen?.appFlavor === 'legacy';
   const appTooOld = !!screen?.appVersion && !atLeastVersion(screen.appVersion, WEB_MIN_APP);
@@ -616,7 +632,9 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
   const typedBad = !!typed && !/^https:\/\/[^\s/?#]+/i.test(typed);
   const hasStored = !!screen?.webUrlHint;
   const canSubmitWeb = canEdit && !blockedWhy && !saving && !typedBad && (!!typed || hasStored);
-  const webDirty = !!typed || Number(reload) !== Number(savedReload);
+  const webDirty = !!typed || Number(reload) !== Number(savedReload)
+    || Number(pageWidth) !== Number(savedWidth);
+  const widthNeedsUpdate = !!screen?.appVersion && !atLeastVersion(screen.appVersion, WEB_PAGE_WIDTH_MIN_APP);
 
   const submit = async (patch) => {
     setSaving(true);
@@ -628,6 +646,7 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
     mode: 'web',
     ...(typed ? { url: typed } : {}),
     reloadEveryMin: Number(reload),
+    pageWidth: Number(pageWidth),
   });
   const backToPlaylist = () => submit({ mode: 'playlist' });
   const reloadNow = async () => {
@@ -713,6 +732,15 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
               {WEB_RELOAD_OPTIONS.map((o) => <option key={o.min} value={o.min}>{o.label}</option>)}
             </select>
           </LocField>
+          <LocField label="Page width"
+            hint={widthNeedsUpdate
+              ? `Applies once this screen runs player v${WEB_PAGE_WIDTH_MIN_APP} or later.`
+              : 'The page is laid out this wide, then scaled to fit the screen. Use the width the page was built for — most TV dashboards are 1920.'}>
+            <select style={LOC_SELECT_STYLE} value={pageWidth} disabled={!canEdit || saving || !!blockedWhy}
+              onChange={(e) => setPageWidth(Number(e.target.value))}>
+              {WEB_PAGE_WIDTH_OPTIONS.map((o) => <option key={o.px} value={o.px}>{o.label}</option>)}
+            </select>
+          </LocField>
           <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
             {mode === 'web' ? (
               <Button variant="primary" size="sm" disabled={!canSubmitWeb || !webDirty} onClick={submitWeb}>
@@ -737,6 +765,9 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
           <StatusLine label="On screen" value={onScreen.label} tone={onScreen.tone} />
           <StatusLine label="Host" value={screen?.webLoadedHost || screen?.webHost || '—'} mono />
           <StatusLine label="Last good load" value={agoFromEpoch(screen?.webLastLoadAt)} mono />
+          {screen?.webViewport && (
+            <StatusLine label="Page sees" value={String(screen.webViewport).replace('x', ' × ')} mono />
+          )}
           {screen?.webLastError && (
             <StatusLine label="Last problem"
               value={`${screen.webLastError} · ${agoFromEpoch(screen.webLastErrorAt)}`} />
