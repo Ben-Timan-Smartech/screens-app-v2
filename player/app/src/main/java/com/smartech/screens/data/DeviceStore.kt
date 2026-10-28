@@ -94,15 +94,20 @@ class DeviceStore(private val context: Context) {
 
     /**
      * `true` once the screen has been through first-run setup. Required fields:
-     * region, city, store, concept, and screen code. Floor and table are optional.
+     * region, city, store, and screen code. Floor and table are optional.
      * Used by [com.smartech.screens.MainActivity] to gate the onboarding screen.
+     *
+     * v0.2.15: concept is no longer part of this. It only applies to retail
+     * stores in multi-concept cities, and the setup form already insists on
+     * it there. Requiring it here kept any concept-less location (offices,
+     * Events, Test, BER, ROM) stuck on the setup screen after "Register",
+     * and re-opened setup if an admin cleared a screen's concept.
      */
     val isOnboarded: Flow<Boolean> = combine(
-        locRegion, locCity, locStoreId, locConcept, locScreenCode,
-    ) { region, city, store, concept, code ->
+        locRegion, locCity, locStoreId, locScreenCode,
+    ) { region, city, store, code ->
         !region.isNullOrBlank() && !city.isNullOrBlank() &&
-            !store.isNullOrBlank() && !concept.isNullOrBlank() &&
-            !code.isNullOrBlank()
+            !store.isNullOrBlank() && !code.isNullOrBlank()
     }
 
     val cacheCapBytes: Flow<Long> =
@@ -156,7 +161,7 @@ class DeviceStore(private val context: Context) {
      * helper writes all three keys in a single DataStore transaction so the
      * cascade-clear logic in [setLocRegion] / [setLocCity] doesn't wipe the
      * child fields between writes. Optionally clears `concept` when the
-     * picked store's city has no in-store concepts (BER, ROM).
+     * picked location has no in-store concepts (BER, ROM, offices).
      */
     suspend fun setLocStoreCascade(
         storeId: String?,
