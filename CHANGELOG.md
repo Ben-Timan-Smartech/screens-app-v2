@@ -18,6 +18,18 @@ Rules:
 
 ---
 
+## v0.2.18
+
+- **Screens download event content before the event starts.** Once an event
+  is signed off with a start time, every screen in it starts caching that
+  event's videos and splashes in the background, up to 24 hours ahead. So when
+  the event starts, the content plays straight away instead of downloading
+  on the spot.
+- What's playing now always comes first: preloading waits while the current
+  playlist is downloading, and skips anything that wouldn't fit under the
+  screen's cache limit. Preloaded files are kept until the event has started.
+- Screens without an upcoming event behave exactly as before.
+
 ## v0.2.17
 
 - **Web pages now fit the screen.** A page built for a 1920 × 1080 TV, like

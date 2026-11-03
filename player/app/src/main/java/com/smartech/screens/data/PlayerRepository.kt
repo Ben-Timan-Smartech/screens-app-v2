@@ -6,6 +6,7 @@ import com.smartech.screens.util.DeviceInfo
 import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -157,7 +158,7 @@ class PlayerRepository(
             }
 
             val cap = store.cacheCapBytes.first()
-            cache.reconcile(keep = playlist.items.map { it.id }.toSet(), capBytes = cap)
+            cache.reconcile(keep = keepIds(playlist.items), capBytes = cap)
 
             publish(playlist)
         } catch (t: Throwable) {
@@ -546,6 +547,22 @@ class PlayerRepository(
          *  of the playlist. Modern flavor only. */
         val contentMode: String = "playlist",
         val web: LiveWeb? = null,
+        /** v0.2.18: content for signed-off events this screen is in that
+         *  start soon. A cache hint, not a playlist — see [updatePreload].
+         *  An older server omits it → nothing to preload. */
+        val preload: List<LivePreloadItem> = emptyList(),
+    )
+
+    /** v0.2.18: one upcoming-event item to cache ahead of time. Every field is
+     *  optional on purpose, so one malformed entry can't fail the whole
+     *  /api/state decode and take the playlist down with it. */
+    @Serializable
+    private data class LivePreloadItem(
+        val id: String? = null,
+        val title: String? = null,
+        val type: String = "video",
+        val url: String? = null,
+        val sizeMb: Double? = null,
     )
 
     /** v0.2.16: web page mode settings. [url] carries a display token and
@@ -1253,6 +1270,11 @@ class PlayerRepository(
         // drained them in the GET response so we won't see them twice.
         for (cmd in state.commands) executeCommand(cmd.command)
 
+        // v0.2.18: cache upcoming-event content in the background. Runs every
+        // poll (the list changes without a playlist revision bump).
+        runCatching { updatePreload(state.preload, base) }
+            .onFailure { LogBuffer.w(TAG, "Preload update failed: ${it.message}") }
+
         // No change to playlist? Bail — heartbeats are handled by the
         // dedicated [startHeartbeatLoop] coroutine, no need to fire one
         // from here.
@@ -1424,7 +1446,7 @@ class PlayerRepository(
             }
         }
         val cap = store.cacheCapBytes.first()
-        cache.reconcile(keep = items.map { it.id }.toSet(), capBytes = cap)
+        cache.reconcile(keep = keepIds(items), capBytes = cap)
 
         val playlist = PlaylistResponse(
             screenId = store.locScreenCode.first() ?: "live",
@@ -2485,6 +2507,94 @@ class PlayerRepository(
 
     private val liveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // ── v0.2.18: upcoming-event preload ──────────────────────────────────
+
+    /** Ids on the server's current preload list. Unioned into every cache
+     *  reconcile (except an explicit Clear cache) so upcoming-event files
+     *  aren't evicted before the event starts. Empty for almost every
+     *  screen almost all the time. */
+    @Volatile private var preloadKeepIds: Set<String> = emptySet()
+    private var preloadJob: Job? = null
+    private var lastPreloadLogSig: String? = null
+    /** id → wall-clock ms of the last failed preload, so a dead URL isn't
+     *  retried every poll. */
+    private val preloadFailedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun keepIds(items: List<VideoItem>): Set<String> =
+        items.map { it.id }.toSet() + preloadKeepIds
+
+    /** Pin the preload list and start a background download of anything not
+     *  cached yet. Cheap when there's nothing to do; at most one preload job
+     *  runs at a time. */
+    private fun updatePreload(raw: List<LivePreloadItem>, base: String) {
+        val wanted = raw.mapNotNull { p ->
+            val id = p.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val url = p.url?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            LiveItem(id = id, title = p.title ?: id, type = p.type, url = url, sizeMb = p.sizeMb)
+                .toVideoItem(base) to p.sizeMb
+        }.distinctBy { it.first.id }
+        preloadKeepIds = wanted.map { it.first.id }.toSet()
+        if (wanted.isEmpty()) {
+            lastPreloadLogSig = null
+            return
+        }
+        val missing = wanted.filter { !cache.has(it.first.id) }
+        val sig = "${wanted.size - missing.size}/${wanted.size}"
+        if (sig != lastPreloadLogSig) {
+            lastPreloadLogSig = sig
+            LogBuffer.i(TAG, "Preload: $sig cached for upcoming event")
+        }
+        if (missing.isEmpty() || preloadJob?.isActive == true) return
+        val now = System.currentTimeMillis()
+        val due = missing.filter { (v, _) ->
+            val failed = preloadFailedAt[v.id] ?: 0L
+            now - failed >= PRELOAD_RETRY_AFTER_MS
+        }
+        if (due.isEmpty()) return
+        preloadJob = liveScope.launch { runPreload(due) }
+    }
+
+    /** One file at a time, lowest priority: waits while the current playlist
+     *  is downloading, and skips anything that wouldn't fit under the cache
+     *  cap (so preload can never squeeze out what's playing now). */
+    private suspend fun runPreload(queue: List<Pair<VideoItem, Double?>>) {
+        for ((v, sizeMb) in queue) {
+            if (v.id !in preloadKeepIds || cache.has(v.id)) continue
+            // Current-playlist downloads always win.
+            while (_downloads.value.isNotEmpty()) delay(PRELOAD_YIELD_MS)
+            if (v.id !in preloadKeepIds || cache.has(v.id)) continue
+            val cap = store.cacheCapBytes.first()
+            val needBytes = ((sizeMb ?: PRELOAD_UNKNOWN_SIZE_MB) * 1_000_000).toLong()
+            if (cache.totalBytes() + needBytes > cap ||
+                cache.usableSpace() - needBytes <= VideoCache.MIN_FREE_BYTES
+            ) {
+                LogBuffer.w(TAG, "Preload: skipping ${v.id} — no room under the cache cap without squeezing the current playlist")
+                preloadFailedAt[v.id] = System.currentTimeMillis()
+                continue
+            }
+            LogBuffer.i(TAG, "Preload: downloading ${v.id}")
+            runCatching { cache.ensure(v) }
+                .onSuccess {
+                    if (cache.has(v.id)) {
+                        preloadFailedAt.remove(v.id)
+                        LogBuffer.i(TAG, "Preload: cached ${v.id}")
+                    } else {
+                        preloadFailedAt[v.id] = System.currentTimeMillis()
+                    }
+                }
+                .onFailure {
+                    preloadFailedAt[v.id] = System.currentTimeMillis()
+                    LogBuffer.w(TAG, "Preload: ${v.id} failed (${it.message}); retrying later")
+                }
+        }
+        val pinned = preloadKeepIds
+        if (pinned.isNotEmpty()) {
+            val have = pinned.count { cache.has(it) }
+            lastPreloadLogSig = "$have/${pinned.size}"
+            LogBuffer.i(TAG, "Preload: $have/${pinned.size} cached for upcoming event")
+        }
+    }
+
     private fun LiveItem.toVideoItem(base: String): VideoItem {
         val absoluteUrl = if (url.startsWith("http://") || url.startsWith("https://")) url
         else if (url.startsWith("/")) base + url
@@ -2542,6 +2652,13 @@ class PlayerRepository(
 
     companion object {
         private const val TAG = "PlayerRepository"
+
+        /** v0.2.18 preload tuning: how long to wait between checks while a
+         *  playlist download is running, how long before a failed preload is
+         *  retried, and the size assumed when the server didn't send one. */
+        private const val PRELOAD_YIELD_MS = 5_000L
+        private const val PRELOAD_RETRY_AFTER_MS = 10 * 60_000L
+        private const val PRELOAD_UNKNOWN_SIZE_MB = 150.0
 
         /** Heartbeat fires on its own coroutine independent of the
          *  playlist-refresh loop, so the CMS can see the screen as
