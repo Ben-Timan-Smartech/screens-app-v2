@@ -18,6 +18,21 @@ Rules:
 
 ---
 
+## v0.2.19
+
+- **Screens update overnight in their own store's time, not during opening
+  hours.** The NYC screens' clocks were set to an Asian time zone, so their
+  "10pm to 6am" update window was actually 9am to 5pm in New York. They were
+  updating, and restarting, in front of customers. A screen now works out its
+  update window from its store's city (New York, London, Berlin or Rome),
+  whatever time zone the box itself is set to. London screens already used
+  the right time, so nothing changes for them.
+- **A screen stuck on one video now clears it and downloads it again.**
+  When a downloaded video couldn't be read back from the screen's storage,
+  the screen kept retrying the same broken file every 30 seconds. It now
+  deletes the file and downloads a fresh copy, the same way it already
+  handled other damaged downloads.
+
 ## v0.2.18
 
 - **Screens download event content before the event starts.** Once an event

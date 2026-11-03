@@ -16,7 +16,12 @@ object LocationTaxonomy {
 
     enum class Region { USA, UK, EU, GLOBAL }
 
-    data class City(val code: String, val region: Region)
+    /** v0.2.19: [timeZone] is the IANA zone the store's opening hours run
+     *  in. The overnight update window uses it instead of the box's own
+     *  clock zone, which is often left at the factory default (the NYC
+     *  boxes shipped on a UTC+8 zone, so "22:00–06:00" landed mid-shift).
+     *  Null = no single zone (GLB), fall back to the device's zone. */
+    data class City(val code: String, val region: Region, val timeZone: String? = null)
 
     /** v0.2.15: [kind] is [KIND_RETAIL] or [KIND_OFFICE]. Offices are
      *  added from the CMS (Settings → Locations) and never ask for a
@@ -37,10 +42,10 @@ object LocationTaxonomy {
     val regions: List<Region> = Region.entries
 
     val cities: List<City> = listOf(
-        City("NYC", Region.USA),
-        City("LDN", Region.UK),
-        City("BER", Region.EU),
-        City("ROM", Region.EU),
+        City("NYC", Region.USA, "America/New_York"),
+        City("LDN", Region.UK, "Europe/London"),
+        City("BER", Region.EU, "Europe/Berlin"),
+        City("ROM", Region.EU, "Europe/Rome"),
         // v0.1.37: GLB hosts the "Events" + "Test" stores and any
         // custom-added store that isn't anchored to a real retail
         // city. Region GLOBAL keeps them out of the cascade dropdowns
@@ -155,4 +160,7 @@ object LocationTaxonomy {
     /** Region the given city sits in. Used to auto-fill the region row. */
     fun regionOfCity(cityCode: String?): Region? =
         cityCode?.let { code -> cities.firstOrNull { it.code == code }?.region }
+
+    fun timeZoneOfCity(cityCode: String?): String? =
+        cityCode?.let { code -> cities.firstOrNull { it.code == code }?.timeZone }
 }
