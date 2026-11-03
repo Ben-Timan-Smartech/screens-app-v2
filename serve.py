@@ -749,7 +749,24 @@ _EVENT_SNAPSHOT_FIELDS = (
     "experienceUrl", "experiencePromptPos",
     "tapNext", "progressBar", "audioOn", "pollMode",
     "syncGroup", "displayMode", "revision",
+    # v0.2.16 web page mode: an event (or a content test) switches a web
+    # page screen to playlist mode, and the restore switches it back.
+    "contentMode", "web",
 )
+
+# What an event always takes over on a screen. Any key in the event's
+# `overrides` is added on top. Only these come back from the snapshot when
+# the event ends; everything else the operator changed mid-event (rotation,
+# audio, ...) is left as they set it.
+_EVENT_CONTROLLED_BASE = ("items", "mixSplash", "contentMode", "web")
+
+
+def _event_controlled_keys(event: dict) -> list[str]:
+    keys = list(_EVENT_CONTROLLED_BASE)
+    for k in (event.get("overrides") or {}):
+        if k in _EVENT_SNAPSHOT_FIELDS and k not in keys and k != "revision":
+            keys.append(k)
+    return keys
 
 
 def _target_screen_ids_for_event(event: dict) -> list[str]:
@@ -791,10 +808,16 @@ def _restore_screen_from_event(event: dict, device_id: str) -> None:
     event takes a fresh snapshot (vs restoring stale pre-event state)."""
     snaps = event.get("snapshots") or {}
     snap = snaps.pop(device_id, None)
+    # v0.2.18: only put back what the event took over. Edits to those keys
+    # made during the event were written into the snapshot (see
+    # _edit_target), so they land now; anything else the operator changed
+    # mid-event stays as they set it. Events started before this recorded
+    # no list, so they restore every snapshot field as before.
+    controlled = (event.get("controlled") or {}).pop(device_id, None)
     if snap is None:
         return
     s = _ensure_screen_state(device_id)
-    for k in _EVENT_SNAPSHOT_FIELDS:
+    for k in (controlled or _EVENT_SNAPSHOT_FIELDS):
         if k == "revision":
             continue  # bumped separately below
         if k in snap:
@@ -890,6 +913,10 @@ def _apply_event_override_to_screen(event: dict, device_id: str) -> None:
                 "pollMode", "syncGroup", "displayMode"):
         if key in overrides:
             s[key] = overrides[key]
+    # A web page screen shows the event too. Its URL stays in `web`, so the
+    # restore flips it straight back to the page.
+    s["contentMode"] = "playlist"
+    event.setdefault("controlled", {})[device_id] = _event_controlled_keys(event)
     # Clear pending commands so a stale command from before doesn't
     # fire during the event — restore after the event brings the
     # pre-event queue back if any.
@@ -914,6 +941,42 @@ def _active_event_for_screen(device_id: str, store_id: str | None) -> dict | Non
             if store_id and store_id in (ev.get("stores") or []):
                 return ev
     return None
+
+
+def _event_holding(device_id: str) -> dict | None:
+    """The active event currently holding this screen: one that took a
+    snapshot of it at start. Must be inside _STATE_LOCK."""
+    for ev in _events:
+        if ev.get("state") == "active" and device_id in (ev.get("snapshots") or {}):
+            return ev
+    return None
+
+
+def _edit_target(device_id: str, keys: tuple) -> tuple[dict, dict | None]:
+    """Where an operator edit to `keys` on this screen should land.
+
+    Normally the live per-screen state. While an active event holds the
+    screen and controls any of `keys`, the edit goes into the event's saved
+    snapshot instead: the screen keeps showing the event, and the edit takes
+    effect when the event ends (the restore writes the snapshot back).
+    Without this, a fleet-wide push during an event would either break the
+    takeover or be wiped by the restore.
+
+    Returns (dict to edit, event or None). When an event is returned the
+    caller must _save_events(). Must be inside _STATE_LOCK."""
+    live = _ensure_screen_state(device_id)
+    ev = _event_holding(device_id)
+    if ev is None:
+        return live, None
+    controlled = (ev.get("controlled") or {}).get(device_id) or list(_EVENT_CONTROLLED_BASE)
+    if not set(keys) & set(controlled):
+        return live, None
+    snap = ev["snapshots"][device_id]
+    snap.setdefault("items", [])
+    snap.setdefault("revision", 0)
+    if snap.get("items") is None:
+        snap["items"] = []
+    return snap, ev
 
 
 # v0.2.15: preload window — a signed-off event's content is advertised
@@ -1246,7 +1309,9 @@ def _public_event(event: dict) -> dict:
     and attaches a computed `effectiveScreenCount` so the list view
     can show how many screens an event targets right now (resolving
     stores against the live fleet for targetMode='stores')."""
-    out = {k: v for k, v in event.items() if k != "snapshots"}
+    # Snapshots can hold a web page screen's token URL; `controlled` is
+    # internal restore bookkeeping. Neither goes to the CMS.
+    out = {k: v for k, v in event.items() if k not in ("snapshots", "controlled")}
     try:
         with _STATE_LOCK:
             out["effectiveScreenCount"] = len(_target_screen_ids_for_event(event))
@@ -4542,7 +4607,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # (what the CMS shows and edits) and the test separately.
                     preview_snap = state.get("_previewSnapshot")
                     preview_exp_ms = state.get("_previewExpiresAtMs")
-                    real_state = preview_snap if preview_snap else state
+                    # v0.2.18: same idea for an event. The screen's own
+                    # playlist (where CMS edits land during the event) lives
+                    # in the event's snapshot; the live items are the event.
+                    held_ev = _event_holding(device_id)
+                    event_snap = (held_ev.get("snapshots") or {}).get(device_id) if held_ev else None
+                    real_state = event_snap or preview_snap or state
                     record = {
                         **s,
                         "online":                online_flag,
@@ -4556,6 +4626,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "previewItems":          (state.get("items") or []) if preview_snap else None,
                         "previewRemainingSec":   (max(0, int(round(preview_exp_ms / 1000 - now)))
                                                   if preview_exp_ms else None),
+                        "event":                 ({"id": held_ev.get("id"), "name": held_ev.get("name"),
+                                                   "endAt": held_ev.get("endAt"),
+                                                   "items": (preview_snap or state).get("items") or []}
+                                                  if held_ev else None),
                         "mixSplash":             real_state.get("mixSplash", True),
                         "productCard":           bool(state.get("productCard")),   # v0.1.86
                         "rotation":              int(state.get("rotation") or 0),  # v0.2.8
@@ -4580,8 +4654,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "displayMode":           state.get("displayMode"),
                         # v0.2.16: content mode + masked web settings. The
                         # URL itself carries a display token and is never
-                        # sent to the CMS — host + tail hint only.
-                        **_web_public(state),
+                        # sent to the CMS — host + tail hint only. The screen's
+                        # own mode, not a test's or an event's temporary one.
+                        **_web_public(real_state),
                     }
                     # v0.1.84: never expose the per-device secret to CMS
                     # clients (the **s spread above would otherwise include it).
@@ -4994,35 +5069,45 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 else:
                     targets = base_targets
                 pushed = 0
+                held = 0
                 for device_id in targets:
                     s = _ensure_screen_state(device_id)
                     # A real push ends any content test on this screen first,
                     # so it lands on the real playlist (and appends to it,
                     # not to the test clip) instead of being undone at expiry.
                     _cancel_preview_on(s)
+                    # During an event the push goes to the screen's own
+                    # (post-event) playlist; the event keeps playing.
+                    dest, ev = _edit_target(device_id, ("items",))
                     if mode == "append":
                         # Dedupe by id when appending so the same clip can't
                         # show up twice in a row.
-                        existing_ids = {x.get("id") for x in s["items"]}
+                        existing_ids = {x.get("id") for x in dest["items"]}
                         for v in items:
                             if v.get("id") not in existing_ids:
-                                s["items"].append(v)
+                                dest["items"].append(v)
                     else:
-                        s["items"] = list(items)
+                        dest["items"] = list(items)
+                    if ev is not None:
+                        held += 1
                     s["revision"] += 1
                     s["pushedAt"] = time.time()
                     pushed += 1
                 top_rev = max((s["revision"] for s in _per_screen.values()), default=0)
                 if pushed:
                     _save_per_screen()
-            print(f"[push] mode={mode} items={len(items)} -> {pushed} screens", file=sys.stderr)
+                if held:
+                    _save_events()
+            print(f"[push] mode={mode} items={len(items)} -> {pushed} screens ({held} held by an event)", file=sys.stderr)
             verb = "Replaced playlist on" if mode == "replace" else "Added to"
+            held_note = f" ({held} in an event, applies when it ends)" if held else ""
             _log_activity(
                 kind="push",
-                text=f"{verb} {pushed} screen{'' if pushed == 1 else 's'} · {len(items)} video{'' if len(items) == 1 else 's'}",
+                text=f"{verb} {pushed} screen{'' if pushed == 1 else 's'} · {len(items)} video{'' if len(items) == 1 else 's'}{held_note}",
                 icon="upload",
             )
-            self._send_json({"ok": True, "screensTargeted": pushed, "revision": top_rev, "items": len(items)})
+            self._send_json({"ok": True, "screensTargeted": pushed, "screensInEvent": held,
+                             "revision": top_rev, "items": len(items)})
             return
 
         if path == "/api/screens/register":
@@ -5611,6 +5696,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     s["_previewSnapshot"] = {k: s.get(k) for k in _EVENT_SNAPSHOT_FIELDS}
                 s["items"] = cleaned_items
                 s["mixSplash"] = False  # test content alone, no splash interleave
+                s["contentMode"] = "playlist"  # a web page screen shows the clip too; restore flips it back
                 s["revision"] = int(s.get("revision") or 0) + 1
                 now_s = time.time()
                 s["pushedAt"] = now_s
@@ -5993,18 +6079,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             targets.append(device_id)
                     else:
                         targets = [device_id]
+                    held_by_event = 0
                     for tid in targets:
                         st = _ensure_screen_state(tid)
                         _cancel_preview_on(st)  # sync-group fan-out: same rule as above
+                        # During an event this edits the screen's own
+                        # (post-event) playlist; the event keeps playing.
+                        dest, ev = _edit_target(tid, ("items",))
+                        if ev is not None:
+                            held_by_event += 1
                         if mode == "append":
-                            existing = {x.get("id") for x in st["items"]}
+                            existing = {x.get("id") for x in dest["items"]}
                             for v in items:
                                 if v.get("id") not in existing:
-                                    st["items"].append(v)
+                                    dest["items"].append(v)
                         else:
-                            st["items"] = list(items)
+                            dest["items"] = list(items)
                         st["revision"] += 1
                         st["pushedAt"] = time.time()
+                    if held_by_event:
+                        _save_events()
                     # v0.1.16: when this push hits a sync group, anchor
                     # the loop epoch at now + COORDINATED_START_DELAY_SEC
                     # so every member's tablet does the coordinated-
@@ -6039,15 +6133,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "ok": True,
                         "revision": base_state["revision"],
                         "screensTargeted": len(targets),
+                        "screensInEvent": held_by_event,
                         "syncGroup": group_id,
                     })
                     return
                 if action == "mix-splash":
-                    state = _ensure_screen_state(device_id)
+                    live = _ensure_screen_state(device_id)
+                    state, ev = _edit_target(device_id, ("mixSplash",))
                     state["mixSplash"] = bool(body.get("mixSplash", True))
-                    state["revision"] += 1                  # bump so player picks up flag change
+                    live["revision"] += 1                   # bump so player picks up flag change
                     _save_per_screen_soon()
-                    self._send_json({"ok": True, "mixSplash": state["mixSplash"]})
+                    if ev is not None:
+                        _save_events()
+                    self._send_json({"ok": True, "mixSplash": state["mixSplash"], "heldByEvent": ev is not None})
                     return
                 if action == "product-card":
                     # v0.1.86: toggle the shopper-facing product info card for
@@ -6088,7 +6186,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # (or change the reload interval) without re-sending the
                     # token-bearing URL, which it never holds after save.
                     # The URL is never echoed back, printed or logged.
-                    state = _ensure_screen_state(device_id)
+                    # During an event the change is saved for after it, like
+                    # a playlist push; the event keeps the screen.
+                    live = _ensure_screen_state(device_id)
+                    state, held_ev = _edit_target(device_id, ("contentMode", "web"))
                     mode = (body.get("mode") or "").strip().lower()
                     if mode not in ("playlist", "web"):
                         self._send_json({"ok": False, "error": "mode must be 'playlist' or 'web'"}, status=400)
@@ -6154,8 +6255,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     prev_mode = state.get("contentMode") or "playlist"
                     state["web"] = web if web.get("url") else None
                     state["contentMode"] = mode
-                    state["revision"] += 1      # bump so the tablet re-polls promptly
+                    live["revision"] += 1       # bump so the tablet re-polls promptly
                     _save_per_screen_soon()
+                    if held_ev is not None:
+                        _save_events()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     actor = (user or {}).get("display_name")
                     if mode == "web" and prev_mode != "web":
@@ -6166,8 +6269,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         text = f"{screen_name} switched back to its playlist"
                     else:
                         text = f"Web page settings saved on {screen_name}"
+                    if held_ev is not None:
+                        text += f" · applies when '{held_ev.get('name') or 'the event'}' ends"
                     _log_activity(kind="settings", text=text, who=actor, icon="settings", target=device_id)
-                    self._send_json({"ok": True, **_web_public(state)})
+                    self._send_json({"ok": True, **_web_public(state), "heldByEvent": held_ev is not None})
                     return
                 if action == "experience":
                     # v0.1.92: point this screen at a guided brand experience
