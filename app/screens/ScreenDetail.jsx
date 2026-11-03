@@ -553,6 +553,244 @@ const DisplayRotationCard = ({ screen, onSetRotation, canEdit, isLive }) => {
   );
 };
 
+// v0.2.16: web page mode. A screen shows either its playlist or one live web
+// page full screen (first use: the London office board). The URL carries a
+// display token, so it's write-only here: pasted into a masked field, sent
+// once, and from then on the server only returns its host + a short tail
+// hint. Switching back to the playlist leaves the playlist untouched. Modern
+// player (v0.2.16+) only.
+const WEB_MIN_APP = '0.2.16';
+const WEB_RELOAD_OPTIONS = [
+  { min: 60,   label: 'Every hour' },
+  { min: 120,  label: 'Every 2 hours' },
+  { min: 240,  label: 'Every 4 hours (default)' },
+  { min: 480,  label: 'Every 8 hours' },
+  { min: 720,  label: 'Every 12 hours' },
+  { min: 1440, label: 'Once a day' },
+  { min: 0,    label: 'Never — only to recover' },
+];
+// v0.2.17: the width the page is laid out at, then scaled to fit the screen.
+// Android otherwise uses the box's density-adjusted width (960 px on many
+// 1080p boxes), which crops a page built for a 1920 × 1080 TV.
+const WEB_PAGE_WIDTH_MIN_APP = '0.2.17';
+const WEB_PAGE_WIDTH_OPTIONS = [
+  { px: 1280, label: '1280 px' },
+  { px: 1440, label: '1440 px' },
+  { px: 1600, label: '1600 px' },
+  { px: 1920, label: '1920 px — Full HD (default)' },
+  { px: 2560, label: '2560 px' },
+  { px: 3840, label: '3840 px — 4K' },
+  { px: 0,    label: "The screen's own width (no scaling)" },
+];
+const WEB_STATUS = {
+  showing:      { label: 'Showing', tone: 'ok' },
+  loading:      { label: 'Loading…' },
+  offline:      { label: 'Network down — page kept up', tone: 'err' },
+  reconnecting: { label: 'Reconnecting', tone: 'err' },
+};
+const atLeastVersion = (v, min) => {
+  const a = String(v || '').replace(/-.*$/, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const b = min.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i];
+  return true;
+};
+const webViewLabel = (s) => {
+  if (!s?.webViewPackage) return null;
+  const name = ({
+    'com.google.android.webview': 'Google WebView',
+    'com.android.webview': 'AOSP WebView',
+    'com.android.chrome': 'Chrome',
+  })[s.webViewPackage] || s.webViewPackage;
+  return s.webViewVersion ? `${name} ${s.webViewVersion}` : name;
+};
+const agoFromEpoch = (at) => (at ? formatSecondsAgo(Date.now() / 1000 - at) : 'never');
+
+const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
+  const mode = screen?.contentMode || 'playlist';
+  const savedReload = screen?.webReloadEveryMin ?? 240;
+  const savedWidth = screen?.webPageWidth ?? 1920;
+  const [tab, setTab] = React.useState(mode);
+  const [url, setUrl] = React.useState('');
+  const [reload, setReload] = React.useState(savedReload);
+  const [pageWidth, setPageWidth] = React.useState(savedWidth);
+  const [saving, setSaving] = React.useState(false);
+  const [reloading, setReloading] = React.useState(false);
+  // Follow the server when the mode moves (our save landing, or another
+  // operator) — but never yank the operator off a half-typed URL.
+  React.useEffect(() => { if (!url) setTab(mode); }, [mode]); // eslint-disable-line
+  React.useEffect(() => { setReload(savedReload); }, [savedReload]);
+  React.useEffect(() => { setPageWidth(savedWidth); }, [savedWidth]);
+
+  const legacy = screen?.appFlavor === 'legacy';
+  const appTooOld = !!screen?.appVersion && !atLeastVersion(screen.appVersion, WEB_MIN_APP);
+  const blockedWhy = legacy
+    ? 'Web page mode needs the modern player — this screen runs the legacy build.'
+    : appTooOld
+      ? `Needs player v${WEB_MIN_APP} or later (this screen is on v${screen.appVersion}). Update it first.`
+      : null;
+  const typed = url.trim();
+  const typedBad = !!typed && !/^https:\/\/[^\s/?#]+/i.test(typed);
+  const hasStored = !!screen?.webUrlHint;
+  const canSubmitWeb = canEdit && !blockedWhy && !saving && !typedBad && (!!typed || hasStored);
+  const webDirty = !!typed || Number(reload) !== Number(savedReload)
+    || Number(pageWidth) !== Number(savedWidth);
+  const widthNeedsUpdate = !!screen?.appVersion && !atLeastVersion(screen.appVersion, WEB_PAGE_WIDTH_MIN_APP);
+
+  const submit = async (patch) => {
+    setSaving(true);
+    try {
+      if (await onSave(patch)) setUrl('');
+    } finally { setSaving(false); }
+  };
+  const submitWeb = () => submit({
+    mode: 'web',
+    ...(typed ? { url: typed } : {}),
+    reloadEveryMin: Number(reload),
+    pageWidth: Number(pageWidth),
+  });
+  const backToPlaylist = () => submit({ mode: 'playlist' });
+  const reloadNow = async () => {
+    setReloading(true);
+    try { await onReload(); } finally { setReloading(false); }
+  };
+
+  const onScreen = screen?.playerContentMode === 'web'
+    ? (WEB_STATUS[screen?.webStatus] || WEB_STATUS.showing)
+    : { label: isLive ? 'Switching…' : 'Switches when the screen reconnects' };
+  const summary = mode === 'web' ? `Web page · ${screen?.webHost || 'no URL'}` : 'Playlist';
+  const hint = { fontSize: 11, color: 'var(--ink-4)', lineHeight: 1.45 };
+
+  return (
+    <CollapsibleCard title="Content" summary={summary} defaultOpen={mode === 'web'}>
+      <div style={{
+        display: 'flex', border: 'var(--border-strong)', borderRadius: 6,
+        overflow: 'hidden', marginBottom: 12, opacity: canEdit ? 1 : 0.5,
+      }}>
+        {[['playlist', 'Playlist'], ['web', 'Web page']].map(([key, label], i) => {
+          const selected = tab === key;
+          return (
+            <button key={key} disabled={!canEdit} onClick={() => setTab(key)}
+              style={{
+                flex: 1, padding: '7px 10px', fontSize: 12,
+                fontWeight: selected ? 600 : 500,
+                background: selected ? 'var(--ink-0)' : 'var(--ink-10)',
+                color: selected ? 'var(--on-accent)' : 'var(--ink-2)',
+                borderLeft: i === 0 ? 'none' : '1px solid var(--ink-7)',
+                cursor: !canEdit ? 'not-allowed' : (selected ? 'default' : 'pointer'),
+              }}>
+              {label}{mode === key && <span style={{ opacity: 0.7, fontWeight: 400 }}> · live</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {tab === 'playlist' ? (
+        mode === 'web' ? (
+          <>
+            <div style={{ ...hint, marginBottom: 10 }}>
+              This screen is showing a web page. Switching back brings its playlist
+              straight back — nothing in it was changed.
+            </div>
+            <Button variant="primary" size="sm" disabled={!canEdit || saving} onClick={backToPlaylist}>
+              {saving ? 'Switching…' : 'Switch back to playlist'}
+            </Button>
+          </>
+        ) : (
+          <div style={hint}>
+            Plays the playlist. Choose Web page to show one live page full screen
+            instead, such as an office dashboard.
+          </div>
+        )
+      ) : (
+        <>
+          {blockedWhy && (
+            <div style={{ ...hint, color: 'var(--err)', marginBottom: 10 }}>{blockedWhy}</div>
+          )}
+          <LocField
+            label="Page URL"
+            hint={hasStored
+              ? `Saved: ${screen.webUrlHint}. Paste a new URL only to replace it.`
+              : 'Paste the full https:// link. It includes the display token, so it stays hidden here and only the screen ever receives it.'}>
+            {/* Masked like a password: the link carries the board's display
+                token. data-*-ignore keep password managers from offering to
+                save it. Never echoed back — the server only returns a hint. */}
+            <input type="password" value={url} disabled={!canEdit || saving || !!blockedWhy}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder={hasStored ? 'Keep saved URL' : 'https://…'}
+              autoComplete="new-password" spellCheck={false}
+              data-lpignore="true" data-1p-ignore="true" data-form-type="other"
+              style={{ ...LOC_SELECT_STYLE }} />
+            {typedBad && (
+              <div style={{ fontSize: 10.5, color: 'var(--err)', marginTop: 4 }}>
+                Must be a full https:// link.
+              </div>
+            )}
+          </LocField>
+          <LocField label="Full reload" hint="A clean reload on a timer, on top of the automatic reconnects.">
+            <select style={LOC_SELECT_STYLE} value={reload} disabled={!canEdit || saving || !!blockedWhy}
+              onChange={(e) => setReload(Number(e.target.value))}>
+              {WEB_RELOAD_OPTIONS.map((o) => <option key={o.min} value={o.min}>{o.label}</option>)}
+            </select>
+          </LocField>
+          <LocField label="Page width"
+            hint={widthNeedsUpdate
+              ? `Applies once this screen runs player v${WEB_PAGE_WIDTH_MIN_APP} or later.`
+              : 'The page is laid out this wide, then scaled to fit the screen. Use the width the page was built for — most TV dashboards are 1920.'}>
+            <select style={LOC_SELECT_STYLE} value={pageWidth} disabled={!canEdit || saving || !!blockedWhy}
+              onChange={(e) => setPageWidth(Number(e.target.value))}>
+              {WEB_PAGE_WIDTH_OPTIONS.map((o) => <option key={o.px} value={o.px}>{o.label}</option>)}
+            </select>
+          </LocField>
+          <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+            {mode === 'web' ? (
+              <Button variant="primary" size="sm" disabled={!canSubmitWeb || !webDirty} onClick={submitWeb}>
+                {saving ? 'Saving…' : 'Save'}
+              </Button>
+            ) : (
+              <Button variant="primary" size="sm" disabled={!canSubmitWeb} onClick={submitWeb}>
+                {saving ? 'Switching…' : 'Show web page'}
+              </Button>
+            )}
+            {mode === 'web' && (
+              <Button variant="ghost" size="sm" disabled={!canEdit || saving} onClick={backToPlaylist}>
+                Back to playlist
+              </Button>
+            )}
+          </div>
+        </>
+      )}
+
+      {(mode === 'web' || screen?.playerContentMode === 'web') && (
+        <div style={{ marginTop: 14 }}>
+          <StatusLine label="On screen" value={onScreen.label} tone={onScreen.tone} />
+          <StatusLine label="Host" value={screen?.webLoadedHost || screen?.webHost || '—'} mono />
+          <StatusLine label="Last good load" value={agoFromEpoch(screen?.webLastLoadAt)} mono />
+          {screen?.webViewport && (
+            <StatusLine label="Page sees" value={String(screen.webViewport).replace('x', ' × ')} mono />
+          )}
+          {screen?.webLastError && (
+            <StatusLine label="Last problem"
+              value={`${screen.webLastError} · ${agoFromEpoch(screen.webLastErrorAt)}`} />
+          )}
+          <StatusLine label="WebView" value={webViewLabel(screen) || '—'} mono />
+          {/* Manual reload — rides the refresh command, which a v0.2.16+
+              player in web page mode answers by reloading the page (skipping
+              any reconnect backoff). Restart player rebuilds the WebView. */}
+          {mode === 'web' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
+              <Button variant="secondary" size="sm" icon={<Icon.refresh size={12} />}
+                disabled={!canEdit || reloading || !!blockedWhy} onClick={reloadNow}>
+                {reloading ? 'Reloading…' : 'Reload page'}
+              </Button>
+              <span style={hint}>Loads a fresh copy of the page on the screen now.</span>
+            </div>
+          )}
+        </div>
+      )}
+    </CollapsibleCard>
+  );
+};
+
 const PollModeRow = ({ value, onChange, disabled, isLive }) => {
   const modes = [
     { key: 'fast',   label: 'Fast',   detail: '10 s'   },
@@ -982,20 +1220,27 @@ const LocationCard = ({ location, canEdit, onSave }) => {
     return next;
   });
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(baselineRef.current);
+  // v0.2.15: offices have no concept, so the field is hidden and any old
+  // value is cleared when the screen is saved against an office.
+  const atOffice = isOfficeStore(draft.storeId);
+  // A leftover concept on an office screen counts as unsaved, so Save is
+  // offered and clears it.
+  const dirty = JSON.stringify(atOffice ? { ...draft, concept: '' } : draft)
+    !== JSON.stringify(baselineRef.current);
   const save = async () => {
     setSaving(true);
     try {
-      await onSave({ ...draft });
+      await onSave(atOffice ? { ...draft, concept: '' } : { ...draft });
       // Adopt the just-saved values as the new baseline so the form is no
       // longer "dirty" and Reset returns here — not to stale pre-save
       // values that only disappear once the poll catches up.
-      baselineRef.current = { ...draft };
+      baselineRef.current = atOffice ? { ...draft, concept: '' } : { ...draft };
+      if (atOffice) setDraft(baselineRef.current);
     }
     finally { setSaving(false); }
   };
 
-  const summary = [draft.city, draft.concept].filter(Boolean).join(' · ') || 'Not set';
+  const summary = [draft.city, atOffice ? 'Office' : draft.concept].filter(Boolean).join(' · ') || 'Not set';
   return (
     <CollapsibleCard title="Location" summary={summary}>
       <LocField label="Region">
@@ -1016,16 +1261,18 @@ const LocationCard = ({ location, canEdit, onSave }) => {
         <select style={LOC_SELECT_STYLE} value={draft.storeId} disabled={!canEdit || saving}
           onChange={e => set({ storeId: e.target.value })}>
           <option value="">—</option>
-          {stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          {stores.map(s => <option key={s.id} value={s.id}>{s.kind === 'office' ? `${s.name} · Office` : s.name}</option>)}
         </select>
       </LocField>
-      <LocField label="Concept" hint="Sets the splash. A concept with no splash uploaded falls back to the city's default.">
-        <select style={LOC_SELECT_STYLE} value={draft.concept} disabled={!canEdit || saving}
-          onChange={e => set({ concept: e.target.value })}>
-          <option value="">None (use city default)</option>
-          {tax.concepts.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-      </LocField>
+      {!atOffice && (
+        <LocField label="Concept" hint="Sets the splash. A concept with no splash uploaded falls back to the city's default.">
+          <select style={LOC_SELECT_STYLE} value={draft.concept} disabled={!canEdit || saving}
+            onChange={e => set({ concept: e.target.value })}>
+            <option value="">None (use city default)</option>
+            {tax.concepts.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </LocField>
+      )}
       <LocField label="Screen code">
         <input type="text" value={draft.screenCode} disabled={!canEdit || saving} maxLength={40}
           onChange={e => set({ screenCode: e.target.value })}
@@ -1139,7 +1386,9 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   const liveScreen = isOnline ? lastKnown : null;
   const hasHistory = !!lastKnown;
 
-  const store = MOCK_STORES.find(s => s.id === storeId) || MOCK_STORES[0];
+  // allStores() includes CMS-added stores and offices; MOCK_STORES alone
+  // made their breadcrumb fall back to the first built-in store.
+  const store = allStores().find(s => s.id === storeId) || MOCK_STORES[0];
   // Build a screen-row from the live record, or stub a placeholder when the
   // tablet has been removed from the registry entirely (URL still old).
   const screen = lastKnown
@@ -1194,6 +1443,11 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     free:          lastKnown.freeStorageBytes != null ? formatBytes(lastKnown.freeStorageBytes) : '—',
     appVersion:    lastKnown.appVersion ? `v${lastKnown.appVersion}` : '—',
     revision:      `rev ${lastKnown.currentRevision || 0}`,
+    // v0.2.16: reported by v0.2.16+ players — "—" until the screen updates.
+    android:       lastKnown.androidVersion
+      ? `Android ${lastKnown.androidVersion}${lastKnown.androidSdk ? ` · API ${lastKnown.androidSdk}` : ''}`
+      : '—',
+    webView:       webViewLabel(lastKnown) || '—',
   } : {
     // Truly never-registered slot — keep the original "pending" copy.
     health: { label: 'Offline', tone: 'err' },
@@ -1201,6 +1455,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     device: 'Pending registration',
     tier: '—', orientation: screen.orient || '—',
     storage: '—', free: '—', appVersion: '—', revision: '—',
+    android: '—', webView: '—',
   };
 
   // Any tablet that has ever registered has a deviceId on the server, even
@@ -1325,6 +1580,46 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
         isLive
           ? (deg === 0 ? 'Display rotation cleared' : `Display rotated ${deg}°`)
           : (deg === 0 ? 'Rotation will clear when the tablet reconnects' : `Rotation (${deg}°) will apply when the tablet reconnects`),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+    }
+  };
+
+  // v0.2.16: playlist vs web page. Resolves true on success so the card can
+  // clear its masked URL field (and keep it on failure for a retry).
+  const handleSetContentMode = async (patch) => {
+    if (!targetDeviceId) return false;
+    const wasWeb = lastKnown?.contentMode === 'web';
+    const later = isLive ? '' : ' when the screen reconnects';
+    try {
+      const res = await setScreenContentMode(targetDeviceId, patch);
+      showToast(
+        patch.mode === 'web'
+          ? (wasWeb ? 'Web page settings saved' : `Switching to web page (${res.webHost})${later}`)
+          : (wasWeb ? `Switching back to the playlist${later}` : 'Saved'),
+        'ok',
+      );
+      return true;
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'err');
+      return false;
+    }
+  };
+
+  // Content card "Reload page": the same refresh command as "Refresh now",
+  // which the player answers in web page mode by reloading the page.
+  const handleReloadWebPage = async () => {
+    if (!targetDeviceId) return;
+    try {
+      await sendScreenCommand(targetDeviceId, 'refresh');
+      const mode = hasHistory ? lastKnown.pollMode : 'normal';
+      const eta = { fast: '~10 s', normal: '~60 s', slow: '~10 min' }[mode] || '~60 s';
+      showToast(
+        isLive
+          ? `Page reload queued — the screen picks it up in ${eta}`
+          : 'Page reload queued — runs when the screen reconnects',
         'ok',
       );
     } catch (e) {
@@ -1811,6 +2106,19 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               {/* v0.2.x: heavy-video warning. Amber, mirrors the SyncPicker
                   conflict panel. Shows which items won't play on the older
                   retail boxes (4K / above 1080p / oversized). */}
+              {/* v0.2.16: web page mode — the playlist is kept, just not shown. */}
+              {lastKnown?.contentMode === 'web' && (
+                <div style={{
+                  padding: '10px 12px', marginBottom: 8, borderRadius: 8,
+                  border: 'var(--border)', fontSize: 11.5,
+                  color: 'var(--ink-3)', lineHeight: 1.45,
+                }}>
+                  <span style={{ fontWeight: 600, color: 'var(--ink-1)' }}>
+                    Showing a web page ({lastKnown.webHost || 'no URL'}).
+                  </span>{' '}
+                  This playlist is kept and comes back when you switch the screen to Playlist in the Content card.
+                </div>
+              )}
               {heavyInPlaylist.length > 0 && (
                 <div style={{
                   padding: '10px 12px', marginBottom: 8, borderRadius: 8,
@@ -1931,9 +2239,24 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 <StatusLine label="Cache" value={statusValues.storage} mono />
                 <StatusLine label="Free disk" value={statusValues.free} mono />
                 <StatusLine label="App version" value={statusValues.appVersion} mono />
+                <StatusLine label="Android" value={statusValues.android} mono />
+                <StatusLine label="WebView" value={statusValues.webView} mono />
                 <StatusLine label="Playlist" value={statusValues.revision} mono />
               </div>
             </CollapsibleCard>
+
+            {/* v0.2.16: playlist vs web page (one live URL full screen).
+                Keyed on the mode so it remounts once the screen record
+                loads (or the mode changes) and defaultOpen re-evaluates:
+                open on a web screen, collapsed on a playlist one. */}
+            <ContentModeCard
+              key={lastKnown?.contentMode || 'pending'}
+              screen={lastKnown}
+              canEdit={canEdit}
+              isLive={isLive}
+              onSave={handleSetContentMode}
+              onReload={handleReloadWebPage}
+            />
 
             {/* v0.1.81: edit region/city/store/concept/screen code from the
                 CMS. Concept drives the splash, so this is where you fix a

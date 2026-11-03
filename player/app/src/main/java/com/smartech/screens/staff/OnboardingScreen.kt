@@ -26,8 +26,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,6 +43,7 @@ import com.smartech.screens.BuildConfig
 import com.smartech.screens.data.LocationTaxonomy
 import com.smartech.screens.data.PlayerRepository
 import com.smartech.screens.util.LogBuffer
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val Ink      = Color(0xFF141414)
@@ -74,11 +77,25 @@ fun OnboardingScreen(
     val screenCode by store.locScreenCode.collectAsState(initial = null)
     val serverUrl  by store.liveServerUrl.collectAsState(initial = null)
 
-    // Concept is only required for cities with multiple in-store concepts
-    // (NYC, LDN). BER and ROM are single-concept stores, so the concept
-    // dropdown isn't shown and we don't gate on it here.
-    val conceptRequired = !city.isNullOrBlank() &&
-        city in com.smartech.screens.data.LocationTaxonomy.MULTI_CONCEPT_CITIES
+    // Concept is only required for retail stores in cities with multiple
+    // in-store concepts (NYC, LDN). BER and ROM are single-concept stores
+    // and offices have no concept, so the dropdown isn't shown and we don't
+    // gate on it. Reading storesFlow re-evaluates this when the list lands.
+    val storeList by LocationTaxonomy.storesFlow.collectAsState()
+    val conceptRequired = remember(storeList, city, storeId) {
+        LocationTaxonomy.conceptApplies(city, storeId)
+    }
+
+    // v0.2.15: keep the store/office list fresh while setup is showing, so
+    // an office added in the CMS appears without restarting the tablet.
+    // Re-keyed on the server URL so editing it re-fetches straight away.
+    LaunchedEffect(serverUrl) {
+        while (true) {
+            repository.refreshStores()
+            delay(30_000)
+        }
+    }
+
     val ready =
         !region.isNullOrBlank() && !city.isNullOrBlank() &&
             !storeId.isNullOrBlank() &&
@@ -188,7 +205,8 @@ fun OnboardingScreen(
                 Text("Where is this screen?", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Region, city, store, concept, and screen code are required. Floor and table are optional.",
+                    "Pick the store or office, then give this screen a code. " +
+                        "Stores in New York and London also need a concept; offices don't. Floor is optional.",
                     color = Muted, fontSize = 14.sp,
                 )
             }
@@ -208,13 +226,14 @@ fun OnboardingScreen(
                         onRegion     = { /* read-only — set via onStore */ },
                         onCity       = { /* read-only — set via onStore */ },
                         onStore      = { v ->
-                            val picked = com.smartech.screens.data.LocationTaxonomy.storeById(v)
+                            val picked = LocationTaxonomy.storeById(v)
                             val cityCode = picked?.cityCode
-                            val regionName = com.smartech.screens.data.LocationTaxonomy.regionOfCity(cityCode)?.name
+                            val regionName = LocationTaxonomy.regionOfCity(cityCode)?.name
+                            // Offices and single-concept cities carry no concept.
                             val clearConcept = cityCode != null &&
-                                cityCode !in com.smartech.screens.data.LocationTaxonomy.MULTI_CONCEPT_CITIES
-                            // Floor/Table only apply to NYC right now.
-                            val clearFloorTable = cityCode != "NYC"
+                                !LocationTaxonomy.conceptApplies(cityCode, v)
+                            // Floor/Table only apply to the NYC store right now.
+                            val clearFloorTable = !LocationTaxonomy.floorApplies(cityCode, v)
                             scope.launch {
                                 store.setLocStoreCascade(v, cityCode, regionName, clearConcept, clearFloorTable)
                             }

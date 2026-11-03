@@ -91,8 +91,13 @@ const liveScreenToRow = (ls) => {
     appVersion: ls.appVersion || null,
     registeredAt: ls.registeredAt || 0,
     secondsSinceHeartbeat: ls.secondsSinceHeartbeat != null ? ls.secondsSinceHeartbeat : null,
-    playing:    currentItem?.title || null,
-    brand:      currentItem?.brand || null,
+    // v0.2.16: a screen in web page mode shows a live page, not its playlist.
+    contentMode: ls.contentMode || 'playlist',
+    webHost:    ls.webHost || null,
+    playing:    ls.contentMode === 'web'
+                  ? `Web page · ${ls.webHost || 'no URL'}`
+                  : (currentItem?.title || null),
+    brand:      ls.contentMode === 'web' ? null : (currentItem?.brand || null),
     status:     ls.online ? 'online' : 'offline',
     // v0.1.60: server now emits a stricter `live` flag — true when the
     // tablet is currently polling actively (within ~1.25× its poll
@@ -198,10 +203,16 @@ const allStores = () => {
     .map(s => ({
       id: s.id, name: s.name || s.id,
       city: s.city || 'Global', country: '—', region: 'Global',
+      kind: s.kind || 'retail',
       total: 0, online: 0, warn: 0, offline: 0,
     }));
   return [...MOCK_STORES, ...extra];
 };
+
+// v0.2.15: offices are locations with no in-store concept. Built-ins are
+// all retail; only CMS-added locations can be offices.
+const isOfficeStore = (storeId) =>
+  !!storeId && (LOCATION_TAXONOMY.stores || []).some(s => s.id === storeId && s.kind === 'office');
 
 // v0.2.x: flag videos that can choke a screen. Two independent problems, both
 // meaning the clip needs re-encoding before it's safe on the fleet:
@@ -237,4 +248,4 @@ const heavyBadge = (v) => {
   return null;
 };
 
-Object.assign(window, { MOCK_BRANDS, MOCK_STORES, MOCK_VIDEOS, MOCK_ACTIVITY, MOCK_SCREENS_STORE, MOCK_SCHEDULES, MOCK_USERS, ROLE_LABEL, LOCATION_TAXONOMY, liveScreenToRow, allStores, heavyReasons, isHeavy, heavyBadge });
+Object.assign(window, { MOCK_BRANDS, MOCK_STORES, MOCK_VIDEOS, MOCK_ACTIVITY, MOCK_SCREENS_STORE, MOCK_SCHEDULES, MOCK_USERS, ROLE_LABEL, LOCATION_TAXONOMY, liveScreenToRow, allStores, isOfficeStore, heavyReasons, isHeavy, heavyBadge });
