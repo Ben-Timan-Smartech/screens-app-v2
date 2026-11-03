@@ -7383,15 +7383,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not asset_id and not tag:
             self.send_error(404, f"No {flavor} APK in latest release"); return
 
-        def _open_upstream(range_val):
+        def _open_upstream(range_val, public=False):
             """Open the upstream APK byte stream, optionally with a Range.
               • asset_id set → authed/asset API (private repos + exact bytes).
               • else tag → the PUBLIC release-download URL (works with a
                 dead/absent token — avoids the rate-limited asset API).
             Both 302 to a CDN that honours Range; urllib carries the header
             across the redirect. _github_urlopen retries anonymously if a
-            stale token is rejected (repo is public)."""
-            if asset_id:
+            stale token is rejected (repo is public). `public` forces the
+            public URL (rate-limit fallback, see below)."""
+            if asset_id and not public:
                 api_url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/assets/{asset_id}"
                 return _github_urlopen(
                     api_url, accept="application/octet-stream", timeout=30,
@@ -7423,6 +7424,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     print("[release-download] upstream 416 (stale client range); refetching full file", file=sys.stderr)
                     client_range = None
                     upstream = _open_upstream(None)
+                # v0.2.19: the asset API is rate-limited (403/429 "rate limit
+                # exceeded") when a whole store updates at once — 42 NYC
+                # downloads 502'd on 2026-11-03. The public release-download
+                # URL isn't API-metered, so fall back to it.
+                elif e.code in (403, 429) and asset_id and tag:
+                    print(f"[release-download] asset API {e.code} (rate limit); using public download URL", file=sys.stderr)
+                    upstream = _open_upstream(client_range, public=True)
                 else:
                     raise
         except urllib.error.HTTPError as e:
