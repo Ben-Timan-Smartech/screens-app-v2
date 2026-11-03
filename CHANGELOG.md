@@ -18,6 +18,71 @@ Rules:
 
 ---
 
+## v0.2.17
+
+- **Web pages now fit the screen.** A page built for a 1920 × 1080 TV, like
+  the London office board, came out too big on some boxes: Android showed it
+  as if the screen were only about 960 pixels wide, so the right and bottom
+  edges were cut off. The screen now lays the page out at 1920 pixels wide
+  and scales it to fit. A new **Page width** setting in the screen's
+  **Content** card changes that width if a page was built for a different
+  size.
+- **The CMS shows the size the page sees**, for example "1920 × 1080", under
+  the screen's on-screen status, so you can check the layout without
+  walking over to the screen.
+- **Android's navigation buttons stay hidden.** If another window took over
+  the screen briefly, such as an install prompt, the back/home buttons
+  could stay on top of the content afterwards. They now hide again as soon
+  as the player is back.
+
+## v0.2.16
+
+- **Screens can now show a web page instead of a playlist.** In a screen's new
+  **Content** card, pick **Web page**, paste the page's link and press **Show
+  web page**: the screen switches within a minute and shows that one page full
+  screen, kept live. Switch back to **Playlist** and the playlist returns
+  exactly as it was. First use is the London office board.
+- **The link stays private.** Board links carry a display token, so the CMS
+  hides it as you paste it and never shows it again, only the site name and
+  the last four characters. Only the screen itself receives the full link, and
+  it's never written to the logs.
+- **It looks after itself.** If the page fails to load, comes up blank or the
+  network drops, the screen shows a quiet "Reconnecting…" (never a white page)
+  and keeps retrying until the page is back. If the network drops while the
+  page is up, the page stays on screen with a small "Reconnecting…" badge and
+  reloads itself when the network returns. It comes straight back to the page
+  after a reboot, even with no network. It also does a clean reload on a timer
+  (every 4 hours by default, adjustable).
+- **Refresh** and **Restart player** work on web page screens too: Refresh
+  reloads the page, Restart player rebuilds it from scratch.
+- The Content card shows what the screen is doing: whether the page is up, when
+  it last loaded, and the last problem it hit.
+- Every screen now reports its **Android and WebView versions** in the Status
+  card, so you can check whether a box can run web pages without walking up to
+  it.
+- Web pages need the modern player (this APK or later). Legacy-build screens
+  keep their playlist, and the CMS won't switch them.
+
+## v0.2.15
+
+- **Office locations.** In Settings → Locations, "Add location" now asks
+  whether it's a Store or an Office. When you set up a tablet at an office, it
+  doesn't ask for a concept (or a floor). Stores in New York and London still
+  ask for a concept, as before. An existing location can be switched with
+  "Make office" / "Make store".
+- **Fixed: some screens got stuck on the setup screen.** At any location
+  without a concept (Berlin, Rome, Events, Test and now offices), pressing
+  "Register screen" registered the tablet but left the setup screen showing.
+  It now goes straight to playback. Clearing a screen's concept from Device
+  admin no longer re-opens setup either.
+- **New locations reach the setup screen without a restart.** A tablet sitting
+  on the setup screen re-checks for new stores and offices every 30 seconds,
+  so one you've just added in the CMS shows up in the dropdown.
+- Screen detail's Location card hides Concept for screens at an office, and
+  the Stores list labels offices.
+- Needs the new APK on the tablet for the setup changes; the CMS side works as
+  soon as it deploys.
+
 ## v0.2.14
 
 - **Brand images now sync and play on screens, just like videos.** Drop a still

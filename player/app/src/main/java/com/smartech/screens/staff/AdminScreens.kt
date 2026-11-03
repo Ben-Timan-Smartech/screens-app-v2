@@ -383,9 +383,10 @@ fun DeviceAdminScreen(
                             val picked = LocationTaxonomy.storeById(v)
                             val cityCode = picked?.cityCode
                             val regionName = LocationTaxonomy.regionOfCity(cityCode)?.name
+                            // Offices and single-concept cities carry no concept.
                             val clearConcept = cityCode != null &&
-                                cityCode !in LocationTaxonomy.MULTI_CONCEPT_CITIES
-                            val clearFloorTable = cityCode != "NYC"
+                                !LocationTaxonomy.conceptApplies(cityCode, v)
+                            val clearFloorTable = !LocationTaxonomy.floorApplies(cityCode, v)
                             scope.launch {
                                 store.setLocStoreCascade(v, cityCode, regionName, clearConcept, clearFloorTable)
                                 LogBuffer.i("Admin", "Store → ${picked?.name ?: "—"} by ${user.name}")

@@ -462,6 +462,22 @@ const setScreenRotation = async (deviceId, rotation) => {
   return res.json();
 };
 
+// v0.2.16: setScreenContentMode — POST /api/screens/<id>/content-mode.
+// `patch` is { mode: 'playlist'|'web', url?, reloadEveryMin? }; leave `url` out
+// to keep the stored one (the CMS never holds it after save — the URL carries
+// a display token, so the server only ever returns host + a short hint).
+// Server 400s carry a readable `error`, which we surface as the message.
+const setScreenContentMode = async (deviceId, patch) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/content-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body.ok === false) throw new Error(body.error || `content mode failed: ${res.status}`);
+  return body;
+};
+
 // v0.1.97: useExperiences — the guided-experience library (vendored + uploaded).
 // Small payload, so no ETag dance like useLibrary; refetch on demand via
 // reload(). Returns { experiences, loading, error, reload }.
@@ -650,11 +666,12 @@ const setScreenLocation = async (deviceId, fields) => {
 // any tablet that fetches /api/stores at launch see it.
 // Built-in stores can't be edited from here; the server rejects
 // reserved ids with HTTP 409.
-const addStore = async ({ id, name, address, city }) => {
+// v0.2.15: kind is 'retail' (default) or 'office'.
+const addStore = async ({ id, name, address, city, kind = 'retail' }) => {
   const res = await fetch('/api/stores', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, name, address, city }),
+    body: JSON.stringify({ id, name, address, city, kind }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -666,6 +683,25 @@ const addStore = async ({ id, name, address, city }) => {
   if (out.store && !LOCATION_TAXONOMY.stores.some(s => s.id === out.store.id)) {
     LOCATION_TAXONOMY.stores.push(out.store);
   }
+  window.dispatchEvent(new CustomEvent('stores-refresh'));
+  return out.store;
+};
+
+// updateStore — v0.2.15. PATCH /api/stores/<id>, e.g. { kind: 'office' }.
+// Custom stores only; built-ins 404.
+const updateStore = async (id, patch) => {
+  const res = await fetch(`/api/stores/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `update-store failed: ${res.status}`);
+  }
+  const out = await res.json();
+  const i = LOCATION_TAXONOMY.stores.findIndex(s => s.id === id);
+  if (i >= 0 && out.store) LOCATION_TAXONOMY.stores[i] = out.store;
   window.dispatchEvent(new CustomEvent('stores-refresh'));
   return out.store;
 };
@@ -1417,6 +1453,9 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
       {can(user, 'screens.view') && (
         <SidebarItem icon={<Icon.sync />} label="Sync groups" current={current === 'sync-groups'} onClick={() => navigate('/sync-groups')} />
       )}
+      {can(user, 'events.view') && (
+        <SidebarItem icon={<Icon.schedule />} label="Events" current={current === 'events'} onClick={() => navigate('/events')} />
+      )}
       {/* v0.1.56: Schedules hidden. The page still exists at
           /schedules for anyone who knows the URL, but it's not
           surfaced in the sidebar until the scheduling feature
@@ -1652,12 +1691,12 @@ Object.assign(window, {
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, setMixSplash,
-  setScreenProductCard, setScreenRotation,
+  setScreenProductCard, setScreenRotation, setScreenContentMode,
   setScreenExperience, setScreenTapNext, setScreenProgressBar,
   useExperiences, uploadExperience, deleteExperience,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,
-  addStore, deleteStore, refreshStoresFromServer,
+  addStore, updateStore, deleteStore, refreshStoresFromServer,
 });
 
 // v0.1.38: pull any custom stores the server has on boot so the
