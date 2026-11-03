@@ -4505,9 +4505,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     s = _ensure_screen_state(screen_id)
                     # Drain pending commands as part of the response so the
                     # tablet sees them in one round-trip.
-                    commands = list(s["pendingCommands"])
-                    s["pendingCommands"] = []
+                    # v0.2.19: a command with `notBefore` (epoch s) waits in
+                    # the queue until then — used to send a store's screens an
+                    # update after closing time without anyone awake to press it.
+                    _now = time.time()
+                    _queued = s["pendingCommands"]
+                    commands = [
+                        {k: v for k, v in c.items() if k != "notBefore"}
+                        for c in _queued if (c.get("notBefore") or 0) <= _now
+                    ]
                     if commands:
+                        s["pendingCommands"] = [c for c in _queued if (c.get("notBefore") or 0) > _now]
                         # Drained queue is a state change worth persisting —
                         # otherwise a redeploy after a command was emitted
                         # but before it was drained could re-fire it.
@@ -6187,10 +6195,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         self._send_json({"ok": True, "deleted": True})
                         return
 
+                    # v0.2.19: optional `notBefore` (epoch seconds) holds the
+                    # command on the server until then, up to 48 h ahead.
+                    not_before = body.get("notBefore")
+                    if not_before is not None:
+                        if (not isinstance(not_before, (int, float)) or isinstance(not_before, bool)
+                                or not (time.time() < not_before <= time.time() + 48 * 3600)):
+                            self.send_error(400, "notBefore must be a time within the next 48 hours"); return
                     state = _ensure_screen_state(device_id)
-                    state["pendingCommands"].append({"command": cmd, "at": time.time()})
+                    entry = {"command": cmd, "at": time.time()}
+                    if not_before is not None:
+                        entry["notBefore"] = float(not_before)
+                    state["pendingCommands"].append(entry)
                     _save_per_screen_soon()
-                    print(f"[command] {device_id} -> {cmd}", file=sys.stderr)
+                    print(f"[command] {device_id} -> {cmd}"
+                          + (f" (not before {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(not_before))})" if not_before else ""),
+                          file=sys.stderr)
                     label = {
                         "reboot":        "Rebooted",
                         "restartPlayer": "Restarted player on",
@@ -6201,7 +6221,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     }[cmd]
                     _log_activity(
                         kind="command",
-                        text=f"{label} {screen_name}",
+                        text=f"{label} {screen_name}"
+                             + (f" (scheduled for {time.strftime('%H:%M UTC', time.gmtime(not_before))})" if not_before else ""),
                         icon={
                             "reboot":        "schedule",
                             "restartPlayer": "play",
