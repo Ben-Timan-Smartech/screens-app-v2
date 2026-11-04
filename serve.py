@@ -833,6 +833,17 @@ def _store_library_upload(data: bytes, ext: str, meta: dict, compress_info: dict
     return entry
 
 
+# v0.2.20: chunked uploads (see _serve_api_library_upload_chunk). Cloud Run's
+# front end refuses any request over 32 MiB with its own 413, so a bigger file
+# comes up in pieces and is reassembled in /tmp (RAM on Cloud Run, which is
+# why the total is capped).
+_CHUNK_SESSIONS: dict[str, dict] = {}
+_CHUNK_LOCK = threading.Lock()
+_CHUNK_MAX_BYTES = 16 * 1024 * 1024          # the CMS sends 8 MiB pieces
+_CHUNKED_UPLOAD_MAX_BYTES = 500 * 1024 * 1024
+_CHUNK_SESSION_TTL_SEC = 1800
+
+
 # v0.2.20: a compressed upload runs as a background job so the Events page
 # can show how far the encode has got (GET /api/library/upload-jobs/<id>),
 # and a long encode can't run into the request timeout. In memory only: a
@@ -1157,6 +1168,31 @@ def _snapshot_screen_for_event(event: dict, device_id: str) -> None:
     s = _ensure_screen_state(device_id)
     snap = {k: s.get(k) for k in _EVENT_SNAPSHOT_FIELDS}
     event.setdefault("snapshots", {})[device_id] = snap
+
+
+def _sync_live_event_targets(event: dict) -> tuple[list[str], list[str]]:
+    """v0.2.20: keep a live event's held screens in step with its target.
+    The event used to snapshot its screens only at start, so a screen that
+    joined afterwards never got it: a box reinstalled mid-event (new
+    deviceId), one whose store was set after the start, or one added to the
+    event's screen list. Now a screen that matches is snapshotted and taken
+    over, and one that no longer matches gets its own playlist back. A screen
+    another live event already holds stays with that event. Returns
+    (joined, left). Must be inside _STATE_LOCK."""
+    held = set((event.get("snapshots") or {}).keys())
+    want = set(_target_screen_ids_for_event(event))
+    taken: set[str] = set()
+    for other in _events:
+        if other is not event and other.get("state") == "active":
+            taken |= set((other.get("snapshots") or {}).keys())
+    joined = sorted(want - held - taken)
+    left = sorted(held - want)
+    for device_id in joined:
+        _snapshot_screen_for_event(event, device_id)
+        _apply_event_override_to_screen(event, device_id)
+    for device_id in left:
+        _restore_screen_from_event(event, device_id)
+    return joined, left
 
 
 def _restore_screen_from_event(event: dict, device_id: str) -> None:
@@ -1490,6 +1526,17 @@ def _event_scheduler_loop() -> None:
                                 f"Auto-ended event '{ev.get('name') or ev.get('id')}' — {len(snaps)} screen(s) restored",
                                 "event",
                             ))
+                        else:
+                            joined, left = _sync_live_event_targets(ev)
+                            if joined or left:
+                                ev["updatedAt"] = now_iso
+                                touched_events = True
+                                touched_per_screen = True
+                                name = ev.get("name") or ev.get("id")
+                                if joined:
+                                    activity_messages.append((f"{len(joined)} screen(s) joined live event '{name}'", "event"))
+                                if left:
+                                    activity_messages.append((f"{len(left)} screen(s) left live event '{name}', back on their playlists", "event"))
 
                 # E2.5 preview auto-restore. Each per-screen state can
                 # carry a `_previewExpiresAtMs` + `_previewSnapshot` set
@@ -4217,6 +4264,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path.split("?", 1)[0] == "/api/library/upload":
             self._serve_api_library_upload()
             return
+        m_chunk = re.match(r"^/api/library/upload-chunks/([0-9a-f]{16})(/complete)?$", self.path.split("?", 1)[0])
+        if m_chunk:
+            self._serve_api_library_upload_chunk(m_chunk.group(1), bool(m_chunk.group(2)))
+            return
         if self.path.split("?", 1)[0] == "/api/splashes/upload":
             self._serve_api_splash_upload()
             return
@@ -4596,11 +4647,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(400, "Missing 'file' field"); return
         if not brand:
             self.send_error(400, "Missing 'brand' field"); return
+        part_ctype = (file_part.get("content_type") or "").lower()
+        orig_name = file_part.get("filename") or "upload.mp4"
+        file_bytes = file_part["data"]
+        # The raw body and the parsed parts are each a full copy of the
+        # video. Drop them before the encode so it isn't three copies deep.
+        del raw, parts, file_part
+        self._library_upload_finish(file_bytes, orig_name, part_ctype, brand, title,
+                                    product, duration_raw, want_compress)
+
+    def _library_upload_finish(self, file_bytes: bytes, orig_name: str, part_ctype: str,
+                               brand: str, title: str, product: str,
+                               duration_raw: str, want_compress: bool) -> None:
+        """Validate one uploaded file and store it (or queue its compress job).
+        Shared by the one-request multipart upload and the chunked one."""
         # Light mime sniff — Content-Type from the form is taken as
         # best-effort. If absent or wrong, fall back to extension.
         # v0.2.20: stills (jpg/png/webp) are accepted too.
-        part_ctype = (file_part.get("content_type") or "").lower()
-        orig_name = file_part.get("filename") or "upload.mp4"
         ext = os.path.splitext(orig_name)[1].lower().lstrip(".") or "mp4"
         is_image = ext in _UPLOAD_IMAGE_EXTS
         if ext not in {"mp4", "mov", "m4v", "webm", "mkv"} and not is_image:
@@ -4638,10 +4701,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "is_image":       is_image,
         }
 
-        file_bytes = file_part["data"]
-        # The raw body and the parsed parts are each a full copy of the
-        # video. Drop them before the encode so it isn't three copies deep.
-        del raw, parts, file_part
         if want_compress:
             # v0.2.20: compress in the background and hand back a job id the
             # page polls for progress (GET /api/library/upload-jobs/<id>).
@@ -4650,6 +4709,90 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         entry = _store_library_upload(file_bytes, ext, meta)
         self._send_json({"ok": True, "video": entry, "compression": None})
+
+    def _serve_api_library_upload_chunk(self, sid: str, complete: bool) -> None:
+        """v0.2.20: chunked upload, for files over Cloud Run's 32 MiB request
+        cap (its front end answers 413 before the request reaches us).
+          POST /api/library/upload-chunks/<sid>?index=N   raw bytes of chunk N
+          POST /api/library/upload-chunks/<sid>/complete  JSON {size, filename,
+               contentType, brand, title?, product?, durationSec?, compress?}
+        The client picks <sid> (16 hex). Chunks must arrive in order; resending
+        the last one is a no-op, so a retried chunk is safe. Complete hands
+        the file to the same finish step as a one-request upload."""
+        import tempfile
+        user = self._require_perm("library.edit")
+        if user is None:
+            return
+        owner = user.get("id") or user.get("email")
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.send_error(411, "Content-Length required"); return
+        if length < 0 or length > _CHUNK_MAX_BYTES:
+            self.send_error(413, f"Chunk too large (cap {_CHUNK_MAX_BYTES} bytes)"); return
+        body = self.rfile.read(length) if length else b""
+
+        if complete:
+            try:
+                fields = json.loads(body or b"{}")
+            except ValueError:
+                self.send_error(400, "Expected JSON"); return
+            with _CHUNK_LOCK:
+                sess = _CHUNK_SESSIONS.get(sid)
+                if sess is not None and sess["owner"] == owner:
+                    _CHUNK_SESSIONS.pop(sid, None)
+            if sess is None or sess["owner"] != owner:
+                self._send_json({"error": "not_found", "detail": "That upload expired. Try again."}, status=404); return
+            try:
+                if int(fields.get("size") or -1) != sess["size"]:
+                    self._send_json({"error": "incomplete", "detail": "Part of the file didn't arrive. Try again."}, status=400); return
+                data = sess["path"].read_bytes()
+            finally:
+                sess["path"].unlink(missing_ok=True)
+            brand = str(fields.get("brand") or "").strip()
+            if not brand:
+                self.send_error(400, "Missing 'brand' field"); return
+            self._library_upload_finish(
+                data, str(fields.get("filename") or "upload.mp4"),
+                str(fields.get("contentType") or "").lower(), brand,
+                str(fields.get("title") or "").strip(), str(fields.get("product") or "").strip(),
+                str(fields.get("durationSec") or "").strip(), bool(fields.get("compress")),
+            )
+            return
+
+        try:
+            index = int((urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("index") or ["-1"])[0])
+        except ValueError:
+            index = -1
+        with _CHUNK_LOCK:
+            now = time.time()
+            sess = _CHUNK_SESSIONS.get(sid)
+            if sess is None:
+                if index != 0:
+                    self._send_json({"error": "not_found", "detail": "That upload expired. Try again."}, status=404); return
+                for stale_id in [k for k, v in _CHUNK_SESSIONS.items() if now - v["touched"] > _CHUNK_SESSION_TTL_SEC]:
+                    _CHUNK_SESSIONS.pop(stale_id)["path"].unlink(missing_ok=True)
+                sess = {"owner": owner, "next": 0, "size": 0, "touched": now,
+                        "path": Path(tempfile.gettempdir()) / f"chunked-{sid}.part"}
+                sess["path"].write_bytes(b"")
+                _CHUNK_SESSIONS[sid] = sess
+            if sess["owner"] != owner:
+                self._send_json({"error": "forbidden"}, status=403); return
+            if index == sess["next"] - 1:
+                self._send_json({"ok": True, "received": sess["size"]}); return   # a retry
+            if index != sess["next"]:
+                self._send_json({"error": "out_of_order", "expected": sess["next"]}, status=409); return
+            if sess["size"] + len(body) > _CHUNKED_UPLOAD_MAX_BYTES:
+                _CHUNK_SESSIONS.pop(sid)["path"].unlink(missing_ok=True)
+                self._send_json({"error": "too_large",
+                                 "detail": f"That file is over {_CHUNKED_UPLOAD_MAX_BYTES // (1024 * 1024)} MB."}, status=413); return
+            with open(sess["path"], "ab") as fh:
+                fh.write(body)
+            sess["next"] += 1
+            sess["size"] += len(body)
+            sess["touched"] = now
+            received = sess["size"]
+        self._send_json({"ok": True, "received": received})
 
     def _serve_api_splash_upload(self) -> None:
         """POST /api/splashes/upload — multipart/form-data with fields:
@@ -7132,23 +7275,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if patch.get("splashes"):
                     patch["splashes"] = {**(ev.get("splashes") or {}), **patch["splashes"]}
                 if ev.get("state") == "active":
-                    # While live, targetMode / stores / screens are fixed
-                    # — those drive which screens we've already snapshotted,
-                    # and changing them mid-event would orphan snapshots
-                    # (or miss restoring screens that no longer match the
-                    # new target). Operator must stop → edit → start.
-                    forbidden = {k for k in ("targetMode", "stores", "screens") if k in patch}
-                    if forbidden:
+                    # While live, targetMode (stores vs screens) is fixed.
+                    # v0.2.20: the stores / screens themselves can change:
+                    # _sync_live_event_targets takes over screens that now
+                    # match and gives the dropped ones their playlists back,
+                    # so no snapshot is orphaned.
+                    if "targetMode" in patch and patch["targetMode"] != ev.get("targetMode"):
                         self._send_json({
                             "error": "forbidden_while_active",
-                            "detail": f"Cannot change {sorted(forbidden)} while event is active. Stop it first.",
+                            "detail": "Can't switch between stores and screens while the event is live. End it first.",
                         }, status=409); return
+                    ev.update(patch)
+                    ev["updatedAt"] = _now_utc().isoformat()
+                    if "stores" in patch or "screens" in patch:
+                        _sync_live_event_targets(ev)
+                        _save_per_screen_soon()
                     # splashes / splashOn / screenAssignments / overrides
                     # CAN change mid-event — push the new values onto
                     # every currently-overridden screen so the fleet
                     # picks them up on the next poll.
-                    ev.update(patch)
-                    ev["updatedAt"] = _now_utc().isoformat()
                     if any(k in patch for k in ("splashes", "splashOn", "screenAssignments", "overrides")):
                         for device_id in list((ev.get("snapshots") or {}).keys()):
                             _apply_event_override_to_screen(ev, device_id)

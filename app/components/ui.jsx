@@ -747,6 +747,11 @@ const refreshStoresFromServer = async () => {
 // compresses in the background; we poll it, reporting `onCompress(0..1)`,
 // and resolve with the same { video, compression } a plain upload returns.
 const uploadVideo = ({ file, brand, title, product, durationSec, compress, onProgress, onCompress }) => {
+  // Cloud Run refuses any single request over 32 MiB (its own 413 page), so
+  // anything near that goes up in 8 MiB pieces instead.
+  if (file.size > UPLOAD_CHUNK_THRESHOLD) {
+    return uploadInChunks({ file, brand, title, product, durationSec, compress, onProgress, onCompress });
+  }
   const form = new FormData();
   form.append('file', file);
   form.append('brand', brand);
@@ -779,6 +784,68 @@ const uploadVideo = ({ file, brand, title, product, durationSec, compress, onPro
     xhr.send(form);
   });
   promise.abort = () => xhr.abort();
+  return promise;
+};
+
+const UPLOAD_CHUNK_THRESHOLD = 24 * 1024 * 1024;
+const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+
+// Chunked upload (POST /api/library/upload-chunks/<id>?index=N, then
+// /complete). Same promise shape as uploadVideo, including .abort(). Each
+// piece is retried a few times so one dropped request doesn't sink the file.
+const uploadInChunks = ({ file, brand, title, product, durationSec, compress, onProgress, onCompress }) => {
+  const sid = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
+  const ctrl = new AbortController();
+  const base = `/api/library/upload-chunks/${sid}`;
+  const reason = async (r) => {
+    const d = await r.json().catch(() => null);
+    return (d && (d.detail || d.error)) || `HTTP ${r.status}`;
+  };
+  const sendPiece = (index, blob, sentBefore) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && typeof onProgress === 'function') onProgress((sentBefore + e.loaded) / file.size);
+    });
+    xhr.addEventListener('load', () => resolve(xhr));
+    xhr.addEventListener('error', () => reject(new Error('network')));
+    xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')));
+    ctrl.signal.addEventListener('abort', () => xhr.abort());
+    xhr.open('POST', `${base}?index=${index}`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.send(blob);
+  });
+  const promise = (async () => {
+    const pieces = Math.ceil(file.size / UPLOAD_CHUNK_BYTES);
+    for (let i = 0; i < pieces; i++) {
+      const start = i * UPLOAD_CHUNK_BYTES;
+      const blob = file.slice(start, Math.min(file.size, start + UPLOAD_CHUNK_BYTES));
+      for (let attempt = 1; ; attempt++) {
+        let xhr = null;
+        try { xhr = await sendPiece(i, blob, start); }
+        catch (e) {
+          if (e.message === 'Upload cancelled' || attempt >= 4) throw new Error(e.message === 'network' ? 'Upload network error' : e.message);
+        }
+        if (xhr && xhr.status >= 200 && xhr.status < 300) break;
+        if (xhr && xhr.status !== 502 && xhr.status !== 503 && xhr.status !== 504) {
+          let msg = `HTTP ${xhr.status}`;
+          try { const d = JSON.parse(xhr.responseText); msg = d.detail || d.error || msg; } catch { /* not JSON */ }
+          throw new Error(`Upload failed: ${msg}`);
+        }
+        if (attempt >= 4) throw new Error('Upload failed: the server kept dropping the connection');
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
+    }
+    const r = await fetch(`${base}/complete`, {
+      method: 'POST', credentials: 'include', signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ size: file.size, filename: file.name, contentType: file.type,
+                             brand, title, product, durationSec, compress: !!compress }),
+    });
+    if (!r.ok) throw new Error(`Upload failed: ${await reason(r)}`);
+    const body = await r.json();
+    return body.jobId ? followUploadJob(body.jobId, onCompress) : body;
+  })();
+  promise.abort = () => ctrl.abort();
   return promise;
 };
 
