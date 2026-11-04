@@ -217,7 +217,8 @@ const eventsItemFromVideo = (v) => ({
 const DetailRail = ({ event, onClose, onAction, onEdit, onChanged }) => {
   const r = readinessOf(event);
   const editable = event.state !== 'ended';
-  const targetEditable = event.state === 'draft' || event.state === 'signed-off';
+  // v0.2.20: a live event's screens can change too (only stores vs screens is fixed).
+  const targetEditable = event.state !== 'ended';
   // { landscape: { phase: 'upload'|'queued'|'compress'|'saving', f: 0..1 } }
   // while that slot's upload is in flight.
   const [busy, setBusy] = useState({});
@@ -351,7 +352,9 @@ const DetailRail = ({ event, onClose, onAction, onEdit, onChanged }) => {
           )}
         </div>
         {event.state === 'active' && (
-          <div style={{ fontSize: 11, color: 'var(--ink-5)' }}>End the event to change which screens it covers.</div>
+          <div style={{ fontSize: 11, color: 'var(--ink-5)', lineHeight: 1.45 }}>
+            Live: screens added to it join straight away, and a new or reinstalled screen joins once its store is set.
+          </div>
         )}
       </div>
 
@@ -970,7 +973,8 @@ const eventsLocalInput = (iso) => {
 
 const EventFormModal = ({ stores, event, onClose, onSaved }) => {
   const editing = !!event;
-  const targetLocked = editing && event.state === 'active';
+  // While live, stores vs screens is fixed; which stores / screens isn't.
+  const modeLocked = editing && event.state === 'active';
   const [name, setName] = useState(event?.name || '');
   const [startAt, setStartAt] = useState(eventsLocalInput(event?.startAt));
   const [endAt, setEndAt] = useState(eventsLocalInput(event?.endAt));
@@ -999,11 +1003,9 @@ const EventFormModal = ({ stores, event, onClose, onSaved }) => {
       startAt: startAt ? new Date(startAt).toISOString() : null,
       endAt:   endAt   ? new Date(endAt).toISOString()   : null,
     };
-    if (!targetLocked) {
-      payload.targetMode = scope;
-      payload.stores = scope === 'stores' ? selectedStores : [];
-      payload.screens = scope === 'screens' ? selectedScreens : [];
-    }
+    if (!modeLocked) payload.targetMode = scope;
+    payload.stores = scope === 'stores' ? selectedStores : [];
+    payload.screens = scope === 'screens' ? selectedScreens : [];
     setSaving(true);
     try {
       const r = await fetch(editing ? `/api/events/${encodeURIComponent(event.id)}` : '/api/events', {
@@ -1087,16 +1089,18 @@ const EventFormModal = ({ stores, event, onClose, onSaved }) => {
           </div>
           <div>
             {label('Target')}
-            {targetLocked ? (
-              <div style={{ marginTop: 7, fontSize: 12, color: 'var(--ink-4)' }}>
-                This event is live, so its screens are fixed. End it to change them.
-              </div>
-            ) : (
+            {(
               <>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 7 }}>
-                  {scopeOption('stores', 'Whole stores')}
-                  {scopeOption('screens', 'Specific screens')}
-                </div>
+                {modeLocked ? (
+                  <div style={{ marginTop: 7, fontSize: 12, color: 'var(--ink-4)', lineHeight: 1.45 }}>
+                    This event is live. Screens you add take it over straight away; screens you remove go back to their own playlist.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 7 }}>
+                    {scopeOption('stores', 'Whole stores')}
+                    {scopeOption('screens', 'Specific screens')}
+                  </div>
+                )}
                 {scope === 'stores' && (
                   <div style={{
                     marginTop: 8, maxHeight: 180, overflow: 'auto', padding: 6,
