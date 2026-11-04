@@ -276,8 +276,6 @@ const DetailRail = ({ event, onClose, onAction, onEdit, onChanged }) => {
     return `in ${h}h ${m}m`;
   })();
   const sp = event.splashes || {};
-  const assignments = event.screenAssignments || {};
-  const assignedIds = Object.keys(assignments);
   return (
     <aside style={{
       borderLeft: 'var(--border)', background: 'var(--ink-10)',
@@ -405,24 +403,8 @@ const DetailRail = ({ event, onClose, onAction, onEdit, onChanged }) => {
         </span>
       </button>
 
-      {/* Per-screen assignments summary */}
-      {assignedIds.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <SectionLabel right={`${assignedIds.length} custom · ${Math.max(0, (event.effectiveScreenCount || 0) - assignedIds.length)} splash`}>
-            Per-screen · what plays
-          </SectionLabel>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {assignedIds.slice(0, 6).map((deviceId) => (
-              <AssignRow key={deviceId} deviceId={deviceId} entry={assignments[deviceId]} />
-            ))}
-            {assignedIds.length > 6 && (
-              <div style={{ padding: '6px 10px', fontSize: 11, color: 'var(--ink-5)' }}>
-                +{assignedIds.length - 6} more
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      {/* Per-screen content */}
+      <EventsScreenContent event={event} fleet={fleet} editable={editable} onChanged={onChanged} />
 
       {/* Footer actions */}
       <div style={{
@@ -718,33 +700,243 @@ const EventsScreenPicker = ({ selected, onChange }) => {
   );
 };
 
-const AssignRow = ({ deviceId, entry }) => (
-  <div style={{
-    display: 'flex', alignItems: 'center', gap: 10,
-    padding: '9px 10px',
-    background: 'var(--ink-10)', border: 'var(--border)', borderRadius: 3,
-  }}>
-    <div style={{
-      width: 32, height: 20, borderRadius: 2, flexShrink: 0,
-      background: 'linear-gradient(135deg, var(--warn-bg), var(--ink-9) 80%)',
-    }} />
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ fontSize: 12, color: 'var(--ink-1)', display: 'flex', alignItems: 'baseline', gap: 6 }}>
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{deviceId}</span>
+// What each targeted screen plays during the event. A screen with no content
+// of its own loops the splash; give it clips and they play instead (plus the
+// splash when the toggle above is on). This works while the event is live:
+// the server pushes the change to the screen straight away, and the screen's
+// own playlist still comes back when the event ends, because the restore uses
+// the snapshot taken at start, not whatever the event played.
+const EventsScreenContent = ({ event, fleet, editable, onChanged }) => {
+  const [selected, setSelected] = useState([]);
+  const [picking, setPicking] = useState(null);   // deviceIds being edited | null
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setSelected([]); setPicking(null); }, [event.id]);
+  const assignments = event.screenAssignments || {};
+  const byId = useMemo(() => Object.fromEntries(fleet.map((s) => [s.deviceId, s])), [fleet]);
+  const rows = [...(event.targetScreenIds || Object.keys(assignments))].sort((a, b) =>
+    String(byId[a]?.screenCode || a).localeCompare(String(byId[b]?.screenCode || b)));
+  const live = event.state === 'active';
+  const itemsOf = (id) => assignments[id]?.items || [];
+  const custom = rows.filter((id) => itemsOf(id).length > 0).length;
+  const codeOf = (id) => byId[id]?.screenCode || id.slice(0, 8);
+
+  const save = async (deviceIds, items) => {
+    const next = { ...assignments };
+    deviceIds.forEach((id) => {
+      if (items.length) next[id] = { items, splashOn: next[id]?.splashOn ?? null };
+      else delete next[id];
+    });
+    setSaving(true);
+    try {
+      await eventsPatch(event.id, { screenAssignments: next });
+      setPicking(null);
+      setSelected([]);
+      onChanged();
+      const who = deviceIds.length === 1 ? codeOf(deviceIds[0]) : `${deviceIds.length} screens`;
+      showToast(items.length
+        ? `${who} ${live ? 'now playing' : 'will play'} ${items.length} clip${items.length === 1 ? '' : 's'}`
+          + (live ? `. ${deviceIds.length === 1 ? 'Its own playlist comes' : 'Their own playlists come'} back when the event ends` : '')
+        : `${who} back to the splash`, 'ok');
+    } catch (e) { showToast(e.message, 'err'); }
+    finally { setSaving(false); }
+  };
+
+  // Prefill the picker with what's there when every screen being edited
+  // already plays the same clips.
+  const initialFor = (ids) => {
+    const first = itemsOf(ids[0]);
+    const key = (list) => list.map((i) => i.id).join('|');
+    return ids.every((id) => key(itemsOf(id)) === key(first)) ? first : [];
+  };
+  const orientFor = (ids) => {
+    const set = new Set(ids.map((id) => byId[id]?.orient === 'portrait' ? 'portrait' : 'landscape'));
+    return set.size === 1 ? [...set][0] : null;
+  };
+  const toggle = (id) => setSelected((sel) => sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id]);
+  const allPicked = rows.length > 0 && rows.every((id) => selected.includes(id));
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <SectionLabel right={rows.length ? `${custom} custom · ${rows.length - custom} splash only` : null}>
+        What each screen plays
+      </SectionLabel>
+      <div style={{ fontSize: 11, color: 'var(--ink-5)', lineHeight: 1.45 }}>
+        {live
+          ? 'Changes reach the screen straight away. Each screen goes back to its own playlist when the event ends.'
+          : 'Screens without their own content loop the splash. You can change this while the event is running too.'}
       </div>
-      <div style={{ fontSize: 11, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', letterSpacing: '0.02em', marginTop: 1 }}>
-        {(entry.items || []).length} clip{(entry.items || []).length === 1 ? '' : 's'} assigned
-        {entry.splashOn === true  && ' · splash on'}
-        {entry.splashOn === false && ' · splash off'}
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--ink-4)' }}>No screens targeted yet.</div>
+      ) : (
+        <div style={{ border: 'var(--border)', borderRadius: 3 }}>
+          {editable && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderBottom: 'var(--border)', minHeight: 40 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--ink-4)', cursor: 'pointer', flex: 1 }}>
+                <input type="checkbox" checked={allPicked}
+                       onChange={() => setSelected(allPicked ? [] : rows)} />
+                {selected.length ? `${selected.length} selected` : 'Select screens'}
+              </label>
+              {selected.length > 0 && (
+                <Button variant="primary" size="sm" disabled={saving}
+                        onClick={() => setPicking(selected)}>
+                  Choose content
+                </Button>
+              )}
+            </div>
+          )}
+          <div style={{ maxHeight: 320, overflow: 'auto' }}>
+            {rows.map((id) => {
+              const s = byId[id] || {};
+              const items = itemsOf(id);
+              const sel = selected.includes(id);
+              const splashOn = assignments[id]?.splashOn ?? event.splashOn;
+              return (
+                <div key={id} style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', minHeight: 44,
+                  borderBottom: 'var(--border)', background: sel ? 'var(--ink-9)' : 'transparent',
+                }}>
+                  {editable && <input type="checkbox" checked={sel} onChange={() => toggle(id)} aria-label={`Select ${codeOf(id)}`} />}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 12, color: 'var(--ink-1)' }}>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{codeOf(id)}</span>
+                      <span style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {[s.name && s.name !== s.screenCode ? s.name : null, s.orient === 'portrait' ? 'Portrait' : 'Landscape', s.status && s.status !== 'online' ? 'offline' : null].filter(Boolean).join(' · ')}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11, color: items.length ? 'var(--ink-2)' : 'var(--ink-5)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {items.length
+                        ? `${items.map((i) => i.title).join(', ')}${splashOn ? ' + splash' : ''}`
+                        : 'Splash only'}
+                    </div>
+                  </div>
+                  {editable && (
+                    <Button variant="ghost" size="sm" disabled={saving} onClick={() => setPicking([id])}>
+                      {items.length ? 'Edit' : 'Add content'}
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {picking && (
+        <EventsContentPicker
+          title={picking.length === 1 ? `Content for ${codeOf(picking[0])}` : `Content for ${picking.length} screens`}
+          orientation={orientFor(picking)}
+          initial={initialFor(picking)}
+          saving={saving}
+          onSave={(items) => save(picking, items)}
+          onClose={() => setPicking(null)} />
+      )}
+    </div>
+  );
+};
+
+// Pick an ordered set of library clips for one or more screens. Clips play in
+// the order they're picked. Saving with none sends the screen back to the splash.
+const EventsContentPicker = ({ title, orientation, initial, saving, onSave, onClose }) => {
+  const [q, setQ] = useState('');
+  const [picked, setPicked] = useState(initial || []);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
+  const results = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const fit = (v) => (!orientation || !(v.width && v.height) ? 1 : ((v.height > v.width) === (orientation === 'portrait') ? 0 : 2));
+    return (window.MOCK_VIDEOS || [])
+      .filter((v) => (v.mediaUrl || v.url) && !v.pendingSync)
+      .filter((v) => !needle || [v.title, v.brand, v.product].some((x) => String(x || '').toLowerCase().includes(needle)))
+      .sort((a, b) => fit(a) - fit(b) || (b.uploadedAt || 0) - (a.uploadedAt || 0))
+      .slice(0, 60);
+  }, [q, orientation]);
+  const pickedIds = picked.map((i) => i.id);
+  const toggle = (v) => setPicked((list) => list.some((i) => i.id === v.id)
+    ? list.filter((i) => i.id !== v.id)
+    : [...list, eventsItemFromVideo(v)]);
+  const totalSec = picked.reduce((n, i) => n + (Number(i.durationSec) || 0), 0);
+  return (
+    <div onClick={(e) => { e.stopPropagation(); onClose(); }} style={{
+      position: 'fixed', inset: 0, zIndex: 110, background: 'rgba(7, 9, 11, 0.6)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+    }}>
+      <div role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{
+        width: 'min(600px, 100%)', maxHeight: '88vh', display: 'flex', flexDirection: 'column',
+        background: 'var(--ink-10)', border: 'var(--border-strong)', borderRadius: 8,
+        boxShadow: '0 24px 64px -12px rgba(0,0,0,0.5)', overflow: 'hidden',
+      }}>
+        <div style={{ padding: '14px 18px', borderBottom: 'var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <h2 style={{ margin: 0, fontSize: 15, fontWeight: 500, color: 'var(--ink-1)', flex: 1 }}>{title}</h2>
+          <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} title="Close" />
+        </div>
+        {picked.length > 0 && (
+          <div style={{ padding: '10px 18px', borderBottom: 'var(--border)', display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 170, overflow: 'auto' }}>
+            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--ink-5)' }}>Plays in this order</div>
+            {picked.map((i, n) => (
+              <div key={i.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--ink-1)', minHeight: 28 }}>
+                <span className="tnum" style={{ width: 18, color: 'var(--ink-4)', fontSize: 11 }}>{n + 1}</span>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{i.title}</span>
+                <Button variant="ghost" size="sm" icon={<Icon.close size={12} />} title="Remove"
+                        onClick={() => setPicked((list) => list.filter((x) => x.id !== i.id))} />
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ padding: '12px 18px 6px' }}>
+          <Input placeholder="Search the library by title or brand" value={q}
+                 onChange={(e) => setQ(e.target.value)} leadingIcon={<Icon.search size={13} />} />
+        </div>
+        <div style={{ overflow: 'auto', padding: '4px 10px 12px', flex: 1, minHeight: 120 }}>
+          {results.length === 0 ? (
+            <div style={{ padding: 14, fontSize: 12, color: 'var(--ink-4)' }}>
+              {q ? `Nothing in the library matches "${q}".` : 'The library is empty.'}
+            </div>
+          ) : results.map((v) => {
+            const on = pickedIds.includes(v.id);
+            const portrait = v.width && v.height ? v.height > v.width : null;
+            const heavy = (typeof heavyReasons === 'function') ? heavyReasons(v) : [];
+            return (
+              <label key={v.id} style={{
+                display: 'flex', alignItems: 'center', gap: 10, width: '100%', minHeight: 44,
+                padding: '6px 8px', borderRadius: 3, cursor: 'pointer',
+                background: on ? 'var(--ink-9)' : 'transparent',
+              }}>
+                <input type="checkbox" checked={on} onChange={() => toggle(v)} />
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: 'block', fontSize: 13, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.title}</span>
+                  <span className="tnum" style={{ display: 'block', fontSize: 11, color: 'var(--ink-4)' }}>
+                    {[v.brand, v.duration, v.sizeMb ? `${v.sizeMb} MB` : null].filter(Boolean).join(' · ')}
+                  </span>
+                </span>
+                {heavy.length > 0 && (
+                  <span style={{ fontSize: 10, color: 'var(--warn)', flexShrink: 0 }}>Heavy for older boxes</span>
+                )}
+                {portrait != null && (
+                  <span style={{ fontSize: 11, color: !orientation || portrait === (orientation === 'portrait') ? 'var(--ink-3)' : 'var(--warn)', flexShrink: 0 }}>
+                    {portrait ? 'Portrait' : 'Landscape'}
+                  </span>
+                )}
+              </label>
+            );
+          })}
+        </div>
+        <div style={{ padding: '12px 18px', borderTop: 'var(--border)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="tnum" style={{ fontSize: 12, color: 'var(--ink-4)', flex: 1 }}>
+            {picked.length
+              ? `${picked.length} clip${picked.length === 1 ? '' : 's'} · ${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`
+              : 'No clips: the screen loops the splash'}
+          </span>
+          <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" size="sm" disabled={saving} onClick={() => onSave(picked)}>
+            {saving ? 'Saving…' : picked.length ? 'Save' : 'Use splash only'}
+          </Button>
+        </div>
       </div>
     </div>
-    <span style={{
-      fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase',
-      padding: '2px 6px', borderRadius: 2,
-      color: 'var(--warn)', background: 'var(--warn-bg)',
-    }}>Custom</span>
-  </div>
-);
+  );
+};
 
 // ─────────────────────────────────────────────────────────────
 // Event form — creates a draft, or edits an existing event's name, window

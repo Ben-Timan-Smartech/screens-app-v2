@@ -531,6 +531,9 @@ _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
 _COMPRESS_MAX_INPUT_BYTES = 500 * 1024 * 1024
 _COMPRESS_TIMEOUT_SEC = 240
+# One encode at a time. The Events page uploads both orientations at once, and
+# two 4K decodes side by side on the one instance is the memory spike to avoid.
+_COMPRESS_LOCK = threading.Lock()
 
 
 def _probe_video(path: Path) -> dict | None:
@@ -578,6 +581,11 @@ def _compress_video_for_fleet(data: bytes, ext: str) -> tuple[bytes, str, dict]:
     """Returns (bytes, ext, info). `info` always carries `compressed` (bool)
     plus whatever ffprobe learned (width/height/durationSec) and, when
     compression was skipped or failed, a plain-words `compressNote`."""
+    with _COMPRESS_LOCK:
+        return _compress_video_for_fleet_locked(data, ext)
+
+
+def _compress_video_for_fleet_locked(data: bytes, ext: str) -> tuple[bytes, str, dict]:
     info: dict = {"compressed": False, "originalMb": round(len(data) / 1_000_000.0, 1)}
     if not (_FFMPEG and _FFPROBE):
         info["compressNote"] = "ffmpeg isn't installed on the server"
@@ -607,7 +615,10 @@ def _compress_video_for_fleet(data: bytes, ext: str) -> tuple[bytes, str, dict]:
         )
         out = work / "out.mp4"
         cmd = [
-            _FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+            # Decoder threads capped too: left alone, ffmpeg starts one frame
+            # thread per host core it can see, each holding 4K frames.
+            _FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+            "-threads", "2", "-i", str(src), "-filter_threads", "1",
             "-map", "0:v:0", "-map", "0:a:0?",
             "-vf", (f"scale='min(iw,{box_w})':'min(ih,{box_h})'"
                     ":force_original_aspect_ratio=decrease:force_divisible_by=2"),
@@ -1453,7 +1464,15 @@ def _public_event(event: dict) -> dict:
     out = {k: v for k, v in event.items() if k not in ("snapshots", "controlled")}
     try:
         with _STATE_LOCK:
-            out["effectiveScreenCount"] = len(_target_screen_ids_for_event(event))
+            # v0.2.20: the deviceIds too, so the Events page can list each
+            # screen and give it its own content. While live that's the
+            # screens the event actually holds (the ones it'll restore).
+            if event.get("state") == "active" and event.get("snapshots"):
+                ids = list(event["snapshots"].keys())
+            else:
+                ids = _target_screen_ids_for_event(event)
+            out["targetScreenIds"] = ids
+            out["effectiveScreenCount"] = len(ids)
     except Exception:
         out["effectiveScreenCount"] = len(event.get("screens") or []) or len(event.get("stores") or [])
     return out
@@ -4402,6 +4421,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         safe_filename = f"{video_id}-{slug}.{ext}"
 
         file_bytes = file_part["data"]
+        # The raw body and the parsed parts are each a full copy of the
+        # video. Drop them before the encode so it isn't three copies deep.
+        del raw, parts, file_part
         compress_info: dict | None = None
         if want_compress:
             file_bytes, ext, compress_info = _compress_video_for_fleet(file_bytes, ext)
@@ -4542,7 +4564,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         ):
             self.send_error(415, f"Unsupported content type: {part_ctype}"); return
 
-        file_bytes, ext, compress_info = _compress_video_for_fleet(file_part["data"], ext)
+        file_bytes = file_part["data"]
+        del raw, parts, file_part  # see _serve_api_library_upload
+        file_bytes, ext, compress_info = _compress_video_for_fleet(file_bytes, ext)
 
         key_slug = re.sub(r"[^a-zA-Z0-9]+", "_", f"{kind}-{name}").strip("_").lower() or "splash"
         dest_dir = SPLASH_UPLOADS_DIR / key_slug
