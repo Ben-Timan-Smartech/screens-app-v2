@@ -577,15 +577,17 @@ def _probe_video(path: Path) -> dict | None:
     }
 
 
-def _compress_video_for_fleet(data: bytes, ext: str) -> tuple[bytes, str, dict]:
+def _compress_video_for_fleet(data: bytes, ext: str, on_progress=None) -> tuple[bytes, str, dict]:
     """Returns (bytes, ext, info). `info` always carries `compressed` (bool)
     plus whatever ffprobe learned (width/height/durationSec) and, when
-    compression was skipped or failed, a plain-words `compressNote`."""
+    compression was skipped or failed, a plain-words `compressNote`.
+    `on_progress(fraction)` is called as the encode runs (fraction may
+    overshoot 1 slightly when the probed duration is short)."""
     with _COMPRESS_LOCK:
-        return _compress_video_for_fleet_locked(data, ext)
+        return _compress_video_for_fleet_locked(data, ext, on_progress)
 
 
-def _compress_video_for_fleet_locked(data: bytes, ext: str) -> tuple[bytes, str, dict]:
+def _compress_video_for_fleet_locked(data: bytes, ext: str, on_progress=None) -> tuple[bytes, str, dict]:
     info: dict = {"compressed": False, "originalMb": round(len(data) / 1_000_000.0, 1)}
     if not (_FFMPEG and _FFPROBE):
         info["compressNote"] = "ffmpeg isn't installed on the server"
@@ -630,6 +632,9 @@ def _compress_video_for_fleet_locked(data: bytes, ext: str) -> tuple[bytes, str,
         ]
         if probe["fps"] > 30.5:
             cmd += ["-r", "30"]
+        # Progress as key=value lines on stdout, so the Events page can show
+        # a real bar (out_time_us against the probed duration).
+        cmd += ["-progress", "pipe:1", "-nostats"]
         cmd.append(str(out))
         # Lower priority than the request threads so heartbeats and /api/state
         # stay responsive while it encodes. `nice` the binary, not preexec_fn,
@@ -638,15 +643,34 @@ def _compress_video_for_fleet_locked(data: bytes, ext: str) -> tuple[bytes, str,
         if nice:
             cmd = [nice, "-n", "10"] + cmd
         t0 = time.time()
-        try:
-            res = subprocess.run(cmd, capture_output=True, timeout=_COMPRESS_TIMEOUT_SEC)
-        except subprocess.TimeoutExpired:
+        if on_progress:
+            on_progress(0.0)
+        dur_us = max(1.0, float(probe["duration"] or 0) * 1_000_000)
+        err_path = work / "ffmpeg.log"
+        killed = threading.Event()
+        with open(err_path, "wb") as err_fh:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err_fh)
+            def _kill() -> None:
+                killed.set()
+                proc.kill()
+            timer = threading.Timer(_COMPRESS_TIMEOUT_SEC, _kill)
+            timer.daemon = True
+            timer.start()
+            try:
+                for line in proc.stdout:
+                    key, _, val = line.decode("ascii", "replace").strip().partition("=")
+                    if key == "out_time_us" and on_progress and val.isdigit():
+                        on_progress(int(val) / dur_us)
+                proc.wait()
+            finally:
+                timer.cancel()
+        if killed.is_set():
             print(f"[compress] ffmpeg timed out after {_COMPRESS_TIMEOUT_SEC}s; keeping original", file=sys.stderr)
             info["compressNote"] = "compression took too long, kept the original"
             return data, ext, info
-        if res.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
-            err = (res.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-1:] or [""]
-            print(f"[compress] ffmpeg failed ({res.returncode}): {err[0][:200]}; keeping original", file=sys.stderr)
+        if proc.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
+            err = err_path.read_text("utf-8", "replace").strip().splitlines()[-1:] or [""]
+            print(f"[compress] ffmpeg failed ({proc.returncode}): {err[0][:200]}; keeping original", file=sys.stderr)
             info["compressNote"] = "compression failed, kept the original"
             return data, ext, info
         new = out.read_bytes()
@@ -665,6 +689,191 @@ def _compress_video_for_fleet_locked(data: bytes, ext: str) -> tuple[bytes, str,
         return new, "mp4", info
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+# v0.2.20: stills can be uploaded too (an event splash can be a poster). They
+# play for durationSec, the same dwell a Drive-synced still gets.
+_UPLOAD_IMAGE_EXTS = {"jpg", "jpeg", "png", "webp"}
+try:
+    _UPLOAD_IMAGE_DWELL_SEC = max(1, int(os.environ.get("SCREENS_IMAGE_DWELL_SEC", "10") or 10))
+except ValueError:
+    _UPLOAD_IMAGE_DWELL_SEC = 10
+
+
+def _compress_image_for_fleet(data: bytes, ext: str, on_progress=None) -> tuple[bytes, str, dict]:
+    """Downscale a still bigger than the screen (1920x1080, or 1080x1920 for
+    portrait) so the legacy 1 GB boxes don't decode a huge bitmap. Smaller
+    stills are kept as they are. Same return shape as the video version, and
+    the same rule: any failure keeps the original."""
+    with _COMPRESS_LOCK:
+        info: dict = {"compressed": False, "originalMb": round(len(data) / 1_000_000.0, 1)}
+        if not (_FFMPEG and _FFPROBE):
+            info["compressNote"] = "ffmpeg isn't installed on the server"
+            return data, ext, info
+        import subprocess
+        import tempfile
+        work = Path(tempfile.mkdtemp(prefix="compress-"))
+        try:
+            src = work / f"in.{ext}"
+            src.write_bytes(data)
+            if on_progress:
+                on_progress(0.2)
+            probe = _probe_video(src)
+            if probe is None:
+                info["compressNote"] = "couldn't read the image"
+                return data, ext, info
+            w, h = probe["width"], probe["height"]
+            info.update({"width": w, "height": h})
+            box_w, box_h = (1080, 1920) if h > w else (1920, 1080)
+            if w <= box_w and h <= box_h:
+                info["compressNote"] = "already sized for the screens"
+                return data, ext, info
+            out_ext = "png" if ext == "png" else "jpg"
+            out = work / f"out.{out_ext}"
+            cmd = [_FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+                   "-vf", f"scale='min(iw,{box_w})':'min(ih,{box_h})':force_original_aspect_ratio=decrease",
+                   "-frames:v", "1"]
+            if out_ext == "jpg":
+                cmd += ["-q:v", "2"]
+            cmd.append(str(out))
+            try:
+                res = subprocess.run(cmd, capture_output=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                info["compressNote"] = "resizing took too long, kept the original"
+                return data, ext, info
+            if res.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
+                info["compressNote"] = "resizing failed, kept the original"
+                return data, ext, info
+            new = out.read_bytes()
+            after = _probe_video(out) or {}
+            info.update({
+                "compressed": True,
+                "width":      after.get("width") or w,
+                "height":     after.get("height") or h,
+                "finalMb":    round(len(new) / 1_000_000.0, 1),
+            })
+            print(f"[compress] image {w}x{h} {info['originalMb']} MB -> {info['width']}x{info['height']} "
+                  f"{info['finalMb']} MB", file=sys.stderr)
+            return new, out_ext, info
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+# Library uploads are a read-modify-write of library.json. Background upload
+# jobs (below) can now finish while another upload is saving, so serialise it.
+_LIBRARY_WRITE_LOCK = threading.Lock()
+
+
+def _store_library_upload(data: bytes, ext: str, meta: dict, compress_info: dict | None = None) -> dict:
+    """Write an uploaded file to UPLOADS_DIR and append its library.json entry.
+    `meta` is what _serve_api_library_upload validated: video_id, slug, title,
+    brand, product, duration_sec, duration_given, is_image."""
+    safe_filename = f"{meta['video_id']}-{meta['slug']}.{ext}"
+    duration_sec = meta["duration_sec"]
+    if (compress_info and compress_info.get("durationSec")
+            and not meta["duration_given"] and not meta["is_image"]):
+        duration_sec = max(1, min(600, int(round(compress_info["durationSec"]))))
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    target = UPLOADS_DIR / safe_filename
+    with open(target, "wb") as fh:
+        fh.write(data)
+    size_bytes = target.stat().st_size
+
+    brand = meta["brand"]
+    with _LIBRARY_WRITE_LOCK:
+        # Re-read fresh from disk rather than trust the in-memory cache so a
+        # concurrent Drive sync doesn't get clobbered.
+        if LIBRARY_JSON.is_file():
+            with open(LIBRARY_JSON, "r", encoding="utf-8") as f:
+                lib = json.load(f)
+        else:
+            lib = {"brands": [], "videos": []}
+        videos = lib.setdefault("videos", [])
+        brands = lib.setdefault("brands", [])
+
+        # Auto-register a brand record if this is the first video for an
+        # unknown brand. Keeps the brand picker self-healing — the CMS doesn't
+        # need a "create brand" flow for casual uploads.
+        if brand and not any((b.get("id") or "").lower() == brand.lower() for b in brands):
+            brands.append({"id": brand, "name": brand.replace("-", " ").title(), "videos": 0})
+
+        entry = {
+            "id":            meta["video_id"],
+            "title":         meta["title"],
+            "brand":         brand,
+            "product":       meta["product"] or None,
+            "durationSec":   duration_sec,
+            "duration":      _fmt_duration(duration_sec),
+            "sizeMb":        round(size_bytes / 1_000_000.0, 1),
+            "filename":      safe_filename,
+            "mediaUrl":      f"/uploaded/{safe_filename}",
+            "uploadedAt":    int(time.time() * 1000),
+            "screens":       0,
+            "defaultUnmute": False,
+        }
+        if meta["is_image"]:
+            entry["type"] = "image"
+        if compress_info and compress_info.get("width") and compress_info.get("height"):
+            entry["width"] = compress_info["width"]
+            entry["height"] = compress_info["height"]
+        videos.append(entry)
+
+        LIBRARY_JSON.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LIBRARY_JSON.with_suffix(LIBRARY_JSON.suffix + ".tmp")
+        tmp.write_text(json.dumps(lib, indent=2), encoding="utf-8")
+        tmp.replace(LIBRARY_JSON)
+        _LIBRARY_CACHE["mtime"] = 0.0   # force re-read on next GET
+
+    _log_activity(
+        kind="upload",
+        text=f"Uploaded \"{meta['title']}\" to {brand}",
+        icon="upload",
+    )
+    return entry
+
+
+# v0.2.20: a compressed upload runs as a background job so the Events page
+# can show how far the encode has got (GET /api/library/upload-jobs/<id>),
+# and a long encode can't run into the request timeout. In memory only: a
+# restart mid-encode loses the job, and the page says the upload failed.
+_UPLOAD_JOBS: dict[str, dict] = {}
+_UPLOAD_JOBS_LOCK = threading.Lock()
+_UPLOAD_JOB_TTL_SEC = 3600
+
+
+def _set_upload_job(job_id: str, **fields) -> None:
+    with _UPLOAD_JOBS_LOCK:
+        job = _UPLOAD_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _start_upload_job(data: bytes, ext: str, meta: dict) -> str:
+    job_id = secrets.token_hex(8)
+    now = time.time()
+    with _UPLOAD_JOBS_LOCK:
+        for stale in [k for k, j in _UPLOAD_JOBS.items() if now - j["createdAt"] > _UPLOAD_JOB_TTL_SEC]:
+            del _UPLOAD_JOBS[stale]
+        # "queued" until the encode lock is free (one encode at a time).
+        _UPLOAD_JOBS[job_id] = {"state": "queued", "progress": 0.0, "createdAt": now}
+    threading.Thread(target=_run_upload_job, args=(job_id, data, ext, meta),
+                     daemon=True, name=f"upload-{job_id}").start()
+    return job_id
+
+
+def _run_upload_job(job_id: str, data: bytes, ext: str, meta: dict) -> None:
+    def progress(fraction: float) -> None:
+        _set_upload_job(job_id, state="compressing", progress=round(max(0.0, min(0.99, fraction)), 3))
+    try:
+        compress = _compress_image_for_fleet if meta["is_image"] else _compress_video_for_fleet
+        out, out_ext, info = compress(data, ext, on_progress=progress)
+        _set_upload_job(job_id, state="saving", progress=1.0)
+        entry = _store_library_upload(out, out_ext, meta, info)
+        _set_upload_job(job_id, state="done", progress=1.0, video=entry, compression=info)
+    except Exception as exc:
+        print(f"[upload] job {job_id} failed: {exc}", file=sys.stderr)
+        _set_upload_job(job_id, state="error", error="The upload couldn't be saved. Try again.")
 
 
 def _parse_multipart(body: bytes, boundary: bytes) -> list[dict]:
@@ -4387,22 +4596,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(400, "Missing 'file' field"); return
         if not brand:
             self.send_error(400, "Missing 'brand' field"); return
-        # Light video-mime sniff — Content-Type from the form is taken
-        # as best-effort. If absent or wrong, fall back to extension.
+        # Light mime sniff — Content-Type from the form is taken as
+        # best-effort. If absent or wrong, fall back to extension.
+        # v0.2.20: stills (jpg/png/webp) are accepted too.
         part_ctype = (file_part.get("content_type") or "").lower()
         orig_name = file_part.get("filename") or "upload.mp4"
         ext = os.path.splitext(orig_name)[1].lower().lstrip(".") or "mp4"
-        if ext not in {"mp4", "mov", "m4v", "webm", "mkv"}:
+        is_image = ext in _UPLOAD_IMAGE_EXTS
+        if ext not in {"mp4", "mov", "m4v", "webm", "mkv"} and not is_image:
             self.send_error(415, f"Unsupported file extension: .{ext}"); return
         # Don't let a stray text/* or application/* through — they
         # won't play on the tablet and only waste storage.
         if part_ctype and not (
-            part_ctype.startswith("video/")
+            part_ctype.startswith("image/" if is_image else "video/")
             or part_ctype == "application/octet-stream"
         ):
             self.send_error(415, f"Unsupported content type: {part_ctype}"); return
 
-        duration_sec = 15
+        duration_sec = _UPLOAD_IMAGE_DWELL_SEC if is_image else 15
         if duration_raw:
             try:
                 duration_sec = max(1, min(600, int(float(duration_raw))))
@@ -4416,75 +4627,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # spaces. The library `id` is just `upload-<timestamp>` so
         # IDs never collide with Drive-synced or seeded entries.
         ts_ms = int(time.time() * 1000)
-        slug = _slug(title) or "video"
-        video_id = f"upload-{ts_ms}"
-        safe_filename = f"{video_id}-{slug}.{ext}"
+        meta = {
+            "video_id":       f"upload-{ts_ms}",
+            "slug":           _slug(title) or ("image" if is_image else "video"),
+            "title":          title,
+            "brand":          brand,
+            "product":        product,
+            "duration_sec":   duration_sec,
+            "duration_given": bool(duration_raw),
+            "is_image":       is_image,
+        }
 
         file_bytes = file_part["data"]
         # The raw body and the parsed parts are each a full copy of the
         # video. Drop them before the encode so it isn't three copies deep.
         del raw, parts, file_part
-        compress_info: dict | None = None
         if want_compress:
-            file_bytes, ext, compress_info = _compress_video_for_fleet(file_bytes, ext)
-            safe_filename = f"{video_id}-{slug}.{ext}"
-            if compress_info.get("durationSec") and not duration_raw:
-                duration_sec = max(1, min(600, int(round(compress_info["durationSec"]))))
-
-        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-        target = UPLOADS_DIR / safe_filename
-        with open(target, "wb") as fh:
-            fh.write(file_bytes)
-        size_bytes = target.stat().st_size
-
-        # Append to library.json. We re-read fresh from disk rather
-        # than trust the in-memory cache so a concurrent Drive sync
-        # doesn't get clobbered.
-        if LIBRARY_JSON.is_file():
-            with open(LIBRARY_JSON, "r", encoding="utf-8") as f:
-                lib = json.load(f)
-        else:
-            lib = {"brands": [], "videos": []}
-        videos = lib.setdefault("videos", [])
-        brands = lib.setdefault("brands", [])
-
-        # Auto-register a brand record if this is the first video for
-        # an unknown brand. Keeps the brand picker self-healing — the
-        # CMS doesn't need a "create brand" flow for casual uploads.
-        if brand and not any((b.get("id") or "").lower() == brand.lower() for b in brands):
-            brands.append({"id": brand, "name": brand.replace("-", " ").title(), "videos": 0})
-
-        entry = {
-            "id":            video_id,
-            "title":         title,
-            "brand":         brand,
-            "product":       product or None,
-            "durationSec":   duration_sec,
-            "duration":      _fmt_duration(duration_sec),
-            "sizeMb":        round(size_bytes / 1_000_000.0, 1),
-            "filename":      safe_filename,
-            "mediaUrl":      f"/uploaded/{safe_filename}",
-            "uploadedAt":    int(time.time() * 1000),
-            "screens":       0,
-            "defaultUnmute": False,
-        }
-        if compress_info and compress_info.get("width") and compress_info.get("height"):
-            entry["width"] = compress_info["width"]
-            entry["height"] = compress_info["height"]
-        videos.append(entry)
-
-        LIBRARY_JSON.parent.mkdir(parents=True, exist_ok=True)
-        tmp = LIBRARY_JSON.with_suffix(LIBRARY_JSON.suffix + ".tmp")
-        tmp.write_text(json.dumps(lib, indent=2), encoding="utf-8")
-        tmp.replace(LIBRARY_JSON)
-        _LIBRARY_CACHE["mtime"] = 0.0   # force re-read on next GET
-
-        _log_activity(
-            kind="upload",
-            text=f"Uploaded \"{title}\" to {brand}",
-            icon="upload",
-        )
-        self._send_json({"ok": True, "video": entry, "compression": compress_info})
+            # v0.2.20: compress in the background and hand back a job id the
+            # page polls for progress (GET /api/library/upload-jobs/<id>).
+            job_id = _start_upload_job(file_bytes, ext, meta)
+            self._send_json({"ok": True, "jobId": job_id}, status=202)
+            return
+        entry = _store_library_upload(file_bytes, ext, meta)
+        self._send_json({"ok": True, "video": entry, "compression": None})
 
     def _serve_api_splash_upload(self) -> None:
         """POST /api/splashes/upload — multipart/form-data with fields:
@@ -5106,6 +5271,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "threadName":     rec.get("threadName"),
                 })
             self._send_json({"crashes": out, "total": len(out)})
+            return
+
+        # v0.2.20: progress of a compressed upload (see _start_upload_job).
+        m_job = re.match(r"^/api/library/upload-jobs/([0-9a-f]{16})$", path)
+        if m_job:
+            if self._require_perm("library.edit") is None:
+                return
+            with _UPLOAD_JOBS_LOCK:
+                job = dict(_UPLOAD_JOBS.get(m_job.group(1)) or {})
+            if not job:
+                self._send_json({"error": "not_found", "detail": "That upload isn't running any more."}, status=404)
+                return
+            job.pop("createdAt", None)
+            self._send_json(job)
             return
 
         if path == "/api/library":

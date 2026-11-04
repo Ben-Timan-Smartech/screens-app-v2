@@ -742,8 +742,11 @@ const refreshStoresFromServer = async () => {
 // Uses XMLHttpRequest because fetch() doesn't expose upload progress
 // events. Cancellable via the returned `abort` function for users
 // who change their mind mid-upload of a big file.
-// compress: true asks the server to re-encode to 1080p H.264 first (splashes).
-const uploadVideo = ({ file, brand, title, product, durationSec, compress, onProgress }) => {
+// compress: true asks the server to re-encode to 1080p H.264 first (splashes;
+// a still is resized instead). The server then answers 202 with a jobId and
+// compresses in the background; we poll it, reporting `onCompress(0..1)`,
+// and resolve with the same { video, compression } a plain upload returns.
+const uploadVideo = ({ file, brand, title, product, durationSec, compress, onProgress, onCompress }) => {
   const form = new FormData();
   form.append('file', file);
   form.append('brand', brand);
@@ -761,8 +764,11 @@ const uploadVideo = ({ file, brand, title, product, durationSec, compress, onPro
     });
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        try { resolve(JSON.parse(xhr.responseText)); }
-        catch { reject(new Error('Upload succeeded but response was not JSON')); }
+        let body;
+        try { body = JSON.parse(xhr.responseText); }
+        catch { reject(new Error('Upload succeeded but response was not JSON')); return; }
+        if (body.jobId) followUploadJob(body.jobId, onCompress).then(resolve, reject);
+        else resolve(body);
       } else {
         reject(new Error(`Upload failed: HTTP ${xhr.status} ${xhr.responseText || ''}`.trim()));
       }
@@ -774,6 +780,32 @@ const uploadVideo = ({ file, brand, title, product, durationSec, compress, onPro
   });
   promise.abort = () => xhr.abort();
   return promise;
+};
+
+// Poll a background upload job until it's done. A few failed polls in a row
+// (a deploy restarting the server) give up with a plain message.
+const followUploadJob = async (jobId, onCompress) => {
+  let misses = 0;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000));
+    let job = null;
+    let gone = false;
+    try {
+      const r = await fetch(`/api/library/upload-jobs/${jobId}`, { credentials: 'include' });
+      job = await r.json().catch(() => null);
+      gone = r.status === 404;
+      if (!r.ok) job = null;
+    } catch { /* network blip: count it as a miss */ }
+    if (gone) throw new Error('The upload stopped before it finished. Try again.');
+    if (!job) {
+      if (++misses >= 10) throw new Error('Lost touch with the server while compressing. Try again.');
+      continue;
+    }
+    misses = 0;
+    if (typeof onCompress === 'function') onCompress(job.progress || 0, job.state);
+    if (job.state === 'done') return { ok: true, video: job.video, compression: job.compression };
+    if (job.state === 'error') throw new Error(job.error || 'Upload failed');
+  }
 };
 
 // calibrateSyncGroup — POST /api/sync-groups/<groupId>/calibrate.
