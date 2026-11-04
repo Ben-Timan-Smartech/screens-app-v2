@@ -979,6 +979,17 @@ const EventFormModal = ({ stores, event, onClose, onSaved }) => {
   const [selectedScreens, setSelectedScreens] = useState(event?.screens || []);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
+  // Screens per store, so the list can say how many each one would take
+  // over and put the stores that have screens first.
+  const fleet = useFleet();
+  const storeCounts = useMemo(() => {
+    const n = {};
+    fleet.forEach((s) => { if (s.storeId) n[s.storeId] = (n[s.storeId] || 0) + 1; });
+    return n;
+  }, [fleet]);
+  const storeRows = useMemo(() => [...stores].sort((a, b) =>
+    ((storeCounts[b.id] || 0) > 0) - ((storeCounts[a.id] || 0) > 0)
+    || String(a.name || a.id).localeCompare(String(b.name || b.id))), [stores, storeCounts]);
 
   const submit = async () => {
     setError(null);
@@ -1092,20 +1103,26 @@ const EventFormModal = ({ stores, event, onClose, onSaved }) => {
                     border: 'var(--border)', borderRadius: 3,
                     display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 2,
                   }}>
-                    {stores.length === 0
+                    {storeRows.length === 0
                       ? <div style={{ padding: 10, fontSize: 12, color: 'var(--ink-4)' }}>No stores available.</div>
-                      : stores.map((st) => {
+                      : storeRows.map((st) => {
                           const picked = selectedStores.includes(st.id);
+                          const n = storeCounts[st.id] || 0;
                           return (
                             <label key={st.id} style={{
-                              display: 'flex', alignItems: 'center', gap: 7,
+                              display: 'flex', alignItems: 'center', gap: 7, minHeight: 36,
                               padding: '5px 8px', fontSize: 12, borderRadius: 2, cursor: 'pointer',
                               background: picked ? 'var(--ink-9)' : 'transparent',
                               color: picked ? 'var(--ink-1)' : 'var(--ink-2)',
                             }}>
                               <input type="checkbox" checked={picked}
                                      onChange={() => setSelectedStores(picked ? selectedStores.filter(x => x !== st.id) : [...selectedStores, st.id])} />
-                              {st.name || st.id}
+                              <span style={{ minWidth: 0 }}>
+                                <span style={{ display: 'block' }}>{st.name || st.id}</span>
+                                <span style={{ display: 'block', fontSize: 11, color: 'var(--ink-4)' }}>
+                                  {[st.city && st.city !== 'Global' ? st.city : null, `${n} screen${n === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}
+                                </span>
+                              </span>
                             </label>
                           );
                         })}
@@ -1151,12 +1168,20 @@ const Events = () => {
   const [selected, setSelected] = useState(null);  // event id
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(null);    // event being edited
-  const [stores, setStores] = useState(() => Array.isArray(window.MOCK_STORES) ? window.MOCK_STORES : []);
+  // Built-in stores (tm:rw Times Square, Selfridges, …) plus the ones added
+  // in the CMS. /api/stores returns only the CMS-added ones, so it's merged
+  // in rather than replacing the list (replacing it hid every built-in).
+  const eventsMergeStores = (extra) => {
+    const base = (typeof allStores === 'function') ? allStores() : (window.MOCK_STORES || []);
+    const seen = new Set(base.map((s) => s.id));
+    return [...base, ...(extra || []).filter((s) => s.id && !seen.has(s.id))];
+  };
+  const [stores, setStores] = useState(() => eventsMergeStores([]));
   useEffect(() => {
     let cancelled = false;
     fetch('/api/stores', { credentials: 'include' })
       .then((r) => r.ok ? r.json() : null)
-      .then((data) => { if (data?.stores && !cancelled) setStores(data.stores); })
+      .then((data) => { if (data?.stores && !cancelled) setStores(eventsMergeStores(data.stores)); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
