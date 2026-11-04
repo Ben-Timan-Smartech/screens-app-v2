@@ -512,7 +512,11 @@ const SplashesTab = () => {
       fd.append('file', file);
       const res = await fetch('/api/splashes/upload', { method: 'POST', body: fd });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      showToast(`${name} ${orientation} splash uploaded`, 'ok');
+      // v0.2.20: the server compresses splashes to 1080p; say so when it did.
+      const c = (await res.json().catch(() => ({}))).compression || {};
+      showToast(c.compressed
+        ? `${name} ${orientation} splash uploaded, compressed ${c.originalMb} → ${c.finalMb} MB`
+        : `${name} ${orientation} splash uploaded`, 'ok');
       refresh();
     } catch (e) {
       showToast(`Upload failed: ${e.message}`, 'err');

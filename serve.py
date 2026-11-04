@@ -517,6 +517,145 @@ def _fmt_duration(sec: int) -> str:
     return f"{sec // 60}:{sec % 60:02d}"
 
 
+# v0.2.20: compress splash uploads before they reach the fleet. Legacy retail
+# boxes can't hardware-decode 4K H.264 and freeze on it (the tm:rw landscape
+# splash did exactly that in Times Square, 2026-07-17), and splashes are the
+# fallback loop on every screen during an event, so a heavy one hurts the
+# whole store. Anything bigger than 1080p, faster than 30 fps, or not H.264
+# yuv420p is re-encoded; anything already fine is re-encoded only if that
+# makes it meaningfully smaller. ffmpeg runs as a niced subprocess on a /tmp
+# scratch copy (never on the gcsfuse mount: faststart seeks back over the
+# file). Any failure keeps the original upload, so compression can never
+# make an upload fail.
+_FFMPEG = shutil.which("ffmpeg")
+_FFPROBE = shutil.which("ffprobe")
+_COMPRESS_MAX_INPUT_BYTES = 500 * 1024 * 1024
+_COMPRESS_TIMEOUT_SEC = 240
+
+
+def _probe_video(path: Path) -> dict | None:
+    """ffprobe the first video stream. None if ffprobe is missing or fails."""
+    if not _FFPROBE:
+        return None
+    import subprocess
+    try:
+        res = subprocess.run(
+            [_FFPROBE, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,width,height,pix_fmt,avg_frame_rate:format=duration",
+             "-of", "json", str(path)],
+            capture_output=True, timeout=30,
+        )
+        if res.returncode != 0:
+            return None
+        info = json.loads(res.stdout or b"{}")
+    except Exception:
+        return None
+    streams = info.get("streams") or []
+    if not streams:
+        return None
+    st = streams[0]
+    fps = 0.0
+    try:
+        num, _, den = str(st.get("avg_frame_rate") or "0/1").partition("/")
+        fps = float(num) / float(den or 1) if float(den or 1) else 0.0
+    except ValueError:
+        pass
+    try:
+        duration = float((info.get("format") or {}).get("duration") or 0)
+    except ValueError:
+        duration = 0.0
+    return {
+        "codec":    st.get("codec_name"),
+        "width":    int(st.get("width") or 0),
+        "height":   int(st.get("height") or 0),
+        "pixFmt":   st.get("pix_fmt"),
+        "fps":      fps,
+        "duration": duration,
+    }
+
+
+def _compress_video_for_fleet(data: bytes, ext: str) -> tuple[bytes, str, dict]:
+    """Returns (bytes, ext, info). `info` always carries `compressed` (bool)
+    plus whatever ffprobe learned (width/height/durationSec) and, when
+    compression was skipped or failed, a plain-words `compressNote`."""
+    info: dict = {"compressed": False, "originalMb": round(len(data) / 1_000_000.0, 1)}
+    if not (_FFMPEG and _FFPROBE):
+        info["compressNote"] = "ffmpeg isn't installed on the server"
+        return data, ext, info
+    if len(data) > _COMPRESS_MAX_INPUT_BYTES:
+        info["compressNote"] = "file too large to compress on upload"
+        return data, ext, info
+    import subprocess
+    import tempfile
+    work = Path(tempfile.mkdtemp(prefix="compress-"))
+    try:
+        src = work / f"in.{ext}"
+        src.write_bytes(data)
+        probe = _probe_video(src)
+        if probe is None:
+            info["compressNote"] = "couldn't read the video"
+            return data, ext, info
+        w, h = probe["width"], probe["height"]
+        info.update({"width": w, "height": h, "durationSec": round(probe["duration"], 1)})
+        portrait = h > w
+        box_w, box_h = (1080, 1920) if portrait else (1920, 1080)
+        needs_fix = (
+            w > box_w or h > box_h
+            or probe["fps"] > 30.5
+            or probe["codec"] != "h264"
+            or probe["pixFmt"] != "yuv420p"
+        )
+        out = work / "out.mp4"
+        cmd = [
+            _FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf", (f"scale='min(iw,{box_w})':'min(ih,{box_h})'"
+                    ":force_original_aspect_ratio=decrease:force_divisible_by=2"),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p",
+            "-maxrate", "8M", "-bufsize", "16M",
+            "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+            "-movflags", "+faststart", "-threads", "2",
+        ]
+        if probe["fps"] > 30.5:
+            cmd += ["-r", "30"]
+        cmd.append(str(out))
+        # Lower priority than the request threads so heartbeats and /api/state
+        # stay responsive while it encodes. `nice` the binary, not preexec_fn,
+        # which isn't safe to use from a threaded server.
+        nice = shutil.which("nice") if os.name == "posix" else None
+        if nice:
+            cmd = [nice, "-n", "10"] + cmd
+        t0 = time.time()
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=_COMPRESS_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:
+            print(f"[compress] ffmpeg timed out after {_COMPRESS_TIMEOUT_SEC}s; keeping original", file=sys.stderr)
+            info["compressNote"] = "compression took too long, kept the original"
+            return data, ext, info
+        if res.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
+            err = (res.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-1:] or [""]
+            print(f"[compress] ffmpeg failed ({res.returncode}): {err[0][:200]}; keeping original", file=sys.stderr)
+            info["compressNote"] = "compression failed, kept the original"
+            return data, ext, info
+        new = out.read_bytes()
+        if not needs_fix and len(new) >= len(data) * 0.9:
+            info["compressNote"] = "already well compressed"
+            return data, ext, info
+        after = _probe_video(out) or {}
+        info.update({
+            "compressed": True,
+            "width":      after.get("width") or w,
+            "height":     after.get("height") or h,
+            "finalMb":    round(len(new) / 1_000_000.0, 1),
+        })
+        print(f"[compress] {w}x{h} {info['originalMb']} MB -> {info['width']}x{info['height']} "
+              f"{info['finalMb']} MB in {time.time() - t0:.0f}s", file=sys.stderr)
+        return new, "mp4", info
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def _parse_multipart(body: bytes, boundary: bytes) -> list[dict]:
     """Minimal multipart/form-data parser. Returns one dict per part:
         { name, filename?, content_type, data (bytes) }
@@ -4220,6 +4359,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         for p in parts if p["name"] == "product"), "")
         duration_raw = next((p["data"].decode("utf-8", "replace").strip()
                              for p in parts if p["name"] == "durationSec"), "")
+        # v0.2.20: opt-in compression (the Events splash uploader sets it).
+        # Off by default so big library uploads don't tie up the instance.
+        want_compress = next((p["data"].decode("utf-8", "replace").strip()
+                              for p in parts if p["name"] == "compress"), "") in ("1", "true")
 
         if file_part is None:
             self.send_error(400, "Missing 'file' field"); return
@@ -4258,10 +4401,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         video_id = f"upload-{ts_ms}"
         safe_filename = f"{video_id}-{slug}.{ext}"
 
+        file_bytes = file_part["data"]
+        compress_info: dict | None = None
+        if want_compress:
+            file_bytes, ext, compress_info = _compress_video_for_fleet(file_bytes, ext)
+            safe_filename = f"{video_id}-{slug}.{ext}"
+            if compress_info.get("durationSec") and not duration_raw:
+                duration_sec = max(1, min(600, int(round(compress_info["durationSec"]))))
+
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
         target = UPLOADS_DIR / safe_filename
         with open(target, "wb") as fh:
-            fh.write(file_part["data"])
+            fh.write(file_bytes)
         size_bytes = target.stat().st_size
 
         # Append to library.json. We re-read fresh from disk rather
@@ -4295,6 +4446,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "screens":       0,
             "defaultUnmute": False,
         }
+        if compress_info and compress_info.get("width") and compress_info.get("height"):
+            entry["width"] = compress_info["width"]
+            entry["height"] = compress_info["height"]
         videos.append(entry)
 
         LIBRARY_JSON.parent.mkdir(parents=True, exist_ok=True)
@@ -4308,7 +4462,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             text=f"Uploaded \"{title}\" to {brand}",
             icon="upload",
         )
-        self._send_json({"ok": True, "video": entry})
+        self._send_json({"ok": True, "video": entry, "compression": compress_info})
 
     def _serve_api_splash_upload(self) -> None:
         """POST /api/splashes/upload — multipart/form-data with fields:
@@ -4388,6 +4542,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         ):
             self.send_error(415, f"Unsupported content type: {part_ctype}"); return
 
+        file_bytes, ext, compress_info = _compress_video_for_fleet(file_part["data"], ext)
+
         key_slug = re.sub(r"[^a-zA-Z0-9]+", "_", f"{kind}-{name}").strip("_").lower() or "splash"
         dest_dir = SPLASH_UPLOADS_DIR / key_slug
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -4401,7 +4557,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         target = dest_dir / f"{orientation}.{ext}"
         tmp = target.with_suffix(target.suffix + ".part")
         with open(tmp, "wb") as fh:
-            fh.write(file_part["data"])
+            fh.write(file_bytes)
         tmp.replace(target)
         (dest_dir / "meta.json").write_text(
             json.dumps({"kind": kind, "name": name}), encoding="utf-8"
@@ -4415,7 +4571,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             text=f"Uploaded {orientation} splash for {name}",
             icon="upload",
         )
-        self._send_json({"ok": True, "splash": meta})
+        self._send_json({"ok": True, "splash": meta, "compression": compress_info})
 
     def _serve_api_get(self) -> None:
         url = urllib.parse.urlparse(self.path)
@@ -6766,6 +6922,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 ev = next((e for e in _events if e.get("id") == ev_id), None)
                 if ev is None:
                     self._send_json({"error": "not_found"}, status=404); return
+                # v0.2.20: a splashes PATCH carrying one orientation merges
+                # into the other instead of wiping it. The Events page sets
+                # landscape and portrait separately (two uploads can be in
+                # flight at once). `splashes: null` still clears both.
+                if patch.get("splashes"):
+                    patch["splashes"] = {**(ev.get("splashes") or {}), **patch["splashes"]}
                 if ev.get("state") == "active":
                     # While live, targetMode / stores / screens are fixed
                     # — those drive which screens we've already snapshotted,
