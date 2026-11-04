@@ -742,13 +742,15 @@ const refreshStoresFromServer = async () => {
 // Uses XMLHttpRequest because fetch() doesn't expose upload progress
 // events. Cancellable via the returned `abort` function for users
 // who change their mind mid-upload of a big file.
-const uploadVideo = ({ file, brand, title, product, durationSec, onProgress }) => {
+// compress: true asks the server to re-encode to 1080p H.264 first (splashes).
+const uploadVideo = ({ file, brand, title, product, durationSec, compress, onProgress }) => {
   const form = new FormData();
   form.append('file', file);
   form.append('brand', brand);
   if (title) form.append('title', title);
   if (product) form.append('product', product);
   if (durationSec != null) form.append('durationSec', String(durationSec));
+  if (compress) form.append('compress', '1');
 
   const xhr = new XMLHttpRequest();
   const promise = new Promise((resolve, reject) => {

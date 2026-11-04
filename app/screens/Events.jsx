@@ -188,8 +188,80 @@ const EventRow = ({ event, selected, onOpen, onAction }) => {
 // ─────────────────────────────────────────────────────────────
 // Detail rail — opens inline on the right of the list.
 // ─────────────────────────────────────────────────────────────
-const DetailRail = ({ event, onClose, onAction, onEditTiming }) => {
+// PATCH /api/events/<id>. Throws with the server's plain-words reason.
+const eventsPatch = async (id, patch) => {
+  const r = await fetch(`/api/events/${encodeURIComponent(id)}`, {
+    method: 'PATCH', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || data.error || `Save failed (${r.status})`);
+  return data.event;
+};
+
+// Library video -> event item (the same shape a playlist item has).
+const eventsItemFromVideo = (v) => ({
+  id: v.id,
+  title: v.title,
+  brand: v.brand,
+  product: v.product,
+  durationSec: typeof v.durationSec === 'number' ? Math.round(v.durationSec) : 15,
+  url: v.mediaUrl || v.url,
+  sizeMb: v.sizeMb,
+  width: v.width,
+  height: v.height,
+  type: v.type || 'video',
+});
+
+const DetailRail = ({ event, onClose, onAction, onEdit, onChanged }) => {
   const r = readinessOf(event);
+  const editable = event.state !== 'ended';
+  const targetEditable = event.state === 'draft' || event.state === 'signed-off';
+  // { landscape: 0..1 } while an upload is in flight; 1 = server compressing.
+  const [busy, setBusy] = useState({});
+  const [picking, setPicking] = useState(null);   // orientation | null
+  const [savingToggle, setSavingToggle] = useState(false);
+  const fleet = useFleet();
+
+  const setSplash = async (orientation, video) => {
+    await eventsPatch(event.id, { splashes: { [orientation]: eventsItemFromVideo(video) } });
+    onChanged();
+  };
+  const pickSplash = async (orientation, video) => {
+    setPicking(null);
+    try {
+      await setSplash(orientation, video);
+      showToast(`${orientation === 'portrait' ? 'Portrait' : 'Landscape'} splash set`, 'ok');
+    } catch (e) { showToast(e.message, 'err'); }
+  };
+  const uploadSplash = async (orientation, file) => {
+    setBusy((b) => ({ ...b, [orientation]: 0 }));
+    try {
+      const res = await uploadVideo({
+        file, brand: 'events', compress: true,
+        title: `${event.name} · ${orientation} splash`,
+        onProgress: (f) => setBusy((b) => ({ ...b, [orientation]: f })),
+      });
+      window.dispatchEvent(new CustomEvent('library-refresh', { detail: { video: res.video } }));
+      await setSplash(orientation, res.video);
+      const c = res.compression || {};
+      showToast(c.compressed
+        ? `${orientation === 'portrait' ? 'Portrait' : 'Landscape'} splash compressed ${c.originalMb} → ${c.finalMb} MB`
+        : `${orientation === 'portrait' ? 'Portrait' : 'Landscape'} splash uploaded${c.compressNote ? ` (${c.compressNote})` : ''}`, 'ok');
+    } catch (e) {
+      showToast(e.message || 'Upload failed', 'err');
+    } finally {
+      setBusy((b) => { const n = { ...b }; delete n[orientation]; return n; });
+    }
+  };
+  const toggleSplashOn = async () => {
+    if (!editable || savingToggle) return;
+    setSavingToggle(true);
+    try { await eventsPatch(event.id, { splashOn: !event.splashOn }); onChanged(); }
+    catch (e) { showToast(e.message, 'err'); }
+    finally { setSavingToggle(false); }
+  };
   const fmtFull = (iso) => iso
     ? new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     : '—';
@@ -211,6 +283,7 @@ const DetailRail = ({ event, onClose, onAction, onEditTiming }) => {
       borderLeft: 'var(--border)', background: 'var(--ink-10)',
       padding: '24px 24px 32px', overflowY: 'auto',
       display: 'flex', flexDirection: 'column', gap: 20,
+      flex: 1, minHeight: 0,
     }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
         <button onClick={onClose} style={{
@@ -263,11 +336,21 @@ const DetailRail = ({ event, onClose, onAction, onEditTiming }) => {
       {/* Target */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <SectionLabel right={`${event.effectiveScreenCount || 0} screen${(event.effectiveScreenCount || 0) === 1 ? '' : 's'}`}>Target</SectionLabel>
-        <div style={{ fontSize: 12, color: 'var(--ink-2)' }}>
-          {event.targetMode === 'screens'
-            ? <span>Specific screens — {(event.screens || []).length}</span>
-            : <span>Stores · <b style={{ color: 'var(--ink-1)' }}>{(event.stores || []).join(', ') || 'none'}</b></span>}
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <div style={{ fontSize: 12, color: 'var(--ink-2)', flex: 1, minWidth: 0, lineHeight: 1.5 }}>
+            {event.targetMode === 'screens'
+              ? (event.screens || []).length === 0
+                ? <span style={{ color: 'var(--warn)' }}>No screens picked yet</span>
+                : <span>Specific screens · <b style={{ color: 'var(--ink-1)' }}>{eventsScreenLabels(event.screens, fleet)}</b></span>
+              : <span>Stores · <b style={{ color: 'var(--ink-1)' }}>{eventsStoreLabels(event.stores) || 'none'}</b></span>}
+          </div>
+          {targetEditable && (
+            <Button variant="secondary" size="sm" onClick={onEdit}>Change</Button>
+          )}
         </div>
+        {event.state === 'active' && (
+          <div style={{ fontSize: 11, color: 'var(--ink-5)' }}>End the event to change which screens it covers.</div>
+        )}
       </div>
 
       {/* Splashes */}
@@ -276,16 +359,33 @@ const DetailRail = ({ event, onClose, onAction, onEditTiming }) => {
           Splashes · required
         </SectionLabel>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <SplashSlot orientation="landscape" item={sp.landscape} />
-          <SplashSlot orientation="portrait"  item={sp.portrait} />
+          {['landscape', 'portrait'].map((o) => (
+            <SplashSlot key={o} orientation={o} item={sp[o]} editable={editable}
+                        progress={busy[o]}
+                        onUpload={(f) => uploadSplash(o, f)}
+                        onPick={() => setPicking(o)} />
+          ))}
         </div>
+        {editable && (
+          <div style={{ fontSize: 11, color: 'var(--ink-5)', lineHeight: 1.45 }}>
+            Uploads are compressed to 1080p so older boxes can play them.
+          </div>
+        )}
       </div>
+      {picking && (
+        <EventsSplashPicker orientation={picking}
+                            onPick={(v) => pickSplash(picking, v)}
+                            onClose={() => setPicking(null)} />
+      )}
 
       {/* Master toggle */}
-      <div style={{
+      <button type="button" role="switch" aria-checked={!!event.splashOn}
+        disabled={!editable || savingToggle} onClick={toggleSplashOn}
+        style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '10px 12px', border: 'var(--border)', borderRadius: 4,
-        background: 'var(--ink-10)',
+        background: 'var(--ink-10)', textAlign: 'left', width: '100%',
+        cursor: editable ? 'pointer' : 'default', opacity: savingToggle ? 0.6 : 1,
       }}>
         <div>
           <div style={{ fontSize: 12, color: 'var(--ink-2)' }}>Splash plays alongside assigned content</div>
@@ -303,7 +403,7 @@ const DetailRail = ({ event, onClose, onAction, onEditTiming }) => {
             background: 'var(--ink-10)',
           }} />
         </span>
-      </div>
+      </button>
 
       {/* Per-screen assignments summary */}
       {assignedIds.length > 0 && (
@@ -332,7 +432,7 @@ const DetailRail = ({ event, onClose, onAction, onEditTiming }) => {
       }}>
         {event.state === 'draft' && (
           <>
-            <Button variant="secondary" size="sm" onClick={onEditTiming} style={{ flex: 1, justifyContent: 'center' }}>Edit timing</Button>
+            <Button variant="secondary" size="sm" onClick={onEdit} style={{ flex: 1, justifyContent: 'center' }}>Edit details</Button>
             <Button variant="primary" size="sm" disabled={r.tone === 'warn'} onClick={() => onAction('sign-off', event)} style={{ flex: 1, justifyContent: 'center' }}>Sign off →</Button>
           </>
         )}
@@ -346,7 +446,7 @@ const DetailRail = ({ event, onClose, onAction, onEditTiming }) => {
           <Button variant="danger" size="sm" onClick={() => onAction('stop', event)} style={{ flex: 1, justifyContent: 'center' }}>End event</Button>
         )}
         {event.state === 'ended' && (
-          <Button variant="secondary" size="sm" style={{ flex: 1, justifyContent: 'center' }}>Duplicate</Button>
+          <Button variant="secondary" size="sm" onClick={() => onAction('duplicate', event)} style={{ flex: 1, justifyContent: 'center' }}>Duplicate</Button>
         )}
       </div>
     </aside>
@@ -364,14 +464,38 @@ const SectionLabel = ({ children, right }) => (
   </div>
 );
 
-const SplashSlot = ({ orientation, item }) => {
+// Readable target summaries: screens show their codes (PH.B2) rather than
+// device UUIDs, stores show their names.
+const eventsScreenLabels = (ids, fleet) => {
+  const codes = (ids || []).map((id) => {
+    const s = (fleet || []).find((x) => x.deviceId === id);
+    return s ? s.screenCode : id.slice(0, 6);
+  });
+  return codes.length > 6 ? `${codes.slice(0, 6).join(', ')} +${codes.length - 6}` : codes.join(', ');
+};
+const eventsStoreLabels = (ids) => {
+  const list = (typeof allStores === 'function') ? allStores() : (window.MOCK_STORES || []);
+  return (ids || []).map((id) => (list.find((s) => s.id === id) || {}).name || id).join(', ');
+};
+
+const SplashSlot = ({ orientation, item, editable, progress, onUpload, onPick }) => {
   const isPortrait = orientation === 'portrait';
+  const busy = progress != null;
+  const clipPortrait = item && item.width && item.height ? item.height > item.width : null;
+  const mismatch = clipPortrait != null && clipPortrait !== isPortrait;
+  const slotBtn = {
+    flex: 1, border: 'var(--border-strong)', background: 'var(--ink-10)',
+    color: 'var(--ink-2)', padding: '7px 6px', borderRadius: 3,
+    fontSize: 11, fontFamily: 'inherit', textAlign: 'center',
+    cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.55 : 1,
+    whiteSpace: 'nowrap',
+  };
   return (
     <div style={{
       border: item ? 'var(--border)' : '1px dashed var(--border-strong)',
       background: item ? 'var(--ink-9)' : 'transparent',
       borderRadius: 4, padding: 10,
-      display: 'flex', flexDirection: 'column', gap: 8,
+      display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0,
     }}>
       <div style={{
         fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--ink-4)',
@@ -381,24 +505,29 @@ const SplashSlot = ({ orientation, item }) => {
       </div>
       <div style={{
         position: 'relative', borderRadius: 2, overflow: 'hidden',
-        background: item
-          ? 'linear-gradient(135deg, rgba(78, 231, 180, 0.12), var(--ink-8) 80%)'
-          : 'var(--ink-9)',
+        background: 'var(--ink-9)',
         aspectRatio: isPortrait ? '9 / 16' : '16 / 9',
-        maxHeight: isPortrait ? 180 : undefined,
+        height: isPortrait ? 180 : undefined,
         margin: isPortrait ? '0 auto' : undefined,
-        width: isPortrait ? 'auto' : '100%',
+        width: isPortrait ? 101 : '100%',
+        flexShrink: 0,
         display: 'grid', placeItems: 'center',
       }}>
-        {!item && (
+        {item && item.url && !busy && (
+          item.type === 'image'
+            ? <img src={item.url} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
+            : <video src={`${item.url}#t=0.5`} muted playsInline preload="metadata"
+                     style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#000' }} />
+        )}
+        {!item && !busy && (
           <span style={{
             fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--warn)',
             letterSpacing: '0.12em', textTransform: 'uppercase',
-          }}>Not uploaded</span>
+          }}>Not set</span>
         )}
-        {item && item.type === 'video' && (
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--accent)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-            {item.durationSec ? `${item.durationSec}s video` : 'video'}
+        {busy && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--accent)', letterSpacing: '0.06em', textAlign: 'center', padding: 6 }}>
+            {progress < 1 ? `Uploading ${Math.round(progress * 100)}%` : 'Compressing…'}
           </span>
         )}
       </div>
@@ -407,13 +536,184 @@ const SplashSlot = ({ orientation, item }) => {
           fontSize: 11, color: 'var(--ink-3)', fontFamily: 'var(--font-mono)',
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           letterSpacing: '0.02em',
-        }}>{item.title || item.id}</div>
+        }} title={item.title || item.id}>{item.title || item.id}</div>
       )}
-      <button style={{
-        border: '1px dashed var(--border-strong)', background: 'transparent',
-        color: 'var(--ink-4)', padding: '7px 10px', borderRadius: 3,
-        fontSize: 11, fontFamily: 'inherit', cursor: 'pointer', textAlign: 'center',
-      }}>{item ? 'Replace' : '+ Upload or pick'}</button>
+      {item && (item.width || item.sizeMb) && (
+        <div style={{ fontSize: 10, color: 'var(--ink-5)', fontFamily: 'var(--font-mono)' }}>
+          {[item.width && item.height ? `${item.width}×${item.height}` : null,
+            item.sizeMb ? `${item.sizeMb} MB` : null].filter(Boolean).join(' · ')}
+        </div>
+      )}
+      {mismatch && (
+        <div style={{ fontSize: 11, color: 'var(--warn)', lineHeight: 1.4 }}>
+          This clip is {clipPortrait ? 'portrait' : 'landscape'}, so it will play letterboxed.
+        </div>
+      )}
+      {editable && (
+        <div style={{ display: 'flex', gap: 6 }}>
+          <label style={slotBtn}>
+            {item ? 'Replace' : 'Upload'}
+            <input type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v"
+                   disabled={busy} style={{ display: 'none' }}
+                   onChange={(e) => {
+                     const f = e.target.files && e.target.files[0];
+                     e.target.value = '';
+                     if (f) onUpload(f);
+                   }} />
+          </label>
+          <button type="button" disabled={busy} onClick={onPick} style={slotBtn}>Library</button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Pick an existing library clip as a splash. Clips matching the slot's
+// orientation sort first, and heavy ones say so: a library pick isn't
+// re-compressed the way an upload is.
+const EventsSplashPicker = ({ orientation, onPick, onClose }) => {
+  const [q, setQ] = useState('');
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
+  const wantPortrait = orientation === 'portrait';
+  const results = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const fit = (v) => (v.width && v.height ? ((v.height > v.width) === wantPortrait ? 0 : 2) : 1);
+    return (window.MOCK_VIDEOS || [])
+      .filter((v) => (v.mediaUrl || v.url) && !v.pendingSync)
+      .filter((v) => !needle || [v.title, v.brand, v.product].some((x) => String(x || '').toLowerCase().includes(needle)))
+      .sort((a, b) => fit(a) - fit(b) || (b.uploadedAt || 0) - (a.uploadedAt || 0))
+      .slice(0, 40);
+  }, [q, wantPortrait]);
+  return (
+    <div onClick={(e) => { e.stopPropagation(); onClose(); }} style={{
+      position: 'fixed', inset: 0, zIndex: 110, background: 'rgba(7, 9, 11, 0.6)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+    }}>
+      <div role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{
+        width: 'min(560px, 100%)', maxHeight: '85vh', display: 'flex', flexDirection: 'column',
+        background: 'var(--ink-10)', border: 'var(--border-strong)', borderRadius: 8,
+        boxShadow: '0 24px 64px -12px rgba(0,0,0,0.5)', overflow: 'hidden',
+      }}>
+        <div style={{ padding: '14px 18px', borderBottom: 'var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <h2 style={{ margin: 0, fontSize: 15, fontWeight: 500, color: 'var(--ink-1)', flex: 1 }}>
+            Pick a {wantPortrait ? 'portrait' : 'landscape'} splash
+          </h2>
+          <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} title="Close" />
+        </div>
+        <div style={{ padding: '12px 18px 6px' }}>
+          <Input placeholder="Search the library by title or brand" value={q}
+                 onChange={(e) => setQ(e.target.value)} leadingIcon={<Icon.search size={13} />} />
+        </div>
+        <div style={{ overflow: 'auto', padding: '4px 10px 12px' }}>
+          {results.length === 0 ? (
+            <div style={{ padding: 14, fontSize: 12, color: 'var(--ink-4)' }}>
+              {q ? `Nothing in the library matches "${q}".` : 'The library is empty.'}
+            </div>
+          ) : results.map((v) => {
+            const portrait = v.width && v.height ? v.height > v.width : null;
+            const heavy = (typeof heavyReasons === 'function') ? heavyReasons(v) : [];
+            return (
+              <button key={v.id} type="button" onClick={() => onPick(v)} style={{
+                display: 'flex', alignItems: 'center', gap: 10, width: '100%', minHeight: 44,
+                padding: '6px 8px', borderRadius: 3, textAlign: 'left', background: 'transparent', cursor: 'pointer',
+              }}>
+                <span style={{ color: 'var(--ink-4)', display: 'flex' }}><Icon.video size={14} /></span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: 'block', fontSize: 13, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.title}</span>
+                  <span className="tnum" style={{ display: 'block', fontSize: 11, color: 'var(--ink-4)' }}>
+                    {[v.brand, v.width && v.height ? `${v.width}×${v.height}` : null, v.sizeMb ? `${v.sizeMb} MB` : null].filter(Boolean).join(' · ')}
+                  </span>
+                </span>
+                {heavy.length > 0 && (
+                  <span style={{ fontSize: 10, color: 'var(--warn)', flexShrink: 0 }}>Heavy for older boxes</span>
+                )}
+                {portrait != null && (
+                  <span style={{ fontSize: 11, color: portrait === wantPortrait ? 'var(--ink-3)' : 'var(--warn)', flexShrink: 0 }}>
+                    {portrait ? 'Portrait' : 'Landscape'}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Pick individual screens for a targetMode='screens' event. Grouped by
+// store; search matches code, name or store.
+const EventsScreenPicker = ({ selected, onChange }) => {
+  const fleet = useFleet();
+  const [q, setQ] = useState('');
+  const storeName = (id) => {
+    const list = (typeof allStores === 'function') ? allStores() : (window.MOCK_STORES || []);
+    return (list.find((s) => s.id === id) || {}).name || (id === 'unassigned' ? 'No store' : id);
+  };
+  const rows = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return [...fleet]
+      .filter((s) => !needle || [s.screenCode, s.name, storeName(s.storeId)].some((x) => String(x || '').toLowerCase().includes(needle)))
+      .sort((a, b) => storeName(a.storeId).localeCompare(storeName(b.storeId)) || String(a.screenCode).localeCompare(String(b.screenCode)));
+  }, [fleet, q]);
+  const toggle = (id) => onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  const shownIds = rows.map((s) => s.deviceId);
+  const allShown = shownIds.length > 0 && shownIds.every((id) => selected.includes(id));
+  let lastStore = null;
+  return (
+    <div style={{ marginTop: 8, border: 'var(--border)', borderRadius: 3 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 6, borderBottom: 'var(--border)' }}>
+        <div style={{ flex: 1 }}>
+          <Input placeholder="Search screens or stores" value={q}
+                 onChange={(e) => setQ(e.target.value)} leadingIcon={<Icon.search size={13} />} />
+        </div>
+        <Button variant="ghost" size="sm" disabled={shownIds.length === 0}
+                onClick={() => onChange(allShown
+                  ? selected.filter((id) => !shownIds.includes(id))
+                  : [...new Set([...selected, ...shownIds])])}>
+          {allShown ? 'Clear shown' : `Select ${q ? 'shown' : 'all'}`}
+        </Button>
+      </div>
+      <div style={{ maxHeight: 220, overflow: 'auto', padding: 4 }}>
+        {rows.length === 0 ? (
+          <div style={{ padding: 10, fontSize: 12, color: 'var(--ink-4)' }}>
+            {fleet.length === 0 ? 'Loading screens…' : `No screens match "${q}".`}
+          </div>
+        ) : rows.map((s) => {
+          const picked = selected.includes(s.deviceId);
+          const header = s.storeId !== lastStore ? storeName(s.storeId) : null;
+          lastStore = s.storeId;
+          return (
+            <React.Fragment key={s.deviceId}>
+              {header && (
+                <div style={{ padding: '8px 8px 3px', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--ink-5)' }}>{header}</div>
+              )}
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 8, minHeight: 32,
+                padding: '4px 8px', fontSize: 12, borderRadius: 2, cursor: 'pointer',
+                background: picked ? 'var(--ink-9)' : 'transparent',
+                color: picked ? 'var(--ink-1)' : 'var(--ink-2)',
+              }}>
+                <input type="checkbox" checked={picked} onChange={() => toggle(s.deviceId)} />
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, width: 64, flexShrink: 0 }}>{s.screenCode}</span>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {s.name !== s.screenCode ? s.name : ''}
+                </span>
+                <span style={{ fontSize: 11, color: 'var(--ink-4)', flexShrink: 0 }}>
+                  {s.orient === 'portrait' ? 'Portrait' : 'Landscape'}{s.status === 'online' ? '' : ' · offline'}
+                </span>
+              </label>
+            </React.Fragment>
+          );
+        })}
+      </div>
+      <div style={{ padding: '6px 10px', borderTop: 'var(--border)', fontSize: 11, color: 'var(--ink-4)' }}>
+        {selected.length} screen{selected.length === 1 ? '' : 's'} picked
+      </div>
     </div>
   );
 };
@@ -447,23 +747,28 @@ const AssignRow = ({ deviceId, entry }) => (
 );
 
 // ─────────────────────────────────────────────────────────────
-// Create modal — minimum fields to spawn a draft; splashes +
-// assignments edited in the detail rail after create.
-// ─────────────────────────────────────────────────────────────
-const CreateEventModal = ({ stores, onClose, onCreated }) => {
-  const [name, setName] = useState('');
-  const [startAt, setStartAt] = useState('');
-  const [endAt, setEndAt] = useState('');
-  const [daypartOn, setDaypartOn] = useState(false);
-  const [dpStart, setDpStart] = useState(540);
-  const [dpEnd, setDpEnd] = useState(1260);
-  const [scope, setScope] = useState('stores');
-  const [selectedStores, setSelectedStores] = useState([]);
+// Event form — creates a draft, or edits an existing event's name, window
+// and target. Splashes + per-screen content are set in the detail rail.
+// While an event is live its target is fixed (the server refuses the
+// change, since it would orphan the restore snapshots), so it's read-only.
+const eventsLocalInput = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+const EventFormModal = ({ stores, event, onClose, onSaved }) => {
+  const editing = !!event;
+  const targetLocked = editing && event.state === 'active';
+  const [name, setName] = useState(event?.name || '');
+  const [startAt, setStartAt] = useState(eventsLocalInput(event?.startAt));
+  const [endAt, setEndAt] = useState(eventsLocalInput(event?.endAt));
+  const [scope, setScope] = useState(event?.targetMode || 'stores');
+  const [selectedStores, setSelectedStores] = useState(event?.stores || []);
+  const [selectedScreens, setSelectedScreens] = useState(event?.screens || []);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
-
-  const toClock = (m) => `${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
-  const fromClock = (s) => { const [h, m] = (s||'00:00').split(':').map(x => parseInt(x,10)||0); return h*60+m; };
 
   const submit = async () => {
     setError(null);
@@ -472,21 +777,22 @@ const CreateEventModal = ({ stores, onClose, onCreated }) => {
       name: name.trim(),
       startAt: startAt ? new Date(startAt).toISOString() : null,
       endAt:   endAt   ? new Date(endAt).toISOString()   : null,
-      daypart: daypartOn ? { startMin: dpStart, endMin: dpEnd } : null,
-      targetMode: scope,
-      stores: scope === 'stores' ? selectedStores : [],
-      screens: [],
     };
+    if (!targetLocked) {
+      payload.targetMode = scope;
+      payload.stores = scope === 'stores' ? selectedStores : [];
+      payload.screens = scope === 'screens' ? selectedScreens : [];
+    }
     setSaving(true);
     try {
-      const r = await fetch('/api/events', {
-        method: 'POST', credentials: 'include',
+      const r = await fetch(editing ? `/api/events/${encodeURIComponent(event.id)}` : '/api/events', {
+        method: editing ? 'PATCH' : 'POST', credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { setError(data.detail || data.error || `Save failed (${r.status})`); return; }
-      onCreated(data.event);
+      onSaved(data.event);
     } catch (e) { setError(String(e)); }
     finally { setSaving(false); }
   };
@@ -505,6 +811,18 @@ const CreateEventModal = ({ stores, onClose, onCreated }) => {
       <span>{t}</span>
       {r && <span style={{ color: 'var(--ink-5)', textTransform: 'none', letterSpacing: 0 }}>{r}</span>}
     </div>
+  );
+  const scopeOption = (value, text) => (
+    <label style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '8px 11px', fontSize: 12, color: 'var(--ink-2)',
+      border: scope === value ? '1px solid var(--accent)' : 'var(--border)',
+      background: scope === value ? 'var(--warn-bg)' : 'transparent',
+      borderRadius: 3, cursor: 'pointer',
+    }}>
+      <input type="radio" checked={scope === value} onChange={() => setScope(value)} />
+      {text}
+    </label>
   );
 
   return (
@@ -526,7 +844,7 @@ const CreateEventModal = ({ stores, onClose, onCreated }) => {
           padding: '16px 22px 14px', borderBottom: 'var(--border)',
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
         }}>
-          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 500, color: 'var(--ink-1)' }}>New event</h2>
+          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 500, color: 'var(--ink-1)' }}>{editing ? 'Edit event' : 'New event'}</h2>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--ink-4)', cursor: 'pointer', fontSize: 18 }}>×</button>
         </div>
         <div style={{ padding: '20px 22px', display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -536,9 +854,9 @@ const CreateEventModal = ({ stores, onClose, onCreated }) => {
                    placeholder="e.g. Playhouse Berlin pop-up — launch week"
                    style={{ ...inputStyle, marginTop: 7 }} />
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
             <div>
-              {label('Starts')}
+              {label('Starts', 'your local time')}
               <input type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} style={{ ...inputStyle, marginTop: 7 }} />
             </div>
             <div>
@@ -547,69 +865,52 @@ const CreateEventModal = ({ stores, onClose, onCreated }) => {
             </div>
           </div>
           <div>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--ink-2)' }}>
-              <input type="checkbox" checked={daypartOn} onChange={(e) => setDaypartOn(e.target.checked)} />
-              Only run during a specific time of day
-            </label>
-            {daypartOn && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 8 }}>
-                <input type="time" value={toClock(dpStart)} onChange={(e) => setDpStart(fromClock(e.target.value))} style={inputStyle} />
-                <input type="time" value={toClock(dpEnd)}   onChange={(e) => setDpEnd(fromClock(e.target.value))}   style={inputStyle} />
-              </div>
-            )}
-          </div>
-          <div>
             {label('Target')}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 7 }}>
-              <label style={{
-                display: 'flex', alignItems: 'center', gap: 8,
-                padding: '8px 11px', fontSize: 12, color: 'var(--ink-2)',
-                border: scope === 'stores' ? '1px solid var(--accent)' : 'var(--border)',
-                background: scope === 'stores' ? 'var(--warn-bg)' : 'transparent',
-                borderRadius: 3, cursor: 'pointer',
-              }}>
-                <input type="radio" checked={scope === 'stores'} onChange={() => setScope('stores')} />
-                Specific stores
-              </label>
-              <label style={{
-                display: 'flex', alignItems: 'center', gap: 8,
-                padding: '8px 11px', fontSize: 12, color: 'var(--ink-2)',
-                border: scope === 'screens' ? '1px solid var(--accent)' : 'var(--border)',
-                background: scope === 'screens' ? 'var(--warn-bg)' : 'transparent',
-                borderRadius: 3, cursor: 'pointer',
-              }}>
-                <input type="radio" checked={scope === 'screens'} onChange={() => setScope('screens')} />
-                Specific screens (pick in detail rail after create)
-              </label>
-            </div>
-            {scope === 'stores' && (
-              <div style={{
-                marginTop: 8, maxHeight: 140, overflow: 'auto', padding: 6,
-                border: 'var(--border)', borderRadius: 3,
-                display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 2,
-              }}>
-                {stores.length === 0
-                  ? <div style={{ padding: 10, fontSize: 12, color: 'var(--ink-4)' }}>No stores available.</div>
-                  : stores.map((st) => {
-                      const picked = selectedStores.includes(st.id);
-                      return (
-                        <label key={st.id} style={{
-                          display: 'flex', alignItems: 'center', gap: 7,
-                          padding: '5px 8px', fontSize: 12, borderRadius: 2, cursor: 'pointer',
-                          background: picked ? 'var(--ink-9)' : 'transparent',
-                          color: picked ? 'var(--ink-1)' : 'var(--ink-2)',
-                        }}>
-                          <input type="checkbox" checked={picked}
-                                 onChange={() => setSelectedStores(picked ? selectedStores.filter(x => x !== st.id) : [...selectedStores, st.id])} />
-                          {st.name || st.id}
-                        </label>
-                      );
-                    })}
+            {targetLocked ? (
+              <div style={{ marginTop: 7, fontSize: 12, color: 'var(--ink-4)' }}>
+                This event is live, so its screens are fixed. End it to change them.
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 7 }}>
+                  {scopeOption('stores', 'Whole stores')}
+                  {scopeOption('screens', 'Specific screens')}
+                </div>
+                {scope === 'stores' && (
+                  <div style={{
+                    marginTop: 8, maxHeight: 180, overflow: 'auto', padding: 6,
+                    border: 'var(--border)', borderRadius: 3,
+                    display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 2,
+                  }}>
+                    {stores.length === 0
+                      ? <div style={{ padding: 10, fontSize: 12, color: 'var(--ink-4)' }}>No stores available.</div>
+                      : stores.map((st) => {
+                          const picked = selectedStores.includes(st.id);
+                          return (
+                            <label key={st.id} style={{
+                              display: 'flex', alignItems: 'center', gap: 7,
+                              padding: '5px 8px', fontSize: 12, borderRadius: 2, cursor: 'pointer',
+                              background: picked ? 'var(--ink-9)' : 'transparent',
+                              color: picked ? 'var(--ink-1)' : 'var(--ink-2)',
+                            }}>
+                              <input type="checkbox" checked={picked}
+                                     onChange={() => setSelectedStores(picked ? selectedStores.filter(x => x !== st.id) : [...selectedStores, st.id])} />
+                              {st.name || st.id}
+                            </label>
+                          );
+                        })}
+                  </div>
+                )}
+                {scope === 'screens' && (
+                  <EventsScreenPicker selected={selectedScreens} onChange={setSelectedScreens} />
+                )}
+              </>
+            )}
+            {!editing && (
+              <div style={{ fontSize: 11, color: 'var(--ink-5)', marginTop: 7 }}>
+                Splashes + per-screen content set on the next step, after create.
               </div>
             )}
-            <div style={{ fontSize: 11, color: 'var(--ink-5)', marginTop: 7 }}>
-              Splashes + per-screen content set on the next step, after create.
-            </div>
           </div>
           {error && (
             <div style={{ padding: '10px 12px', background: 'var(--err-bg)', color: 'var(--err)', borderRadius: 3, fontSize: 12 }}>{error}</div>
@@ -622,7 +923,7 @@ const CreateEventModal = ({ stores, onClose, onCreated }) => {
         }}>
           <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
           <Button variant="primary" size="sm" onClick={submit} disabled={saving}>
-            {saving ? 'Saving…' : 'Create as draft →'}
+            {saving ? 'Saving…' : editing ? 'Save changes' : 'Create as draft →'}
           </Button>
         </div>
       </div>
@@ -639,6 +940,7 @@ const Events = () => {
   const compact = vp.isCompact;
   const [selected, setSelected] = useState(null);  // event id
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState(null);    // event being edited
   const [stores, setStores] = useState(() => Array.isArray(window.MOCK_STORES) ? window.MOCK_STORES : []);
   useEffect(() => {
     let cancelled = false;
@@ -662,6 +964,28 @@ const Events = () => {
       'un-sign-off': `Un-sign-off "${ev.name}"? Preload stops; screens stop downloading its content.`,
     };
     if (confirms[action] && !window.confirm(confirms[action])) return;
+    if (action === 'duplicate') {
+      // New draft with the same target + content; the window is left blank
+      // so a copy never auto-starts on a date that's already passed.
+      try {
+        const r = await fetch('/api/events', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: `${ev.name} (copy)`.slice(0, 120),
+            targetMode: ev.targetMode, stores: ev.stores || [], screens: ev.screens || [],
+            splashes: ev.splashes || {}, splashOn: ev.splashOn !== false,
+            screenAssignments: ev.screenAssignments || {},
+          }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) { alert(data.detail || data.error || `Failed (${r.status})`); return; }
+        refresh();
+        setSelected(data.event.id);
+        showToast(`Duplicated as "${data.event.name}"`, 'ok');
+      } catch (e) { alert(String(e)); }
+      return;
+    }
     try {
       const r = await fetch(`/api/events/${encodeURIComponent(ev.id)}/${action}`, {
         method: 'POST', credentials: 'include',
@@ -787,18 +1111,43 @@ const Events = () => {
             event={activeEvent}
             onClose={closeDetail}
             onAction={act}
-            onEditTiming={() => { /* opens the create modal in edit mode in a follow-up */ }}
+            onEdit={() => setEditing(activeEvent)}
+            onChanged={refresh}
           />
         )}
       </div>
+      {/* On a phone the rail opens full-screen instead of beside the list. */}
+      {activeEvent && compact && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'var(--ink-10)', display: 'flex', flexDirection: 'column' }}>
+          <DetailRail
+            event={activeEvent}
+            onClose={closeDetail}
+            onAction={act}
+            onEdit={() => setEditing(activeEvent)}
+            onChanged={refresh}
+          />
+        </div>
+      )}
       {creating && (
-        <CreateEventModal
+        <EventFormModal
           stores={stores}
           onClose={() => setCreating(false)}
-          onCreated={(created) => {
+          onSaved={(created) => {
             setCreating(false);
             refresh();
             setSelected(created.id);
+          }}
+        />
+      )}
+      {editing && (
+        <EventFormModal
+          stores={stores}
+          event={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            refresh();
+            showToast('Event updated', 'ok');
           }}
         />
       )}
