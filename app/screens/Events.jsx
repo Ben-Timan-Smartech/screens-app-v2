@@ -218,7 +218,8 @@ const DetailRail = ({ event, onClose, onAction, onEdit, onChanged }) => {
   const r = readinessOf(event);
   const editable = event.state !== 'ended';
   const targetEditable = event.state === 'draft' || event.state === 'signed-off';
-  // { landscape: 0..1 } while an upload is in flight; 1 = server compressing.
+  // { landscape: { phase: 'upload'|'queued'|'compress'|'saving', f: 0..1 } }
+  // while that slot's upload is in flight.
   const [busy, setBusy] = useState({});
   const [picking, setPicking] = useState(null);   // orientation | null
   const [savingToggle, setSavingToggle] = useState(false);
@@ -236,19 +237,22 @@ const DetailRail = ({ event, onClose, onAction, onEdit, onChanged }) => {
     } catch (e) { showToast(e.message, 'err'); }
   };
   const uploadSplash = async (orientation, file) => {
-    setBusy((b) => ({ ...b, [orientation]: 0 }));
+    const step = (phase, f) => setBusy((b) => ({ ...b, [orientation]: { phase, f } }));
+    step('upload', 0);
     try {
       const res = await uploadVideo({
         file, brand: 'events', compress: true,
         title: `${event.name} · ${orientation} splash`,
-        onProgress: (f) => setBusy((b) => ({ ...b, [orientation]: f })),
+        onProgress: (f) => step('upload', f),
+        onCompress: (f, state) => step(state === 'queued' ? 'queued' : state === 'saving' || state === 'done' ? 'saving' : 'compress', f),
       });
       window.dispatchEvent(new CustomEvent('library-refresh', { detail: { video: res.video } }));
       await setSplash(orientation, res.video);
       const c = res.compression || {};
+      const label = orientation === 'portrait' ? 'Portrait' : 'Landscape';
       showToast(c.compressed
-        ? `${orientation === 'portrait' ? 'Portrait' : 'Landscape'} splash compressed ${c.originalMb} → ${c.finalMb} MB`
-        : `${orientation === 'portrait' ? 'Portrait' : 'Landscape'} splash uploaded${c.compressNote ? ` (${c.compressNote})` : ''}`, 'ok');
+        ? `${label} splash ${res.video.type === 'image' ? 'resized' : 'compressed'} ${c.originalMb} → ${c.finalMb} MB`
+        : `${label} splash uploaded${c.compressNote ? ` (${c.compressNote})` : ''}`, 'ok');
     } catch (e) {
       showToast(e.message || 'Upload failed', 'err');
     } finally {
@@ -366,7 +370,7 @@ const DetailRail = ({ event, onClose, onAction, onEdit, onChanged }) => {
         </div>
         {editable && (
           <div style={{ fontSize: 11, color: 'var(--ink-5)', lineHeight: 1.45 }}>
-            Uploads are compressed to 1080p so older boxes can play them.
+            A video or an image. Uploads are brought down to 1080p so older boxes can play them.
           </div>
         )}
       </div>
@@ -508,9 +512,23 @@ const SplashSlot = ({ orientation, item, editable, progress, onUpload, onPick })
           }}>Not set</span>
         )}
         {busy && (
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--accent)', letterSpacing: '0.06em', textAlign: 'center', padding: 6 }}>
-            {progress < 1 ? `Uploading ${Math.round(progress * 100)}%` : 'Compressing…'}
-          </span>
+          <div style={{ width: '82%', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+            <span className="tnum" style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--accent)', letterSpacing: '0.06em', textAlign: 'center' }}>
+              {progress.phase === 'upload' ? `Uploading ${Math.round(progress.f * 100)}%`
+                : progress.phase === 'queued' ? 'Waiting to compress…'
+                : progress.phase === 'compress' ? `Compressing ${Math.round(progress.f * 100)}%`
+                : 'Saving…'}
+            </span>
+            <div role="progressbar" aria-valuemin={0} aria-valuemax={100}
+                 aria-valuenow={Math.round((progress.phase === 'saving' ? 1 : progress.f) * 100)}
+                 style={{ width: '100%', height: 4, borderRadius: 999, background: 'var(--ink-7)', overflow: 'hidden' }}>
+              <div style={{
+                height: '100%', borderRadius: 999, background: 'var(--accent)',
+                width: `${Math.round((progress.phase === 'saving' ? 1 : progress.phase === 'queued' ? 0 : progress.f) * 100)}%`,
+                transition: 'width 0.4s ease',
+              }} />
+            </div>
+          </div>
         )}
       </div>
       {item && (
@@ -528,14 +546,14 @@ const SplashSlot = ({ orientation, item, editable, progress, onUpload, onPick })
       )}
       {mismatch && (
         <div style={{ fontSize: 11, color: 'var(--warn)', lineHeight: 1.4 }}>
-          This clip is {clipPortrait ? 'portrait' : 'landscape'}, so it will play letterboxed.
+          This {item.type === 'image' ? 'image' : 'clip'} is {clipPortrait ? 'portrait' : 'landscape'}, so it will {item.type === 'image' ? 'show' : 'play'} letterboxed.
         </div>
       )}
       {editable && (
         <div style={{ display: 'flex', gap: 6 }}>
           <label style={slotBtn}>
             {item ? 'Replace' : 'Upload'}
-            <input type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v"
+            <input type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v,image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
                    disabled={busy} style={{ display: 'none' }}
                    onChange={(e) => {
                      const f = e.target.files && e.target.files[0];
