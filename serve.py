@@ -4465,7 +4465,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length)
         try:
-            return json.loads(raw.decode("utf-8"))
+            # strict=False accepts raw newlines/tabs inside strings. The
+            # player hand-builds its /api/logs + /api/crashes JSON and only
+            # escapes \ and ", so a warning carrying a stack trace arrives
+            # with literal newlines. Strict parsing 400'd it, and the tablet
+            # retried that same batch forever, shipping nothing after it.
+            return json.loads(raw.decode("utf-8"), strict=False)
         except Exception:
             return {}
 
