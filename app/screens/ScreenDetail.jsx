@@ -1439,7 +1439,16 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     lastSeen:      formatSecondsAgo(lastKnown.secondsSinceHeartbeat),
     device:        lastKnown.deviceModel || '—',
     tier:          lastKnown.tier || (lastKnown.ramMb ? `${lastKnown.ramMb >= 3000 ? '1080p' : '720p'} (${(lastKnown.ramMb / 1024).toFixed(1)}GB RAM)` : '—'),
-    orientation:   lastKnown.orientation || '—',
+    // As mounted: the tablet reports the panel's own way up and doesn't know
+    // about a 90/270 display rotation, so swap it here (matches the server).
+    orientation:   lastKnown.orientation
+      ? (() => {
+          const o = lastKnown.orientation.toLowerCase().startsWith('port') ? 'Portrait' : 'Landscape';
+          const rot = Number(lastKnown.rotation) || 0;
+          if (rot !== 90 && rot !== 270) return o;
+          return `${o === 'Portrait' ? 'Landscape' : 'Portrait'} (rotated ${rot}°)`;
+        })()
+      : '—',
     storage:       lastKnown.cacheBytes != null
       ? `${formatBytes(lastKnown.cacheBytes)} cached`
       : '—',
