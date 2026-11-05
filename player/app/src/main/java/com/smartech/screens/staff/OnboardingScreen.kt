@@ -77,15 +77,6 @@ fun OnboardingScreen(
     val screenCode by store.locScreenCode.collectAsState(initial = null)
     val serverUrl  by store.liveServerUrl.collectAsState(initial = null)
 
-    // Concept is only required for retail stores in cities with multiple
-    // in-store concepts (NYC, LDN). BER and ROM are single-concept stores
-    // and offices have no concept, so the dropdown isn't shown and we don't
-    // gate on it. Reading storesFlow re-evaluates this when the list lands.
-    val storeList by LocationTaxonomy.storesFlow.collectAsState()
-    val conceptRequired = remember(storeList, city, storeId) {
-        LocationTaxonomy.conceptApplies(city, storeId)
-    }
-
     // v0.2.15: keep the store/office list fresh while setup is showing, so
     // an office added in the CMS appears without restarting the tablet.
     // Re-keyed on the server URL so editing it re-fetches straight away.
@@ -99,7 +90,8 @@ fun OnboardingScreen(
     val ready =
         !region.isNullOrBlank() && !city.isNullOrBlank() &&
             !storeId.isNullOrBlank() &&
-            (!conceptRequired || !concept.isNullOrBlank()) &&
+            // v0.2.20: concept is optional. A screen without one plays the
+            // city's default splash, and it can be set later from the CMS.
             !screenCode.isNullOrBlank()
 
     val compact = compactPane()
@@ -206,7 +198,7 @@ fun OnboardingScreen(
                 Spacer(Modifier.height(6.dp))
                 Text(
                     "Pick the store or office, then give this screen a code. " +
-                        "Stores in New York and London also need a concept; offices don't. Floor is optional.",
+                        "Concept and floor are optional.",
                     color = Muted, fontSize = 14.sp,
                 )
             }

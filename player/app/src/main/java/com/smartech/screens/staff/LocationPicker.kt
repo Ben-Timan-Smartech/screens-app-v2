@@ -41,7 +41,7 @@ internal val LpMuted    = Color(0xFF6E6B62)
  * Cascading location form — region → city → store → concept → floor → table → screen code.
  * Used by both the on-tablet first-run onboarding and the super-admin Device admin.
  *
- * Required fields (store, concept where it applies, screen code) are marked with a red dot.
+ * Required fields (store, screen code) are marked with a red dot. v0.2.20: concept is optional.
  * Floor and Table are optional. Each value persists immediately via the supplied callbacks.
  */
 /**
@@ -101,7 +101,7 @@ fun LocationPicker(
             concept,
             LocationTaxonomy.concepts.map { it to it },
             onConcept,
-            required = showRequiredMarkers,
+            required = false,   // v0.2.20: optional — falls back to the city's splash
         )
         LpDivider()
     }

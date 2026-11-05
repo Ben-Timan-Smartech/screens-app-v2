@@ -323,7 +323,7 @@ fun DeviceAdminScreen(
                     InfoRow("Display",     "${info.widthPx} × ${info.heightPx} · ${info.orientation}")
                     InfoRow("RAM",        "${info.ramMb} MB")
                     InfoRow("Cached",     "${repository.cache.cachedIds().size} videos · ${formatBytes(repository.cache.totalBytes())}")
-                    InfoRow("Free disk",  formatBytes(ctx.filesDir.usableSpace))
+                    InfoRow("Free disk",  formatBytes(repository.cache.usableSpace()))
                 }
             }
 
