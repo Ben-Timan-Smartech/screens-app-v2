@@ -18,6 +18,26 @@ Rules:
 
 ---
 
+## v0.2.20
+
+- **Screens on tablets with split storage can download videos again.** Some
+  tablets keep apps on a small storage area and everything else on a big one.
+  MEZ.A.4 showed about 19 GB free in Android's Settings, but the app's own
+  area had under 1 GB, so it refused to download new videos and Clear cache
+  didn't help. Videos now go on the big storage whenever it has far more room.
+  Ordinary tablets have just one storage area, so nothing changes for them.
+  On a tablet that does move, the current playlist downloads once more.
+- **Small videos aren't blocked when space is tight but not gone.** A screen
+  used to stop downloading altogether once it had less than 1 GB free, even
+  for a 5 MB clip. It now keeps 300 MB spare instead.
+- **The CMS shows the free space that actually matters.** A screen's Free
+  figure (and the tablet's own Device admin page) now reports the storage its
+  videos are on.
+- **Concept is optional when setting up a screen.** New York and London screens
+  no longer have to pick a concept before they can continue. A screen without
+  one plays its city's default splash, and the concept can be set later on the
+  screen's page in the CMS.
+
 ## v0.2.19
 
 - **Screens update overnight in their own store's time, not during opening

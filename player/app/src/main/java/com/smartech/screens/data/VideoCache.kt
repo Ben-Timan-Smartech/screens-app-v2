@@ -1,6 +1,7 @@
 package com.smartech.screens.data
 
 import android.content.Context
+import android.os.Environment
 import android.util.Log
 import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.Dispatchers
@@ -14,9 +15,10 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
- * Disk-backed LRU video cache. Lives under the app's internal files dir —
- * survives app restarts, cleared on uninstall. Honours a soft cap (default 8GB)
- * with oldest-access-first eviction.
+ * Disk-backed LRU video cache. Lives under the app's internal files dir, or
+ * since v0.2.20 its folder on shared storage when that's much roomier (see
+ * [pickRoot]) — survives app restarts, cleared on uninstall. Honours a soft
+ * cap (default 8GB) with oldest-access-first eviction.
  *
  * Layout: `<filesDir>/videos/<videoId>.mp4` for completed downloads,
  *         `<filesDir>/videos/<videoId>.mp4.part` for in-progress.
@@ -35,7 +37,7 @@ class VideoCache(
     context: Context,
     sharedHttp: OkHttpClient,
 ) {
-    private val root: File = File(context.filesDir, "videos").apply { mkdirs() }
+    private val root: File = pickRoot(context)
     private val inflight = ConcurrentHashMap<String, Boolean>()
 
     /** v0.2.9: the current cache cap in bytes. PlayerRepository keeps this in
@@ -366,7 +368,65 @@ class VideoCache(
         /** v0.2.9: minimum free space the cache will preserve on the device.
          *  ensure() skips downloads once free space would drop below this, so a
          *  screen never fills its own storage — protecting small-storage boxes
-         *  where the cache cap (default 8 GB) exceeds the free space available. */
-        const val MIN_FREE_BYTES = 1L * 1024 * 1024 * 1024   // 1 GB
+         *  where the cache cap (default 8 GB) exceeds the free space available.
+         *  v0.2.20: 1 GB → 300 MB. 1 GB blocked a 5 MB clip on a box with 958 MB
+         *  free; 300 MB still leaves Android room to run. */
+        const val MIN_FREE_BYTES = 300L * 1024 * 1024
+
+        /** v0.2.20: external storage has to beat internal by this much before
+         *  the cache moves there. On a normal tablet the two are the same
+         *  volume (equal free space), so the cache stays where it always was;
+         *  only split-storage boxes move. The margin also stops it flipping. */
+        private const val EXTERNAL_PREFERRED_MARGIN = 1L * 1024 * 1024 * 1024
+
+        /**
+         * v0.2.20: where the videos live. Some boxes (MEZ.A.4: 32 GB tablet)
+         * split storage — app-private internal data sits on a small partition
+         * (under 1 GB free) while the shared storage Android's Settings shows
+         * has ~19 GB free. Use the app's own folder on shared storage when it's
+         * built in (not a removable card), mounted, and clearly roomier. No
+         * permission is needed for getExternalFilesDir. Whichever root is not
+         * in use has its leftover videos cleared in the background, so moving
+         * frees the small partition (the playlist re-downloads once).
+         */
+        private fun pickRoot(context: Context): File {
+            val internal = File(context.filesDir, "videos").apply { mkdirs() }
+            val external: File? = runCatching {
+                val dir = context.getExternalFilesDir("videos")
+                if (dir != null && (dir.isDirectory || dir.mkdirs()) &&
+                    Environment.getExternalStorageState(dir) == Environment.MEDIA_MOUNTED &&
+                    !Environment.isExternalStorageRemovable(dir)
+                ) dir else null
+            }.getOrNull()
+            val internalFree = internal.usableSpace
+            val externalFree = external?.usableSpace ?: -1L
+            val useExternal = external != null && externalFree > internalFree + EXTERNAL_PREFERRED_MARGIN
+            val root: File = if (useExternal) external!! else internal
+            val other: File? = if (useExternal) internal else external
+            if (useExternal) {
+                // Warning level so it reaches /api/logs: it only happens on
+                // split-storage boxes and is the first thing to check there.
+                LogBuffer.w(TAG, "Videos stored on shared storage (free ${externalFree / MB}MB); internal has only ${internalFree / MB}MB free")
+            } else {
+                LogBuffer.i(TAG, "Videos stored internally (free ${internalFree / MB}MB)")
+            }
+            if (other != null) {
+                Thread {
+                    val stale = other.listFiles { f ->
+                        f.isFile && (f.name.endsWith(".mp4") || f.name.endsWith(".mp4.part"))
+                    } ?: emptyArray()
+                    var freed = 0L
+                    var count = 0
+                    for (f in stale) {
+                        val len = f.length()
+                        if (f.delete()) { freed += len; count++ }
+                    }
+                    if (count > 0) {
+                        LogBuffer.w(TAG, "Cleared $count old video file(s), ${freed / MB}MB, from the unused storage location")
+                    }
+                }.apply { isDaemon = true; name = "cache-move-cleanup" }.start()
+            }
+            return root
+        }
     }
 }

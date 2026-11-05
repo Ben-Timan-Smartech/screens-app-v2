@@ -447,7 +447,7 @@ class PlayerRepository(
                     appVersion = appVersion,
                     cachedVideos = cache.cachedIds(),
                     cacheBytes = cache.totalBytes(),
-                    freeStorageBytes = appContext.filesDir.usableSpace,
+                    freeStorageBytes = cache.usableSpace(),   // v0.2.20: the volume the videos are on
                 )
             )
         }.onFailure { Log.w(TAG, "ping failed: ${it.message}") }
@@ -2316,7 +2316,7 @@ class PlayerRepository(
               "appVersion": ${q(com.smartech.screens.BuildConfig.VERSION_NAME)},
               "appFlavor": ${q(com.smartech.screens.BuildConfig.FLAVOR)},
               "cacheBytes": ${cache.totalBytes()},
-              "freeStorageBytes": ${appContext.filesDir.usableSpace},
+              "freeStorageBytes": ${cache.usableSpace()},
               "cachedVideoIds": [${cachedIds}],
               "supportedModes": [${supportedModesJson}],
               "activeDisplayMode": ${activeModeId},
