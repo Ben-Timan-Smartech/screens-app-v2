@@ -1298,7 +1298,7 @@ const Settings = () => {
                     <BrandMark brand={b.name} size={36} radius={8} logoUrl={b.logoUrl} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{b.name}</div>
-                      <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>{b.products.length} products · {b.videos} videos</div>
+                      <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>{(b.products || []).length} products · {b.videos} videos</div>
                     </div>
                     <Button variant="ghost" size="sm" icon={<Icon.edit size={13} />} />
                   </div>

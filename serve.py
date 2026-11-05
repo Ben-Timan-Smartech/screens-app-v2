@@ -796,7 +796,7 @@ def _store_library_upload(data: bytes, ext: str, meta: dict, compress_info: dict
         # unknown brand. Keeps the brand picker self-healing — the CMS doesn't
         # need a "create brand" flow for casual uploads.
         if brand and not any((b.get("id") or "").lower() == brand.lower() for b in brands):
-            brands.append({"id": brand, "name": brand.replace("-", " ").title(), "videos": 0})
+            brands.append({"id": brand, "name": brand.replace("-", " ").title(), "videos": 0, "products": []})
 
         entry = {
             "id":            meta["video_id"],
@@ -2552,6 +2552,14 @@ def _library_with_logos() -> tuple[dict, str]:
             ({**b, "logoUrl": logos.get((b.get("name") or "").lower())}
              if logos.get((b.get("name") or "").lower()) else b)
             for b in brands
+        ]
+    # Every brand carries a products list: the upload path used to auto-add
+    # brands without one (the Events splash uploads' "Events" brand), and the
+    # Settings page reads b.products.length.
+    if isinstance(out.get("brands"), list):
+        out["brands"] = [
+            b if isinstance(b.get("products"), list) else {**b, "products": []}
+            for b in out["brands"] if isinstance(b, dict)
         ]
 
     # Tag scanned videos + track which assigned videos we matched, so
