@@ -95,6 +95,18 @@
                 android:resource="@xml/install_auto_confirm_service" />
         </service>
 
+        <!-- Reopen the player after a self-update (v0.2.21). The install
+             kills the app and the installer's "Open" button needs a tap;
+             MY_PACKAGE_REPLACED is delivered to the new version only, and
+             only by the system, so the receiver needn't be exported. -->
+        <receiver
+            android:name=".update.UpdateRelaunchReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
         <!-- FileProvider exposes the downloaded APK to the system
              PackageInstaller as a content:// URI. The authority must
              match Updater.launchInstaller's hard-coded format

@@ -200,6 +200,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // v0.2.21: we're up, so the post-update relaunch has nothing left to do.
+        com.smartech.screens.update.InstallAutoConfirm.clearRelaunchPending()
 
         // Keep the screen awake and full-bleed. Retail tablets / TVs should never dim.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

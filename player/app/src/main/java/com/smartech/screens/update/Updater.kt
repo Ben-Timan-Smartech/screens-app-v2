@@ -538,7 +538,7 @@ class Updater(
         // isn't enabled — the dialog just waits for a human, as before. Armed
         // for both the overnight background path and manual CMS/staff triggers,
         // since either can reach here.
-        InstallAutoConfirm.arm()
+        InstallAutoConfirm.arm(appContext)
 
         // v0.1.48/v0.1.54: fallback chain. Stock Android binds the
         // system PackageInstaller to ACTION_VIEW + content URI from
