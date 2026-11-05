@@ -109,7 +109,12 @@ const liveScreenToRow = (ls) => {
                       ? `${Math.round(ls.secondsSinceHeartbeat)}s`
                       : `${Math.round(ls.secondsSinceHeartbeat / 60)}m`)
                   : 'never',
-    orient:     (ls.orientation || 'LANDSCAPE').toLowerCase(),  // 'landscape' | 'portrait'
+    // 'landscape' | 'portrait' as mounted: a 90/270 rotation turns the panel's
+    // own orientation on its side (the tablet doesn't know it's rotated).
+    orient:     (() => {
+      const o = (ls.orientation || 'LANDSCAPE').toLowerCase().startsWith('port') ? 'portrait' : 'landscape';
+      return [90, 270].includes(Number(ls.rotation)) ? (o === 'portrait' ? 'landscape' : 'portrait') : o;
+    })(),
     tier:       ls.tier || '—',
     location:   loc,
     raw:        ls,

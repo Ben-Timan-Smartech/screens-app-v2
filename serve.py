@@ -1245,6 +1245,21 @@ def _cancel_preview_on(s: dict) -> bool:
     return True
 
 
+def _effective_orientation(device_id: str) -> str:
+    """"portrait" or "landscape" as the screen is actually seen.
+
+    The tablet reports the panel's own orientation, but a CMS rotation of
+    90/270 is done inside the player and Android never hears about it, so a
+    TV mounted on its side still reports landscape. Swap it here. Must be
+    inside _STATE_LOCK."""
+    raw = str((_screens.get(device_id) or {}).get("orientation") or "landscape").lower()
+    orient = "portrait" if raw.startswith("port") else "landscape"
+    rot = int((_per_screen.get(device_id) or {}).get("rotation") or 0)
+    if rot in (90, 270):
+        orient = "landscape" if orient == "portrait" else "portrait"
+    return orient
+
+
 def _resolve_event_items_for_screen(event: dict, device_id: str) -> list[dict]:
     """Compute the final item list for a screen under an active event.
 
@@ -1264,11 +1279,7 @@ def _resolve_event_items_for_screen(event: dict, device_id: str) -> list[dict]:
            - items = [splash]  — splash is the universal fallback,
              regardless of the splashOn toggle.
     """
-    screen_meta = _screens.get(device_id) or {}
-    orient_raw = (screen_meta.get("orientation") or "landscape")
-    orient = str(orient_raw).lower() if orient_raw else "landscape"
-    if orient not in ("portrait", "landscape"):
-        orient = "landscape"
+    orient = _effective_orientation(device_id)
     splash_item = (event.get("splashes") or {}).get(orient)
 
     assignment = (event.get("screenAssignments") or {}).get(device_id) or {}
@@ -1297,7 +1308,6 @@ def _apply_event_override_to_screen(event: dict, device_id: str) -> None:
     Does NOT persist the snapshot — call _snapshot_screen_for_event
     FIRST. Must be inside _STATE_LOCK."""
     s = _ensure_screen_state(device_id)
-    s["items"] = _resolve_event_items_for_screen(event, device_id)
     overrides = event.get("overrides") or {}
     # mixSplash defaults to False during an event — the event's own
     # splash resolution is the whole game, no brand-splash interleave
@@ -1308,6 +1318,8 @@ def _apply_event_override_to_screen(event: dict, device_id: str) -> None:
                 "pollMode", "syncGroup", "displayMode"):
         if key in overrides:
             s[key] = overrides[key]
+    # After the overrides: a rotation override changes which splash fits.
+    s["items"] = _resolve_event_items_for_screen(event, device_id)
     # A web page screen shows the event too. Its URL stays in `web`, so the
     # restore flips it straight back to the page.
     s["contentMode"] = "playlist"
@@ -5014,7 +5026,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     splash = resolve_splash_for(
                         location.get("city"),
                         location.get("concept"),
-                        screen_meta.get("orientation"),
+                        _effective_orientation(screen_id),
                     )
                     # Enrich each pushed item with library-side flags
                     # (defaultUnmute) so the player can apply per-video
@@ -6857,6 +6869,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         )
                         return
                     state["rotation"] = rot
+                    # Turning a screen on its side mid-event swaps which
+                    # event splash fits it.
+                    ev = _event_holding(device_id)
+                    if ev is not None:
+                        state["items"] = _resolve_event_items_for_screen(ev, device_id)
                     state["revision"] += 1
                     _save_per_screen_soon()
                     self._send_json({"ok": True, "rotation": state["rotation"]})
