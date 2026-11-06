@@ -18,6 +18,14 @@ Rules:
 
 ---
 
+## v0.2.21
+
+- **Screens reopen by themselves after an automatic update.** With auto-update
+  switched on, the screen pressed INSTALL but then stopped on Android's "App
+  installed" screen, because nobody was there to tap Open. The new version now
+  reopens the player as soon as it's installed, and also presses Open if that
+  screen is showing.
+
 ## v0.2.20
 
 - **Screens on tablets with split storage can download videos again.** Some
