@@ -17,6 +17,9 @@ const PlaylistItem = ({
   draggable, isDragging, isDropTargetAbove, onDragStart, onDragOver, onDragLeave, onDrop, onDragEnd,
 }) => {
   const [menuOpen, setMenuOpen] = React.useState(false);
+  // No url = a tm:rw video whose file never synced. The server doesn't send
+  // it to the screen, so say so instead of letting it look like it plays.
+  const noFile = !(typeof v.url === 'string' && v.url.trim());
   return (
     <div
       draggable={draggable}
@@ -53,7 +56,8 @@ const PlaylistItem = ({
           {v.brand && <span>{v.brand}</span>}
           {v.brand && <span>·</span>}
           <span className="tnum">{v.durationSec ? `${v.durationSec}s` : (v.duration || '—')}</span>
-          {isCurrent && <><span>·</span><span style={{ color: 'var(--ok)' }}>Now playing</span></>}
+          {noFile && <><span>·</span><span style={{ color: 'var(--warn)' }} title="This video hasn't synced from tm:rw yet, so the screen skips it. Remove it, or it plays once the file is in the brand's Drive folder and re-added.">No video file yet: skipped</span></>}
+          {isCurrent && !noFile && <><span>·</span><span style={{ color: 'var(--ok)' }}>Now playing</span></>}
         </div>
       </div>
       <Button variant="ghost" size="sm" icon={<Icon.more size={14} />} onClick={() => setMenuOpen((m) => !m)} />
@@ -2184,7 +2188,8 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   {playlist.map((v, i) => (
                     <PlaylistItem
-                      key={v.id || i} v={v} i={i} isCurrent={isLive && testRemainingSec <= 0 && !runningEvent && i === 0}
+                      key={v.id || i} v={v} i={i} isCurrent={isLive && testRemainingSec <= 0 && !runningEvent
+                        && i === playlist.findIndex((x) => typeof x.url === 'string' && x.url.trim())}
                       onPreview={() => openPreview(v)}
                       draggable={canEdit}
                       isDragging={dragIndex === i}
@@ -2217,9 +2222,13 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                       onRemove={canEdit ? async () => {
                         try {
                           const next = playlist.filter((x, idx) => idx !== i);
-                          await setScreenPlaylist(targetDeviceId, next, 'replace');
+                          const res = await setScreenPlaylist(targetDeviceId, next, 'replace');
+                          // The server also strips any other videos with no
+                          // file when it saves, so say so.
+                          const alsoGone = (res?.skipped || []).length;
+                          const extra = alsoGone ? ` (and ${alsoGone} with no video file)` : '';
                           showToast(
-                            isLive ? `Removed "${v.title}"` : `Removed "${v.title}" — applies on reconnect`,
+                            isLive ? `Removed "${v.title}"${extra}` : `Removed "${v.title}"${extra} — applies on reconnect`,
                             'ok',
                           );
                         } catch (e) {
