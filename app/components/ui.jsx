@@ -364,7 +364,11 @@ const useLibraryCount = () => {
 // pushToScreens — POST /api/push with selected videos, target deviceIds, and
 // mode ("replace" or "append"). Empty deviceIds means "every registered screen".
 const pushToScreens = async (videos, { deviceIds = [], mode = 'replace' } = {}) => {
-  const items = videos.map((v) => ({
+  // A tm:rw video that hasn't synced has no file (mediaUrl null). The server
+  // strips these too; dropping them here keeps the "N videos" counts honest.
+  const playable = videos.filter((v) => v && v.mediaUrl && !v.pendingSync);
+  if (videos.length && !playable.length) throw new Error('none of those videos has synced yet');
+  const items = playable.map((v) => ({
     id: v.id,
     type: v.type || 'video',        // v0.2.14: "image" stills play for durationSec
     title: v.title,

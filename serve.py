@@ -1386,6 +1386,33 @@ def _edit_target(device_id: str, keys: tuple) -> tuple[dict, dict | None]:
     return snap, ev
 
 
+# A playlist item with no `url` is a tm:rw video whose file never synced from
+# Drive (the library flags it `pendingSync`, mediaUrl=None). The player's state
+# parser needs a url on every item, so ONE such item made it reject the whole
+# /api/state payload and sit on the fallback splash. That took B2, C1 and E6
+# at Selfridges dark from 2026-11-05 to 11-10. Such items are now kept off the
+# wire to tablets and stripped when a playlist is saved.
+def _playable_item(it) -> bool:
+    if not isinstance(it, dict):
+        return False
+    url = it.get("url")
+    return isinstance(url, str) and bool(url.strip())
+
+
+def _split_playable(items) -> tuple[list, list]:
+    """(playable items, skipped items) — order kept."""
+    keep: list = []
+    skipped: list = []
+    for it in items or []:
+        (keep if _playable_item(it) else skipped).append(it)
+    return keep, skipped
+
+
+# deviceId -> revision we last logged skipped items for. /api/state is polled
+# every few seconds; log once per playlist revision, not once per poll.
+_UNPLAYABLE_LOGGED: dict[str, int] = {}
+
+
 # v0.2.15: preload window — a signed-off event's content is advertised
 # to its targeted screens this far before startAt so tablets have time
 # to pre-cache. 24h is plenty for the usual signage asset (50-800MB)
@@ -5047,8 +5074,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # per screen (a handful at most) so the lookup is
                     # cheap.
                     enriched_items = []
+                    skipped_ids = []
                     want_card = bool(s.get("productCard"))
                     for it in s["items"]:
+                        # An item with no video file would make the player
+                        # throw away the whole state (see _playable_item).
+                        if not _playable_item(it):
+                            skipped_ids.append((it or {}).get("id") if isinstance(it, dict) else None)
+                            continue
                         lib = _library_lookup_by_id(it.get("id") or "")
                         merged = dict(it)
                         merged["defaultUnmute"] = bool((lib or {}).get("defaultUnmute"))
@@ -5073,6 +5106,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             if card:
                                 merged.update(card)
                         enriched_items.append(merged)
+                    if skipped_ids and _UNPLAYABLE_LOGGED.get(screen_id) != s["revision"]:
+                        _UNPLAYABLE_LOGGED[screen_id] = s["revision"]
+                        print(f"[state] {screen_id}: skipped {len(skipped_ids)} playlist item(s) "
+                              f"with no video file: {', '.join(str(i) for i in skipped_ids)}",
+                              file=sys.stderr)
                     # Sync-group playback hint. When the screen has a
                     # syncGroup set, compute "what every screen in this
                     # group should be playing right now" from the loop's
@@ -5738,7 +5776,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/push":
             if self._require_perm("screens.push") is None:
                 return
-            items = body.get("items") or []
+            items, skipped = _split_playable(body.get("items") or [])
+            if skipped and not items:
+                self._send_json({"error": "no_playable_items",
+                                 "detail": "None of these videos has a video file yet (still syncing from tm:rw).",
+                                 "skipped": [x.get("id") if isinstance(x, dict) else None for x in skipped]},
+                                status=400)
+                return
             mode = body.get("mode") or "replace"
             requested = body.get("deviceIds") or []
             # Same fan-out semantics as /api/screens/<id>/playlist —
@@ -5801,7 +5845,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 icon="upload",
             )
             self._send_json({"ok": True, "screensTargeted": pushed, "screensInEvent": held,
-                             "revision": top_rev, "items": len(items)})
+                             "revision": top_rev, "items": len(items),
+                             "skipped": [x.get("id") if isinstance(x, dict) else None for x in skipped]})
             return
 
         if path == "/api/screens/register":
@@ -6763,8 +6808,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self._send_json({"ok": True, "queued": cmd})
                     return
                 if action == "playlist":
-                    items = body.get("items") or []
                     mode = body.get("mode") or "replace"
+                    # Strip items with no video file (see _playable_item).
+                    # A replace still applies the rest, even if that's
+                    # nothing: removing a good clip from a list whose other
+                    # items are unsynced must still work. An append of only
+                    # unsynced videos is refused rather than a silent no-op.
+                    items, skipped = _split_playable(body.get("items") or [])
+                    skipped_ids = [x.get("id") if isinstance(x, dict) else None for x in skipped]
+                    if mode == "append" and skipped and not items:
+                        self._send_json({"error": "no_playable_items",
+                                         "detail": "None of these videos has a video file yet (still syncing from tm:rw).",
+                                         "skipped": skipped_ids},
+                                        status=400)
+                        return
                     # If the target screen belongs to a sync group, fan
                     # out the push to every member. Sync only works when
                     # every member is on the same playlist + revision —
@@ -6842,6 +6899,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "screensTargeted": len(targets),
                         "screensInEvent": held_by_event,
                         "syncGroup": group_id,
+                        "skipped": skipped_ids,
                     })
                     return
                 if action == "mix-splash":

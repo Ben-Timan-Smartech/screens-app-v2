@@ -234,11 +234,23 @@ const VideoTile = ({ v, selected, onToggle, onPreview }) => {
               {heavyBadge(v)}
             </Chip>
           )}
+          {/* Registered in tm:rw but the file isn't in the Drive folder yet,
+              so it can't go on a screen (the tick is disabled). */}
+          {v.pendingSync && (
+            <span title="Set up in tm:rw but the video file hasn't synced yet. It can go on a screen once it's in the brand's Drive folder.">
+              <Chip tone="info">Not synced yet</Chip>
+            </span>
+          )}
         </div>
       </div>
     </div>
   );
 };
+
+// A video can go on a screen only once it has a streamable file. tm:rw
+// videos that haven't synced from Drive (pendingSync) have mediaUrl=null;
+// pushing one used to take the whole screen down (B2/C1/E6, Nov 2026).
+const canGoOnScreen = (v) => !!(v && v.mediaUrl && !v.pendingSync);
 
 // ─────────────────────────────────────────────────────────────
 // AddContentModal — popup version of the library used from the Screen
@@ -269,6 +281,9 @@ const AddContentModal = ({ targetDeviceId, targetName, onClose }) => {
     : filteredByBrand;
 
   const toggle = (id) => {
+    // Same rule as the full library: an unsynced video can't be ticked.
+    const vid = MOCK_VIDEOS.find(v => v.id === id);
+    if (vid && !canGoOnScreen(vid)) return;
     const n = new Set(selected);
     n.has(id) ? n.delete(id) : n.add(id);
     setSelected(n);
@@ -291,7 +306,8 @@ const AddContentModal = ({ targetDeviceId, targetName, onClose }) => {
     if (selected.size === 0 || busy) return;
     setBusy(true);
     try {
-      const chosen = MOCK_VIDEOS.filter((v) => selected.has(v.id));
+      const chosen = MOCK_VIDEOS.filter((v) => selected.has(v.id) && canGoOnScreen(v));
+      if (chosen.length === 0) { showToast('None of those videos has synced yet', 'err'); return; }
       await setScreenPlaylist(targetDeviceId, chosen, 'append');
       showToast(`Added ${chosen.length} to ${targetName}`, 'ok');
       onClose(true);
@@ -1845,7 +1861,8 @@ const ContentLibrary = () => {
                 // picks the push up on its next poll.
                 if (targetDeviceId) {
                   try {
-                    const chosen = MOCK_VIDEOS.filter((v) => selected.has(v.id));
+                    const chosen = MOCK_VIDEOS.filter((v) => selected.has(v.id) && canGoOnScreen(v));
+                    if (chosen.length === 0) { showToast('None of those videos has synced yet', 'err'); return; }
                     await setScreenPlaylist(targetDeviceId, chosen, 'append');
                     const name = targetScreen?.name || 'screen';
                     showToast(
