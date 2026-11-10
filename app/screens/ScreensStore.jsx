@@ -1,6 +1,20 @@
 /* eslint-disable */
 // Screens — store view. Grid of screen cards with health + currently playing.
 
+// v0.2.22: flag screens that won't get automatic (overnight) updates — the
+// accessibility setting is off, or the player is too old to finish one alone.
+const AutoUpdateFlag = ({ s }) => {
+  if (s.autoUpdate === 'on') return null;
+  const why = s.autoUpdate === 'off'
+    ? 'The auto-update accessibility setting is off on this tablet. Turn it on in Device admin.'
+    : `This player can't finish an update by itself. Update it to v${s.autoUpdateMinApp || '0.2.22'} or later from the CMS.`;
+  return (
+    <span title={`No automatic updates. ${why}`} style={{ flexShrink: 0 }}>
+      <Chip tone="warn">Auto-update off</Chip>
+    </span>
+  );
+};
+
 const ScreenCard = ({ s, selected, onToggle, onOpen }) => {
   const [hover, setHover] = React.useState(false);
   const statusLabel = { online: 'Online', offline: 'Offline', warn: 'Needs attention', updating: 'Updating' }[s.status];
@@ -52,6 +66,7 @@ const ScreenCard = ({ s, selected, onToggle, onOpen }) => {
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
         <StatusDot status={s.status === 'warn' ? 'warn' : s.status === 'offline' ? 'offline' : s.status === 'updating' ? 'updating' : 'online'} />
         <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
+        <AutoUpdateFlag s={s} />
       </div>
       <div style={{ fontSize: 11, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {s.playing ? `Playing · ${s.playing}` : statusLabel}
@@ -107,8 +122,11 @@ const ScreenRow = ({ s, selected, onToggle, onOpen }) => {
       }}>
       <StatusDot status={s.status === 'warn' ? 'warn' : s.status === 'offline' ? 'offline' : s.status === 'updating' ? 'updating' : 'online'} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {s.name}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+            {s.name}
+          </span>
+          <AutoUpdateFlag s={s} />
         </div>
         <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {s.playing ? `Playing · ${s.playing}` : statusLabel}

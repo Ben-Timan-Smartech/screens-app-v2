@@ -2330,7 +2330,8 @@ class PlayerRepository(
               "webLastLoadAt": ${web.lastLoadAtMs?.let { it / 1000.0 } ?: "null"},
               "webLastError": ${qOrNull(web.lastError)},
               "webLastErrorAt": ${web.lastErrorAtMs?.let { it / 1000.0 } ?: "null"},
-              "webViewport": ${qOrNull(web.viewport)}
+              "webViewport": ${qOrNull(web.viewport)},
+              "autoConfirmEnabled": ${com.smartech.screens.update.InstallAutoConfirm.isServiceEnabled(appContext)}
             }
         """.trimIndent()
         runCatching {

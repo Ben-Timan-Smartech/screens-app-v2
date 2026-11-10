@@ -36,8 +36,8 @@ import com.smartech.screens.util.LogBuffer
  *      before it launches the installer, and only for a few minutes — so a
  *      stray install dialog from any other source is never auto-confirmed; and
  *   2. the foreground window belongs to a package installer.
- * It clicks only positive buttons (Install / Update / OK / Continue), never
- * Cancel, and the text fallback ignores anything longer than a button label so
+ * It clicks only positive buttons (Install / Update / OK / Continue / Open, and
+ * Play Protect's Scan app), never Cancel or "Install anyway", and the text fallback ignores anything longer than a button label so
  * the dialog's body copy ("Do you want to install…") can't be mistaken for a
  * button. Everything runs inside a try/catch: a crashing accessibility service
  * gets disabled by the OS, which would silently break auto-update.
@@ -112,8 +112,12 @@ class InstallAutoConfirmService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
+    // v0.2.22: Google Play Protect can stop a sideloaded install with "App
+    // scan recommended — Scan app / Don't install app". Its dialog comes from
+    // Play services or the Play Store, so those count as part of the install.
     private fun looksLikeInstaller(pkg: String): Boolean =
-        pkg.contains("packageinstaller", ignoreCase = true)
+        pkg.contains("packageinstaller", ignoreCase = true) ||
+            pkg == "com.google.android.gms" || pkg == "com.android.vending"
 
     /**
      * Locate the positive confirm button, preferring stable view-ids and
@@ -154,7 +158,7 @@ class InstallAutoConfirmService : AccessibilityService() {
         // Button labels are short; the dialog body ("Do you want to install an
         // update…") is long — the length gate keeps body copy out.
         if (s.isEmpty() || s.length > 16) return false
-        if (s == "ok" || isOpenText(s)) return true
+        if (s == "ok" || s == "scan app" || isOpenText(s)) return true
         return s.startsWith("install") || s.startsWith("update") || s == "continue"
     }
 
@@ -207,7 +211,9 @@ class InstallAutoConfirmService : AccessibilityService() {
             // Positive dialog button: INSTALL, and "Open" on 10+'s success dialog.
             "android:id/button1",
         )
-        private val NEGATIVE_WORDS = listOf("cancel", "don't", "dont", "deny", "back", "close")
+        // "anyway" keeps "Install anyway" (overriding a Play Protect warning)
+        // a person's decision.
+        private val NEGATIVE_WORDS = listOf("cancel", "don't", "don’t", "dont", "deny", "back", "close", "anyway")
     }
 }
 
