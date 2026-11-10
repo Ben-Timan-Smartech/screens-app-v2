@@ -18,6 +18,21 @@ Rules:
 
 ---
 
+## v0.2.23
+
+- **Dashboard screens stay awake and unlocked.** The office Elo box dropped to
+  Android's lock screen after a while and the board disappeared. A screen
+  showing a web page now holds the box awake, wakes it if something turned the
+  screen off, and shows the page over the lock screen. A swipe lock is cleared
+  outright; a PIN lock stays underneath with the page drawn over it.
+- **Choose when it's allowed to lock.** In the CMS, the screen's Content card
+  has a new "Keep awake and unlocked" setting: Always (the default), During set
+  hours (it sleeps and locks outside them and wakes with the page up when they
+  start, in store time), or Off (the box's own sleep and lock settings). Only
+  web page screens have it; playlist screens are unchanged.
+- **See whether a dashboard box is awake.** The Content card shows whether the
+  screen is on, and whether the page is showing over the lock screen.
+
 ## v0.2.21
 
 - **Screens reopen by themselves after an automatic update.** With auto-update

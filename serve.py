@@ -3271,6 +3271,16 @@ WEB_RELOAD_MAX_MIN = 1440
 WEB_PAGE_WIDTH_DEFAULT = 1920
 WEB_PAGE_WIDTH_MIN = 640
 WEB_PAGE_WIDTH_MAX = 3840
+# v0.2.23: dashboard boxes (the office Elo) fell to Android's lock screen
+# after a while. "always" = the player holds the screen on and shows the page
+# over the lock screen; "hours" = only between awakeFrom and awakeTo (store
+# local time), letting the box sleep and lock outside them; "off" = the box's
+# own sleep/lock settings apply.
+WEB_KEEP_AWAKE_MODES = ("always", "hours", "off")
+WEB_KEEP_AWAKE_DEFAULT = "always"
+WEB_AWAKE_FROM_DEFAULT = "08:00"
+WEB_AWAKE_TO_DEFAULT = "19:00"
+_HHMM_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
 def _web_host(url: str | None) -> str | None:
@@ -3300,6 +3310,9 @@ def _web_public(state: dict) -> dict:
         "webUrlHint": _web_url_hint(web.get("url")),
         "webReloadEveryMin": web.get("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN) if web else None,
         "webPageWidth": web.get("pageWidth", WEB_PAGE_WIDTH_DEFAULT) if web else None,
+        "webKeepAwake": web.get("keepAwake", WEB_KEEP_AWAKE_DEFAULT) if web else None,
+        "webAwakeFrom": web.get("awakeFrom", WEB_AWAKE_FROM_DEFAULT) if web else None,
+        "webAwakeTo": web.get("awakeTo", WEB_AWAKE_TO_DEFAULT) if web else None,
     }
 
 
@@ -5161,6 +5174,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             "host":           _web_host(web_cfg.get("url")),
                             "reloadEveryMin": int(web_cfg.get("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN)),
                             "pageWidth":      int(web_cfg.get("pageWidth", WEB_PAGE_WIDTH_DEFAULT)),   # v0.2.17
+                            # v0.2.23: hold the box awake + over the lock screen.
+                            "keepAwake":      web_cfg.get("keepAwake", WEB_KEEP_AWAKE_DEFAULT),
+                            "awakeFrom":      web_cfg.get("awakeFrom", WEB_AWAKE_FROM_DEFAULT),
+                            "awakeTo":        web_cfg.get("awakeTo", WEB_AWAKE_TO_DEFAULT),
                         }
                     payload = {
                         "screenId":    screen_id,
@@ -5998,10 +6015,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # v0.2.17: the size the page actually sees ("1920x1080"),
                     # after the player's page-width scaling.
                     "webViewport",
+                    # v0.2.23: is the screen on, is Android's lock screen up,
+                    # and is the player holding the box awake right now.
+                    "screenOn", "keyguardLocked", "awakeHeld",
                 ):
                     val = body.get(key)
                     if val is None:
                         continue
+                    if key in ("screenOn", "keyguardLocked", "awakeHeld"):
+                        val = bool(val)
                     # Belt and braces: the player already reports errors
                     # without the page URL, but strip any URL that slips
                     # into the error text so a display token can't end up
@@ -6632,7 +6654,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/rotation        { rotation: 0|90|180|270 }
         # POST /api/screens/<deviceId>/name            { name: string }
         # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
-        # POST /api/screens/<deviceId>/content-mode    { mode: "playlist"|"web", url?, reloadEveryMin?, pageWidth? }
+        # POST /api/screens/<deviceId>/content-mode    { mode: "playlist"|"web", url?, reloadEveryMin?, pageWidth?,
+        #                                                keepAwake?: "always"|"hours"|"off", awakeFrom?, awakeTo? }
         m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|display-mode|rotation|content-mode|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
@@ -6959,11 +6982,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             )
                             return
                         web["pageWidth"] = page_width
+                    if "keepAwake" in body:
+                        keep_awake = str(body.get("keepAwake") or "").strip().lower()
+                        if keep_awake not in WEB_KEEP_AWAKE_MODES:
+                            self._send_json(
+                                {"ok": False, "error": "keepAwake must be 'always', 'hours' or 'off'"},
+                                status=400,
+                            )
+                            return
+                        web["keepAwake"] = keep_awake
+                    for key in ("awakeFrom", "awakeTo"):
+                        if key in body:
+                            hhmm = str(body.get(key) or "").strip()
+                            if not _HHMM_RE.match(hhmm):
+                                self._send_json({"ok": False, "error": f"{key} must be HH:MM (24-hour)"}, status=400)
+                                return
+                            web[key] = hhmm
+                    if (web.get("keepAwake") == "hours"
+                            and web.get("awakeFrom", WEB_AWAKE_FROM_DEFAULT) == web.get("awakeTo", WEB_AWAKE_TO_DEFAULT)):
+                        self._send_json(
+                            {"ok": False, "error": "The awake hours need a different start and end time"},
+                            status=400,
+                        )
+                        return
                     if mode == "web" and not web.get("url"):
                         self._send_json({"ok": False, "error": "Paste the page URL to switch this screen to web page mode"}, status=400)
                         return
                     web.setdefault("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN)
                     web.setdefault("pageWidth", WEB_PAGE_WIDTH_DEFAULT)
+                    web.setdefault("keepAwake", WEB_KEEP_AWAKE_DEFAULT)
+                    web.setdefault("awakeFrom", WEB_AWAKE_FROM_DEFAULT)
+                    web.setdefault("awakeTo", WEB_AWAKE_TO_DEFAULT)
                     prev_mode = state.get("contentMode") or "playlist"
                     state["web"] = web if web.get("url") else None
                     state["contentMode"] = mode

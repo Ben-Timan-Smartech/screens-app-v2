@@ -582,6 +582,21 @@ const WEB_PAGE_WIDTH_OPTIONS = [
   { px: 3840, label: '3840 px — 4K' },
   { px: 0,    label: "The screen's own width (no scaling)" },
 ];
+// v0.2.23: dashboard boxes (the office Elo) fell to Android's lock screen
+// after a while. The player can hold the box awake and show the page over the
+// lock screen — always, or only between set hours (store time).
+const KEEP_AWAKE_MIN_APP = '0.2.23';
+const WEB_KEEP_AWAKE_OPTIONS = [
+  { key: 'always', label: 'Always (default)' },
+  { key: 'hours',  label: 'During set hours' },
+  { key: 'off',    label: "Off — the box's own settings" },
+];
+const lockScreenLabel = (s) => {
+  if (s?.screenOn == null) return null;
+  if (!s.screenOn) return { label: s.awakeHeld ? 'Screen off — waking it' : 'Screen off (asleep)' };
+  if (s.keyguardLocked) return { label: 'On, page showing over the lock screen', tone: 'ok' };
+  return { label: 'On and unlocked', tone: 'ok' };
+};
 const WEB_STATUS = {
   showing:      { label: 'Showing', tone: 'ok' },
   loading:      { label: 'Loading…' },
@@ -609,10 +624,16 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
   const mode = screen?.contentMode || 'playlist';
   const savedReload = screen?.webReloadEveryMin ?? 240;
   const savedWidth = screen?.webPageWidth ?? 1920;
+  const savedAwake = screen?.webKeepAwake ?? 'always';
+  const savedFrom = screen?.webAwakeFrom ?? '08:00';
+  const savedTo = screen?.webAwakeTo ?? '19:00';
   const [tab, setTab] = React.useState(mode);
   const [url, setUrl] = React.useState('');
   const [reload, setReload] = React.useState(savedReload);
   const [pageWidth, setPageWidth] = React.useState(savedWidth);
+  const [keepAwake, setKeepAwake] = React.useState(savedAwake);
+  const [awakeFrom, setAwakeFrom] = React.useState(savedFrom);
+  const [awakeTo, setAwakeTo] = React.useState(savedTo);
   const [saving, setSaving] = React.useState(false);
   const [reloading, setReloading] = React.useState(false);
   // Follow the server when the mode moves (our save landing, or another
@@ -620,6 +641,9 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
   React.useEffect(() => { if (!url) setTab(mode); }, [mode]); // eslint-disable-line
   React.useEffect(() => { setReload(savedReload); }, [savedReload]);
   React.useEffect(() => { setPageWidth(savedWidth); }, [savedWidth]);
+  React.useEffect(() => { setKeepAwake(savedAwake); }, [savedAwake]);
+  React.useEffect(() => { setAwakeFrom(savedFrom); }, [savedFrom]);
+  React.useEffect(() => { setAwakeTo(savedTo); }, [savedTo]);
 
   const legacy = screen?.appFlavor === 'legacy';
   const appTooOld = !!screen?.appVersion && !atLeastVersion(screen.appVersion, WEB_MIN_APP);
@@ -631,10 +655,14 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
   const typed = url.trim();
   const typedBad = !!typed && !/^https:\/\/[^\s/?#]+/i.test(typed);
   const hasStored = !!screen?.webUrlHint;
-  const canSubmitWeb = canEdit && !blockedWhy && !saving && !typedBad && (!!typed || hasStored);
+  const hoursBad = keepAwake === 'hours' && (!awakeFrom || !awakeTo || awakeFrom === awakeTo);
+  const canSubmitWeb = canEdit && !blockedWhy && !saving && !typedBad && !hoursBad && (!!typed || hasStored);
   const webDirty = !!typed || Number(reload) !== Number(savedReload)
-    || Number(pageWidth) !== Number(savedWidth);
+    || Number(pageWidth) !== Number(savedWidth)
+    || keepAwake !== savedAwake || awakeFrom !== savedFrom || awakeTo !== savedTo;
   const widthNeedsUpdate = !!screen?.appVersion && !atLeastVersion(screen.appVersion, WEB_PAGE_WIDTH_MIN_APP);
+  const awakeNeedsUpdate = !!screen?.appVersion && !atLeastVersion(screen.appVersion, KEEP_AWAKE_MIN_APP);
+  const lockScreen = lockScreenLabel(screen);
 
   const submit = async (patch) => {
     setSaving(true);
@@ -647,6 +675,9 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
     ...(typed ? { url: typed } : {}),
     reloadEveryMin: Number(reload),
     pageWidth: Number(pageWidth),
+    keepAwake,
+    awakeFrom,
+    awakeTo,
   });
   const backToPlaylist = () => submit({ mode: 'playlist' });
   const reloadNow = async () => {
@@ -741,6 +772,35 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
               {WEB_PAGE_WIDTH_OPTIONS.map((o) => <option key={o.px} value={o.px}>{o.label}</option>)}
             </select>
           </LocField>
+          <LocField label="Keep awake and unlocked"
+            hint={awakeNeedsUpdate
+              ? `Applies once this screen runs player v${KEEP_AWAKE_MIN_APP} or later.`
+              : keepAwake === 'hours'
+                ? "Store local time. Outside these hours the box sleeps and locks after its own timeout; it wakes with the page up when they start."
+                : keepAwake === 'off'
+                  ? "The box sleeps and locks on its own settings, like any Android device."
+                  : 'Holds the screen on and shows the page over the lock screen, so the box never drops to it.'}>
+            <select style={LOC_SELECT_STYLE} value={keepAwake} disabled={!canEdit || saving || !!blockedWhy}
+              onChange={(e) => setKeepAwake(e.target.value)}>
+              {WEB_KEEP_AWAKE_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+            </select>
+            {keepAwake === 'hours' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                <input type="time" value={awakeFrom} disabled={!canEdit || saving || !!blockedWhy}
+                  onChange={(e) => setAwakeFrom(e.target.value)}
+                  aria-label="Awake from" style={{ ...LOC_SELECT_STYLE, flex: 1, minWidth: 0 }} />
+                <span style={hint}>to</span>
+                <input type="time" value={awakeTo} disabled={!canEdit || saving || !!blockedWhy}
+                  onChange={(e) => setAwakeTo(e.target.value)}
+                  aria-label="Awake until" style={{ ...LOC_SELECT_STYLE, flex: 1, minWidth: 0 }} />
+              </div>
+            )}
+            {hoursBad && (
+              <div style={{ fontSize: 10.5, color: 'var(--err)', marginTop: 4 }}>
+                Pick a different start and end time.
+              </div>
+            )}
+          </LocField>
           <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
             {mode === 'web' ? (
               <Button variant="primary" size="sm" disabled={!canSubmitWeb || !webDirty} onClick={submitWeb}>
@@ -763,6 +823,7 @@ const ContentModeCard = ({ screen, canEdit, isLive, onSave, onReload }) => {
       {(mode === 'web' || screen?.playerContentMode === 'web') && (
         <div style={{ marginTop: 14 }}>
           <StatusLine label="On screen" value={onScreen.label} tone={onScreen.tone} />
+          {lockScreen && <StatusLine label="Display" value={lockScreen.label} tone={lockScreen.tone} />}
           <StatusLine label="Host" value={screen?.webLoadedHost || screen?.webHost || '—'} mono />
           <StatusLine label="Last good load" value={agoFromEpoch(screen?.webLastLoadAt)} mono />
           {screen?.webViewport && (
