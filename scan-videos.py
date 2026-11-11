@@ -460,6 +460,28 @@ def _image_library_entry(brand: dict, idx: int, filename: str, media_url: str,
     }
 
 
+def _apply_content_type(entry: dict, brand: dict) -> dict:
+    """v0.2.14: lift the brand record's content-type markers into an
+    entry. For normal brand records this is a no-op (no markers → entry
+    unchanged, library consumers treat it as contentType='brand' by
+    default). For campaigns/filler the entry gains contentType plus the
+    relevant reference field; `brand` on the entry becomes None since
+    the pseudo-brand (`_campaigns/<slug>`, `_filler/<label>`) isn't a
+    real brand name the Content Library should show as a bucket."""
+    ct = brand.get("_contentType")
+    if ct == "campaign":
+        entry["contentType"] = "campaign"
+        entry["campaign"] = brand.get("_campaignId")
+        entry["brand"] = None
+        entry["product"] = None
+    elif ct == "filler":
+        entry["contentType"] = "filler"
+        entry["fillerLabel"] = brand.get("_fillerLabel")
+        entry["brand"] = None
+        entry["product"] = None
+    return entry
+
+
 def collect_videos() -> list[dict]:
     out: list[dict] = []
     skipped_dirs = ("/old/", "/archive/", "/_old/", "/raw/")
@@ -586,8 +608,22 @@ def discover_brands_drive(root_id: str) -> list[dict]:
     folders = drive_client.list_subfolders(root_id)
     # Match the local mode's case-insensitive sort by name.
     folders.sort(key=lambda f: f["name"].lower())
+    # v0.2.14: reserved prefixes under the brand root. `_campaigns/<slug>/`
+    # and `_filler/<label>/` are not brands — they're classification
+    # overlays whose contents land in library.json with contentType set
+    # accordingly. One recursive step: list the slug/label subfolders and
+    # emit one pseudo-brand per child so the existing collect_videos_drive
+    # loop walks them like any other brand (brand record carries
+    # `_contentType` + related metadata that the entry builder lifts
+    # into each library entry).
+    campaigns_folder_id: str | None = None
+    filler_folder_id: str | None = None
     for folder in folders:
         name = folder["name"]
+        if name == "_campaigns":
+            campaigns_folder_id = folder["id"]
+        elif name == "_filler":
+            filler_folder_id = folder["id"]
         if name.startswith(".") or name.startswith("_") or name.lower() == "old":
             continue
         seed = seed_by_folder.get(name)
@@ -608,6 +644,43 @@ def discover_brands_drive(root_id: str) -> list[dict]:
             "products": [],
             "_drive_id": folder["id"],
         })
+    # v0.2.14: enumerate campaign slugs. Each `_campaigns/<slug>/` becomes a
+    # pseudo-brand with `_contentType="campaign"` + `_campaignId=<slug>` so
+    # the resolver can later find all clips for a given campaign. The brand
+    # id is derived from the slug; collisions with real brand ids are
+    # avoided by prefixing with "campaign-".
+    if campaigns_folder_id:
+        for sub in drive_client.list_subfolders(campaigns_folder_id):
+            slug = _slugify(sub["name"])
+            if not slug:
+                continue
+            out.append({
+                "folder":   f"_campaigns/{sub['name']}",
+                "name":     sub["name"],
+                "id":       f"campaign-{slug}",
+                "products": [],
+                "_drive_id":    sub["id"],
+                "_contentType": "campaign",
+                "_campaignId":  slug,
+            })
+    # v0.2.14: filler. One pseudo-brand per `_filler/<label>/` subfolder
+    # (label becomes `_fillerLabel`); a loose file directly under _filler/
+    # is skipped — operators organise filler into labelled bins (bridges,
+    # idents, interstitials) and anything else is probably a mistake.
+    if filler_folder_id:
+        for sub in drive_client.list_subfolders(filler_folder_id):
+            label = _slugify(sub["name"])
+            if not label:
+                continue
+            out.append({
+                "folder":   f"_filler/{sub['name']}",
+                "name":     sub["name"],
+                "id":       f"filler-{label}",
+                "products": [],
+                "_drive_id":    sub["id"],
+                "_contentType": "filler",
+                "_fillerLabel": label,
+            })
     return out
 
 
@@ -693,7 +766,7 @@ def collect_videos_drive() -> list[dict]:
                 if duration_sec is not None else "—"
             )
             heavy = video_heavy_reasons(width, height, size_mb)
-            out.append({
+            out.append(_apply_content_type({
                 "id":          video_id,
                 "type":        "video",
                 "title":       title,
@@ -708,7 +781,7 @@ def collect_videos_drive() -> list[dict]:
                 "width":       width,
                 "height":      height,
                 "heavy":       heavy or None,
-            })
+            }, brand))
     return out
 
 
@@ -846,7 +919,7 @@ def _classify_inventory(brands_id: str, inventory: list[dict]) -> list[dict]:
         screens = (file_idx * 7 + 3) % 22
         title = humanise(Path(name).stem)
         product = detect_product(Path(name).stem, brand_rec["products"])
-        out.append({
+        out.append(_apply_content_type({
             "id":          f"{brand_rec['id']}-{file_idx + 1}",
             "type":        "video",
             "title":       title,
@@ -860,7 +933,7 @@ def _classify_inventory(brands_id: str, inventory: list[dict]) -> list[dict]:
             "mediaUrl":    media_url,
             "width":       None,
             "height":      None,
-        })
+        }, brand_rec))
     return out
 
 

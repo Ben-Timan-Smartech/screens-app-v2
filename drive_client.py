@@ -198,6 +198,85 @@ def list_videos_recursive(folder_id: str) -> list[dict]:
     return out
 
 
+def ensure_subfolder(parent_id: str, name: str) -> str:
+    """Return the Drive folder id of a subfolder named `name` under
+    `parent_id`, creating it if it doesn't exist. Idempotent.
+
+    Used by the Transcoder-upload path (PR 3) to drop encoded output
+    into either the chosen brand folder's ``_encoded/`` subfolder or
+    into a ``_campaigns/<slug>/`` folder under the brand root. Needs
+    the ``drive.file`` scope (added alongside ``drive.readonly`` in
+    PR #172) AND the parent folder shared with the service account as
+    Editor — scopes authorise the operation, sharing authorises the
+    target. A 403 here means the sharing step hasn't landed.
+
+    Name-match is case-sensitive and exact to keep the behaviour
+    predictable; retries are not performed on API errors — the caller
+    decides whether to surface or recover.
+    """
+    svc = _get_service()
+    # Look for an existing child first — avoids racing two creates.
+    q = (
+        f"'{parent_id}' in parents and "
+        f"mimeType='application/vnd.google-apps.folder' and "
+        f"name='{name.replace(chr(39), chr(92) + chr(39))}' and "
+        f"trashed=false"
+    )
+    resp = svc.files().list(
+        q=q,
+        fields="files(id,name)",
+        pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    existing = resp.get("files") or []
+    if existing:
+        return existing[0]["id"]
+    created = svc.files().create(
+        body={
+            "name": name,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [parent_id],
+        },
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+    return created["id"]
+
+
+def create_file(
+    parent_id: str,
+    name: str,
+    local_path: str,
+    mime_type: str = "video/mp4",
+) -> str:
+    """Upload `local_path` into `parent_id` as `name`, resumable.
+
+    Returns the new Drive file id. Resumable because encoded signage
+    outputs run 50-800 MB — a dropped connection on a one-shot upload
+    would waste the whole transfer. google-api-python-client's
+    MediaFileUpload with ``resumable=True`` handles the chunked
+    protocol internally.
+
+    Requires the ``drive.file`` scope and Editor sharing on the parent
+    (same preconditions as ``ensure_subfolder``). On a 403 the caller
+    typically wants to surface "share the folder as Editor" rather
+    than retry.
+    """
+    # Deferred import — googleapiclient's http module isn't always
+    # loaded at module import time (we import discovery lazily above).
+    from googleapiclient.http import MediaFileUpload
+    svc = _get_service()
+    media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
+    created = svc.files().create(
+        body={"name": name, "parents": [parent_id], "mimeType": mime_type},
+        media_body=media,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+    return created["id"]
+
+
 def list_files_in(folder_id: str) -> list[dict]:
     """Direct video files in folder_id (no recursion). Used for splashes."""
     svc = _get_service()
