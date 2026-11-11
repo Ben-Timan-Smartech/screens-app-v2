@@ -293,6 +293,68 @@ def _release_info() -> dict:
         _release_cache["fetched_at"] = now
     return info
 
+
+# v0.2.22: automatic (overnight) updates only go to screens that can finish
+# one with nobody there: the auto-confirm accessibility service is on, and the
+# player is new enough to get through the installer, Play Protect and the
+# reopen by itself. Anything else would stop on a dialog until someone taps
+# it. Manual updates (the CMS Update button) still go out to every screen.
+# SCREENS_AUTO_UPDATE_GATE=0 turns the gate off; SCREENS_AUTO_UPDATE_MIN_APP
+# raises the bar when a later player handles more of the install.
+AUTO_UPDATE_GATE = os.environ.get("SCREENS_AUTO_UPDATE_GATE", "1") != "0"
+AUTO_UPDATE_MIN_APP = os.environ.get("SCREENS_AUTO_UPDATE_MIN_APP", "0.2.22")
+
+# Players before v0.2.22 ask for the release anonymously, so the only way to
+# let one through for a CMS Update press is by address: draining an "update"
+# command opens a short window for the IP the screen polled from.
+MANUAL_UPDATE_WINDOW_SEC = 15 * 60
+_manual_update_ips: dict[str, float] = {}   # client IP -> window end (epoch s)
+_manual_update_lock = threading.Lock()
+
+
+def _version_tuple(v) -> tuple:
+    try:
+        return tuple(int(p) for p in str(v).split(".")[:3])
+    except (ValueError, TypeError):
+        return (0, 0, 0)
+
+
+def _open_manual_update_window(ip: str) -> None:
+    if not ip:
+        return
+    with _manual_update_lock:
+        now = time.time()
+        for k in [k for k, until in _manual_update_ips.items() if until <= now]:
+            del _manual_update_ips[k]
+        _manual_update_ips[ip] = now + MANUAL_UPDATE_WINDOW_SEC
+
+
+def _release_hold_reason(params: dict, user_agent: str, client_ip: str) -> str | None:
+    """Why this caller shouldn't be offered the latest release right now, or
+    None to offer it. Browsers (the login page's download button) always get
+    it; so does any manual update."""
+    if not AUTO_UPDATE_GATE:
+        return None
+    def p(name: str, default: str = "") -> str:
+        return (params.get(name) or [default])[0]
+    if p("deviceId"):
+        # v0.2.22+ player: says who it is, how the check started and whether
+        # its auto-confirm service is on.
+        if p("trigger", "auto") == "manual":
+            return None
+        if _version_tuple(p("appVersion", "0")) < _version_tuple(AUTO_UPDATE_MIN_APP):
+            return f"automatic updates need player v{AUTO_UPDATE_MIN_APP} or later"
+        if p("autoConfirm") != "1":
+            return "the auto-update accessibility setting is off on this screen"
+        return None
+    if user_agent.lower().startswith("okhttp"):
+        # A player older than v0.2.22: it can't finish an update by itself.
+        with _manual_update_lock:
+            if _manual_update_ips.get(client_ip, 0) > time.time():
+                return None
+        return f"automatic updates need player v{AUTO_UPDATE_MIN_APP} or later"
+    return None
+
 # MEDIA_DIR / SPLASH_DIR are overridable via environment so the same code
 # runs on a dev laptop (default Windows G:\ path) and inside a container
 # where the Drive mount doesn't exist (e.g. Cloud Run). The defaults work
@@ -1384,6 +1446,33 @@ def _edit_target(device_id: str, keys: tuple) -> tuple[dict, dict | None]:
     if snap.get("items") is None:
         snap["items"] = []
     return snap, ev
+
+
+# A playlist item with no `url` is a tm:rw video whose file never synced from
+# Drive (the library flags it `pendingSync`, mediaUrl=None). The player's state
+# parser needs a url on every item, so ONE such item made it reject the whole
+# /api/state payload and sit on the fallback splash. That took B2, C1 and E6
+# at Selfridges dark from 2026-11-05 to 11-10. Such items are now kept off the
+# wire to tablets and stripped when a playlist is saved.
+def _playable_item(it) -> bool:
+    if not isinstance(it, dict):
+        return False
+    url = it.get("url")
+    return isinstance(url, str) and bool(url.strip())
+
+
+def _split_playable(items) -> tuple[list, list]:
+    """(playable items, skipped items) — order kept."""
+    keep: list = []
+    skipped: list = []
+    for it in items or []:
+        (keep if _playable_item(it) else skipped).append(it)
+    return keep, skipped
+
+
+# deviceId -> revision we last logged skipped items for. /api/state is polled
+# every few seconds; log once per playlist revision, not once per poll.
+_UNPLAYABLE_LOGGED: dict[str, int] = {}
 
 
 # v0.2.15: preload window — a signed-off event's content is advertised
@@ -4414,6 +4503,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             message = safe
         super().send_error(code, message, explain)
 
+    def _client_ip(self) -> str:
+        """The caller's address. Behind Cloud Run the socket peer is Google's
+        front end, so take the first X-Forwarded-For hop."""
+        fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        return fwd or (self.client_address[0] if self.client_address else "")
+
     def _send_json(
         self,
         payload: dict,
@@ -4987,6 +5082,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             info = _release_info() or {"error": "release_lookup_failed"}
             # Strip the internal-only keys (asset IDs) before responding.
             public_info = {k: v for k, v in info.items() if not k.startswith("_")}
+            # v0.2.22: automatic-update gate. A held-back player sees
+            # versionCode 0, which every player version reads as "up to date".
+            hold = _release_hold_reason(params, self.headers.get("User-Agent") or "", self._client_ip())
+            if hold and "versionCode" in public_info:
+                who = (params.get("deviceId") or ["a pre-0.2.22 player"])[0]
+                print(f"[release] held back v{public_info.get('versionName')} from {who}: {hold}", file=sys.stderr)
+                public_info = {
+                    "heldBack":          True,
+                    "heldBackReason":    hold,
+                    "versionCode":       0,
+                    "latestVersionName": public_info.get("versionName"),
+                }
             self._send_json(public_info)
             return
 
@@ -5042,6 +5149,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     ]
                     if commands:
                         s["pendingCommands"] = [c for c in _queued if (c.get("notBefore") or 0) > _now]
+                        # v0.2.22: a pre-0.2.22 player asks for the release
+                        # anonymously right after this, so let its address
+                        # through the automatic-update gate for a while.
+                        if any(c.get("command") == "update" for c in commands):
+                            _open_manual_update_window(self._client_ip())
                         # Drained queue is a state change worth persisting —
                         # otherwise a redeploy after a command was emitted
                         # but before it was drained could re-fire it.
@@ -5060,8 +5172,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # per screen (a handful at most) so the lookup is
                     # cheap.
                     enriched_items = []
+                    skipped_ids = []
                     want_card = bool(s.get("productCard"))
                     for it in s["items"]:
+                        # An item with no video file would make the player
+                        # throw away the whole state (see _playable_item).
+                        if not _playable_item(it):
+                            skipped_ids.append((it or {}).get("id") if isinstance(it, dict) else None)
+                            continue
                         lib = _library_lookup_by_id(it.get("id") or "")
                         merged = dict(it)
                         merged["defaultUnmute"] = bool((lib or {}).get("defaultUnmute"))
@@ -5086,6 +5204,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             if card:
                                 merged.update(card)
                         enriched_items.append(merged)
+                    if skipped_ids and _UNPLAYABLE_LOGGED.get(screen_id) != s["revision"]:
+                        _UNPLAYABLE_LOGGED[screen_id] = s["revision"]
+                        print(f"[state] {screen_id}: skipped {len(skipped_ids)} playlist item(s) "
+                              f"with no video file: {', '.join(str(i) for i in skipped_ids)}",
+                              file=sys.stderr)
                     # Sync-group playback hint. When the screen has a
                     # syncGroup set, compute "what every screen in this
                     # group should be playing right now" from the loop's
@@ -5315,6 +5438,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "online":                online_flag,
                         "live":                  live_flag,
                         "pollIntervalSec":       _poll_interval_sec(pm),
+                        # v0.2.22: whether this screen gets automatic updates
+                        # ("on"), has the accessibility setting off ("off"),
+                        # or runs a player too old to finish one unattended
+                        # ("old"). The CMS flags anything but "on".
+                        "autoUpdate":            ("old" if _version_tuple(s.get("appVersion") or "0")
+                                                  < _version_tuple(AUTO_UPDATE_MIN_APP)
+                                                  else "on" if s.get("autoConfirmEnabled") else "off"),
+                        "autoUpdateMinApp":      AUTO_UPDATE_MIN_APP,
                         "onlineThresholdSec":    int(_online_threshold_sec(pm)),
                         "liveThresholdSec":      int(_live_threshold_sec(pm)),
                         "secondsSinceHeartbeat": round(now - last, 1) if last else None,
@@ -5755,7 +5886,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/push":
             if self._require_perm("screens.push") is None:
                 return
-            items = body.get("items") or []
+            items, skipped = _split_playable(body.get("items") or [])
+            if skipped and not items:
+                self._send_json({"error": "no_playable_items",
+                                 "detail": "None of these videos has a video file yet (still syncing from tm:rw).",
+                                 "skipped": [x.get("id") if isinstance(x, dict) else None for x in skipped]},
+                                status=400)
+                return
             mode = body.get("mode") or "replace"
             requested = body.get("deviceIds") or []
             # Same fan-out semantics as /api/screens/<id>/playlist —
@@ -5818,7 +5955,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 icon="upload",
             )
             self._send_json({"ok": True, "screensTargeted": pushed, "screensInEvent": held,
-                             "revision": top_rev, "items": len(items)})
+                             "revision": top_rev, "items": len(items),
+                             "skipped": [x.get("id") if isinstance(x, dict) else None for x in skipped]})
             return
 
         if path == "/api/screens/register":
@@ -6015,6 +6153,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # v0.2.17: the size the page actually sees ("1920x1080"),
                     # after the player's page-width scaling.
                     "webViewport",
+                    # v0.2.22: is the auto-confirm accessibility service on?
+                    # Off (or not reported, pre-0.2.22) = no automatic
+                    # updates, and the CMS flags the screen.
+                    "autoConfirmEnabled",
                     # v0.2.23: is the screen on, is Android's lock screen up,
                     # and is the player holding the box awake right now.
                     "screenOn", "keyguardLocked", "awakeHeld",
@@ -6786,8 +6928,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self._send_json({"ok": True, "queued": cmd})
                     return
                 if action == "playlist":
-                    items = body.get("items") or []
                     mode = body.get("mode") or "replace"
+                    # Strip items with no video file (see _playable_item).
+                    # A replace still applies the rest, even if that's
+                    # nothing: removing a good clip from a list whose other
+                    # items are unsynced must still work. An append of only
+                    # unsynced videos is refused rather than a silent no-op.
+                    items, skipped = _split_playable(body.get("items") or [])
+                    skipped_ids = [x.get("id") if isinstance(x, dict) else None for x in skipped]
+                    if mode == "append" and skipped and not items:
+                        self._send_json({"error": "no_playable_items",
+                                         "detail": "None of these videos has a video file yet (still syncing from tm:rw).",
+                                         "skipped": skipped_ids},
+                                        status=400)
+                        return
                     # If the target screen belongs to a sync group, fan
                     # out the push to every member. Sync only works when
                     # every member is on the same playlist + revision —
@@ -6865,6 +7019,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "screensTargeted": len(targets),
                         "screensInEvent": held_by_event,
                         "syncGroup": group_id,
+                        "skipped": skipped_ids,
                     })
                     return
                 if action == "mix-splash":

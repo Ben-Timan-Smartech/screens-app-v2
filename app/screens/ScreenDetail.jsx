@@ -17,6 +17,9 @@ const PlaylistItem = ({
   draggable, isDragging, isDropTargetAbove, onDragStart, onDragOver, onDragLeave, onDrop, onDragEnd,
 }) => {
   const [menuOpen, setMenuOpen] = React.useState(false);
+  // No url = a tm:rw video whose file never synced. The server doesn't send
+  // it to the screen, so say so instead of letting it look like it plays.
+  const noFile = !(typeof v.url === 'string' && v.url.trim());
   return (
     <div
       draggable={draggable}
@@ -53,7 +56,8 @@ const PlaylistItem = ({
           {v.brand && <span>{v.brand}</span>}
           {v.brand && <span>·</span>}
           <span className="tnum">{v.durationSec ? `${v.durationSec}s` : (v.duration || '—')}</span>
-          {isCurrent && <><span>·</span><span style={{ color: 'var(--ok)' }}>Now playing</span></>}
+          {noFile && <><span>·</span><span style={{ color: 'var(--warn)' }} title="This video hasn't synced from tm:rw yet, so the screen skips it. Remove it, or it plays once the file is in the brand's Drive folder and re-added.">No video file yet: skipped</span></>}
+          {isCurrent && !noFile && <><span>·</span><span style={{ color: 'var(--ok)' }}>Now playing</span></>}
         </div>
       </div>
       <Button variant="ghost" size="sm" icon={<Icon.more size={14} />} onClick={() => setMenuOpen((m) => !m)} />
@@ -88,7 +92,7 @@ const PlaylistItem = ({
 const StatusLine = ({ label, value, mono, tone }) => (
   <div style={{ display: 'flex', alignItems: 'center', padding: '8px 0', borderBottom: 'var(--border-faint)', gap: 8 }}>
     <span style={{ fontSize: 12, color: 'var(--ink-4)', flex: 1 }}>{label}</span>
-    <span className={mono ? 'tnum' : ''} style={{ fontSize: 12, fontWeight: 500, color: tone === 'ok' ? 'var(--ok)' : tone === 'err' ? 'var(--err)' : 'var(--ink-1)', textAlign: 'right' }}>{value}</span>
+    <span className={mono ? 'tnum' : ''} style={{ fontSize: 12, fontWeight: 500, color: tone === 'ok' ? 'var(--ok)' : tone === 'err' ? 'var(--err)' : tone === 'warn' ? 'var(--warn)' : 'var(--ink-1)', textAlign: 'right' }}>{value}</span>
   </div>
 );
 
@@ -1521,6 +1525,13 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
       ? `Android ${lastKnown.androidVersion}${lastKnown.androidSdk ? ` · API ${lastKnown.androidSdk}` : ''}`
       : '—',
     webView:       webViewLabel(lastKnown) || '—',
+    // v0.2.22: only screens that can finish an update unattended get
+    // automatic (overnight) updates.
+    autoUpdate:    lastKnown.autoUpdate === 'on'
+      ? { label: 'On', tone: 'ok' }
+      : lastKnown.autoUpdate === 'off'
+        ? { label: 'Off: turn on in Device admin', tone: 'warn' }
+        : { label: `Off: needs v${lastKnown.autoUpdateMinApp || '0.2.22'}`, tone: 'warn' },
   } : {
     // Truly never-registered slot — keep the original "pending" copy.
     health: { label: 'Offline', tone: 'err' },
@@ -1529,6 +1540,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     tier: '—', orientation: screen.orient || '—',
     storage: '—', free: '—', appVersion: '—', revision: '—',
     android: '—', webView: '—',
+    autoUpdate: { label: '—' },
   };
 
   // Any tablet that has ever registered has a deviceId on the server, even
@@ -2245,7 +2257,8 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   {playlist.map((v, i) => (
                     <PlaylistItem
-                      key={v.id || i} v={v} i={i} isCurrent={isLive && testRemainingSec <= 0 && !runningEvent && i === 0}
+                      key={v.id || i} v={v} i={i} isCurrent={isLive && testRemainingSec <= 0 && !runningEvent
+                        && i === playlist.findIndex((x) => typeof x.url === 'string' && x.url.trim())}
                       onPreview={() => openPreview(v)}
                       draggable={canEdit}
                       isDragging={dragIndex === i}
@@ -2278,9 +2291,13 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                       onRemove={canEdit ? async () => {
                         try {
                           const next = playlist.filter((x, idx) => idx !== i);
-                          await setScreenPlaylist(targetDeviceId, next, 'replace');
+                          const res = await setScreenPlaylist(targetDeviceId, next, 'replace');
+                          // The server also strips any other videos with no
+                          // file when it saves, so say so.
+                          const alsoGone = (res?.skipped || []).length;
+                          const extra = alsoGone ? ` (and ${alsoGone} with no video file)` : '';
                           showToast(
-                            isLive ? `Removed "${v.title}"` : `Removed "${v.title}" — applies on reconnect`,
+                            isLive ? `Removed "${v.title}"${extra}` : `Removed "${v.title}"${extra} — applies on reconnect`,
                             'ok',
                           );
                         } catch (e) {
@@ -2341,6 +2358,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 <StatusLine label="Cache" value={statusValues.storage} mono />
                 <StatusLine label="Free disk" value={statusValues.free} mono />
                 <StatusLine label="App version" value={statusValues.appVersion} mono />
+                <StatusLine label="Auto-update" value={statusValues.autoUpdate.label} tone={statusValues.autoUpdate.tone} />
                 <StatusLine label="Android" value={statusValues.android} mono />
                 <StatusLine label="WebView" value={statusValues.webView} mono />
                 <StatusLine label="Playlist" value={statusValues.revision} mono />

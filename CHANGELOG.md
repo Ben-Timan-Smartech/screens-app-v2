@@ -33,6 +33,21 @@ Rules:
 - **See whether a dashboard box is awake.** The Content card shows whether the
   screen is on, and whether the page is showing over the lock screen.
 
+## v0.2.22
+
+- **Automatic updates only go to screens that can finish them alone.** The
+  overnight update now skips any screen whose auto-update accessibility
+  setting is off, and any screen on a player older than this one, so no
+  screen is left stuck on an install dialog overnight. The CMS Update button
+  still updates any screen straight away.
+- **Screens without automatic updates are flagged in the CMS.** An
+  "Auto-update off" tag appears next to the screen in the store list, and the
+  screen page's Status card says why: the setting is off (turn it on in
+  Device admin), or the player needs updating first.
+- **Google Play Protect's "Scan app" prompt is pressed automatically** during
+  an update, so it no longer stops the install. "Don't install app" and
+  "Install anyway" are never pressed; those stay with a person.
+
 ## v0.2.21
 
 - **Screens reopen by themselves after an automatic update.** With auto-update

@@ -2350,6 +2350,7 @@ class PlayerRepository(
               "webLastError": ${qOrNull(web.lastError)},
               "webLastErrorAt": ${web.lastErrorAtMs?.let { it / 1000.0 } ?: "null"},
               "webViewport": ${qOrNull(web.viewport)},
+              "autoConfirmEnabled": ${com.smartech.screens.update.InstallAutoConfirm.isServiceEnabled(appContext)},
               "screenOn": ${power?.isInteractive ?: "null"},
               "keyguardLocked": ${keyguard?.isKeyguardLocked ?: "null"},
               "awakeHeld": $awakeHeld
