@@ -32,6 +32,11 @@ Rules:
   web page screens have it; playlist screens are unchanged.
 - **See whether a dashboard box is awake.** The Content card shows whether the
   screen is on, and whether the page is showing over the lock screen.
+- **Update, refresh or reboot many screens at once.** In a store's screen list,
+  tick screens or press Select all, then Update, Refresh or Reboot them in one
+  go. Update and Reboot ask you to confirm first. This is the quickest way to
+  move a store onto this version, since screens on older players don't update
+  themselves overnight any more.
 - **Brand images are labelled as images.** The media server was marking every
   Drive file as a video, so a still such as a brand logo wouldn't preview in a
   browser. Images now go out as images. Screens were never affected.
