@@ -40,6 +40,11 @@ Rules:
 - **Brand images are labelled as images.** The media server was marking every
   Drive file as a video, so a still such as a brand logo wouldn't preview in a
   browser. Images now go out as images. Screens were never affected.
+- **A new dashboard.** Every screen is a tile showing whether it's on air and
+  what it's playing, and offline screens stand out. The quick-actions grid,
+  the store health list and the demo-screen banner are gone; the sidebar and
+  the Screens page cover them. The sidebar puts search at the top (or press
+  Ctrl K) and groups its pages under Operate and Watch.
 
 ## v0.2.22
 

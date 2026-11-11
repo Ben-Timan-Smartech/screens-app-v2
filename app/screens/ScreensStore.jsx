@@ -398,7 +398,7 @@ const ScreensStoreView = ({ storeId }) => {
           }}>
             {(() => {
               const barBtn = { background: 'var(--ink-10)', color: 'var(--ink-0)', padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer' };
-              const linkBtn = { fontSize: 12, color: 'rgba(250,250,250,0.7)', padding: '4px 6px', cursor: 'pointer' };
+              const linkBtn = { fontSize: 12, color: 'inherit', opacity: 0.7, padding: '4px 6px', cursor: 'pointer' };
               const n = selected.size;
               // Awaiting confirm for a disruptive command (Update / Reboot).
               if (pendingCmd) {
