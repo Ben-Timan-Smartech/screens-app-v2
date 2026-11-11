@@ -89,6 +89,10 @@ const liveScreenToRow = (ls) => {
     name:       (ls.nameSetByOperator && ls.name) ? ls.name
                   : (loc.screenCode || ls.name || 'Unnamed screen'),
     appVersion: ls.appVersion || null,
+    // v0.2.22: 'on' | 'off' (accessibility setting off) | 'old' (player too
+    // old to finish an update unattended). Only 'on' gets automatic updates.
+    autoUpdate: ls.autoUpdate || 'old',
+    autoUpdateMinApp: ls.autoUpdateMinApp || null,
     registeredAt: ls.registeredAt || 0,
     secondsSinceHeartbeat: ls.secondsSinceHeartbeat != null ? ls.secondsSinceHeartbeat : null,
     // v0.2.16: a screen in web page mode shows a live page, not its playlist.

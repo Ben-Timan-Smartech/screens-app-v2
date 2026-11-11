@@ -293,6 +293,68 @@ def _release_info() -> dict:
         _release_cache["fetched_at"] = now
     return info
 
+
+# v0.2.22: automatic (overnight) updates only go to screens that can finish
+# one with nobody there: the auto-confirm accessibility service is on, and the
+# player is new enough to get through the installer, Play Protect and the
+# reopen by itself. Anything else would stop on a dialog until someone taps
+# it. Manual updates (the CMS Update button) still go out to every screen.
+# SCREENS_AUTO_UPDATE_GATE=0 turns the gate off; SCREENS_AUTO_UPDATE_MIN_APP
+# raises the bar when a later player handles more of the install.
+AUTO_UPDATE_GATE = os.environ.get("SCREENS_AUTO_UPDATE_GATE", "1") != "0"
+AUTO_UPDATE_MIN_APP = os.environ.get("SCREENS_AUTO_UPDATE_MIN_APP", "0.2.22")
+
+# Players before v0.2.22 ask for the release anonymously, so the only way to
+# let one through for a CMS Update press is by address: draining an "update"
+# command opens a short window for the IP the screen polled from.
+MANUAL_UPDATE_WINDOW_SEC = 15 * 60
+_manual_update_ips: dict[str, float] = {}   # client IP -> window end (epoch s)
+_manual_update_lock = threading.Lock()
+
+
+def _version_tuple(v) -> tuple:
+    try:
+        return tuple(int(p) for p in str(v).split(".")[:3])
+    except (ValueError, TypeError):
+        return (0, 0, 0)
+
+
+def _open_manual_update_window(ip: str) -> None:
+    if not ip:
+        return
+    with _manual_update_lock:
+        now = time.time()
+        for k in [k for k, until in _manual_update_ips.items() if until <= now]:
+            del _manual_update_ips[k]
+        _manual_update_ips[ip] = now + MANUAL_UPDATE_WINDOW_SEC
+
+
+def _release_hold_reason(params: dict, user_agent: str, client_ip: str) -> str | None:
+    """Why this caller shouldn't be offered the latest release right now, or
+    None to offer it. Browsers (the login page's download button) always get
+    it; so does any manual update."""
+    if not AUTO_UPDATE_GATE:
+        return None
+    def p(name: str, default: str = "") -> str:
+        return (params.get(name) or [default])[0]
+    if p("deviceId"):
+        # v0.2.22+ player: says who it is, how the check started and whether
+        # its auto-confirm service is on.
+        if p("trigger", "auto") == "manual":
+            return None
+        if _version_tuple(p("appVersion", "0")) < _version_tuple(AUTO_UPDATE_MIN_APP):
+            return f"automatic updates need player v{AUTO_UPDATE_MIN_APP} or later"
+        if p("autoConfirm") != "1":
+            return "the auto-update accessibility setting is off on this screen"
+        return None
+    if user_agent.lower().startswith("okhttp"):
+        # A player older than v0.2.22: it can't finish an update by itself.
+        with _manual_update_lock:
+            if _manual_update_ips.get(client_ip, 0) > time.time():
+                return None
+        return f"automatic updates need player v{AUTO_UPDATE_MIN_APP} or later"
+    return None
+
 # MEDIA_DIR / SPLASH_DIR are overridable via environment so the same code
 # runs on a dev laptop (default Windows G:\ path) and inside a container
 # where the Drive mount doesn't exist (e.g. Cloud Run). The defaults work
@@ -4428,6 +4490,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             message = safe
         super().send_error(code, message, explain)
 
+    def _client_ip(self) -> str:
+        """The caller's address. Behind Cloud Run the socket peer is Google's
+        front end, so take the first X-Forwarded-For hop."""
+        fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        return fwd or (self.client_address[0] if self.client_address else "")
+
     def _send_json(
         self,
         payload: dict,
@@ -5001,6 +5069,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             info = _release_info() or {"error": "release_lookup_failed"}
             # Strip the internal-only keys (asset IDs) before responding.
             public_info = {k: v for k, v in info.items() if not k.startswith("_")}
+            # v0.2.22: automatic-update gate. A held-back player sees
+            # versionCode 0, which every player version reads as "up to date".
+            hold = _release_hold_reason(params, self.headers.get("User-Agent") or "", self._client_ip())
+            if hold and "versionCode" in public_info:
+                who = (params.get("deviceId") or ["a pre-0.2.22 player"])[0]
+                print(f"[release] held back v{public_info.get('versionName')} from {who}: {hold}", file=sys.stderr)
+                public_info = {
+                    "heldBack":          True,
+                    "heldBackReason":    hold,
+                    "versionCode":       0,
+                    "latestVersionName": public_info.get("versionName"),
+                }
             self._send_json(public_info)
             return
 
@@ -5056,6 +5136,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     ]
                     if commands:
                         s["pendingCommands"] = [c for c in _queued if (c.get("notBefore") or 0) > _now]
+                        # v0.2.22: a pre-0.2.22 player asks for the release
+                        # anonymously right after this, so let its address
+                        # through the automatic-update gate for a while.
+                        if any(c.get("command") == "update" for c in commands):
+                            _open_manual_update_window(self._client_ip())
                         # Drained queue is a state change worth persisting —
                         # otherwise a redeploy after a command was emitted
                         # but before it was drained could re-fire it.
@@ -5336,6 +5421,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "online":                online_flag,
                         "live":                  live_flag,
                         "pollIntervalSec":       _poll_interval_sec(pm),
+                        # v0.2.22: whether this screen gets automatic updates
+                        # ("on"), has the accessibility setting off ("off"),
+                        # or runs a player too old to finish one unattended
+                        # ("old"). The CMS flags anything but "on".
+                        "autoUpdate":            ("old" if _version_tuple(s.get("appVersion") or "0")
+                                                  < _version_tuple(AUTO_UPDATE_MIN_APP)
+                                                  else "on" if s.get("autoConfirmEnabled") else "off"),
+                        "autoUpdateMinApp":      AUTO_UPDATE_MIN_APP,
                         "onlineThresholdSec":    int(_online_threshold_sec(pm)),
                         "liveThresholdSec":      int(_live_threshold_sec(pm)),
                         "secondsSinceHeartbeat": round(now - last, 1) if last else None,
@@ -6043,6 +6136,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # v0.2.17: the size the page actually sees ("1920x1080"),
                     # after the player's page-width scaling.
                     "webViewport",
+                    # v0.2.22: is the auto-confirm accessibility service on?
+                    # Off (or not reported, pre-0.2.22) = no automatic
+                    # updates, and the CMS flags the screen.
+                    "autoConfirmEnabled",
                 ):
                     val = body.get(key)
                     if val is None:

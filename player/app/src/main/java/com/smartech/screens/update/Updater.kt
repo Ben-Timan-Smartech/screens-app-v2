@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -61,6 +62,9 @@ class Updater(
     // v0.2.19: the screen's city code ("NYC", "LDN", …) so the overnight
     // window runs on the store's clock, not the box's factory time zone.
     private val cityCodeProvider: suspend () -> String? = { null },
+    // v0.2.22: sent with each release check so the server can hold back
+    // automatic updates from a screen that couldn't finish one unattended.
+    private val deviceIdProvider: suspend () -> String? = { null },
 ) {
     // v0.1.51: dedicated client for the APK download. Same pattern as
     // VideoCache (v0.1.39): the shared API client's 60 s callTimeout
@@ -123,6 +127,10 @@ class Updater(
         val versionCode: Int = 0,
         val modernUrl: String? = null,
         val legacyUrl: String? = null,
+        // v0.2.22: set when the server holds back an automatic update.
+        val heldBack: Boolean = false,
+        val heldBackReason: String? = null,
+        val latestVersionName: String? = null,
     )
 
     /** Launch + periodic check on a tighter cadence than the original
@@ -228,10 +236,21 @@ class Updater(
                 _state.value = State.Idle
                 return
             }
-            val latest = fetchLatest(base.trimEnd('/'))
+            val latest = fetchLatest(base.trimEnd('/'), manual = surfaceFailures)
             if (latest == null) {
                 if (surfaceFailures) _state.value = State.Failed("Couldn't reach the update server")
                 else _state.value = State.Idle
+                return
+            }
+            if (latest.heldBack) {
+                // v0.2.22: only reached by a background tick (manual checks
+                // are never held back). Warn once per run so the reason is
+                // in /api/logs without repeating every two hours.
+                if (!heldBackLogged) {
+                    heldBackLogged = true
+                    LogBuffer.w(TAG, "Automatic update to v${latest.latestVersionName} held back: ${latest.heldBackReason}")
+                }
+                _state.value = State.Idle
                 return
             }
             val currentCode = BuildConfig.VERSION_CODE
@@ -304,9 +323,22 @@ class Updater(
         _state.value = State.Idle
     }
 
-    private suspend fun fetchLatest(base: String): LatestReleaseDto? = withContext(Dispatchers.IO) {
+    @Volatile private var heldBackLogged = false
+
+    private suspend fun fetchLatest(base: String, manual: Boolean): LatestReleaseDto? = withContext(Dispatchers.IO) {
         runCatching {
-            val req = Request.Builder().url("$base/api/release/latest").build()
+            // v0.2.22: tell the server who's asking, whether a person started
+            // this check, and whether the auto-confirm service is on. It
+            // decides whether an automatic update goes ahead.
+            val url = "$base/api/release/latest".toHttpUrl().newBuilder().apply {
+                runCatching { deviceIdProvider() }.getOrNull()?.takeIf { it.isNotBlank() }?.let {
+                    addQueryParameter("deviceId", it)
+                }
+                addQueryParameter("appVersion", BuildConfig.VERSION_NAME)
+                addQueryParameter("trigger", if (manual) "manual" else "auto")
+                addQueryParameter("autoConfirm", if (InstallAutoConfirm.isServiceEnabled(appContext)) "1" else "0")
+            }.build()
+            val req = Request.Builder().url(url).build()
             http.newCall(req).execute().use { r ->
                 if (!r.isSuccessful) {
                     LogBuffer.w(TAG, "release/latest HTTP ${r.code}")

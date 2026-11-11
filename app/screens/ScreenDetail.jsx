@@ -92,7 +92,7 @@ const PlaylistItem = ({
 const StatusLine = ({ label, value, mono, tone }) => (
   <div style={{ display: 'flex', alignItems: 'center', padding: '8px 0', borderBottom: 'var(--border-faint)', gap: 8 }}>
     <span style={{ fontSize: 12, color: 'var(--ink-4)', flex: 1 }}>{label}</span>
-    <span className={mono ? 'tnum' : ''} style={{ fontSize: 12, fontWeight: 500, color: tone === 'ok' ? 'var(--ok)' : tone === 'err' ? 'var(--err)' : 'var(--ink-1)', textAlign: 'right' }}>{value}</span>
+    <span className={mono ? 'tnum' : ''} style={{ fontSize: 12, fontWeight: 500, color: tone === 'ok' ? 'var(--ok)' : tone === 'err' ? 'var(--err)' : tone === 'warn' ? 'var(--warn)' : 'var(--ink-1)', textAlign: 'right' }}>{value}</span>
   </div>
 );
 
@@ -1464,6 +1464,13 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
       ? `Android ${lastKnown.androidVersion}${lastKnown.androidSdk ? ` · API ${lastKnown.androidSdk}` : ''}`
       : '—',
     webView:       webViewLabel(lastKnown) || '—',
+    // v0.2.22: only screens that can finish an update unattended get
+    // automatic (overnight) updates.
+    autoUpdate:    lastKnown.autoUpdate === 'on'
+      ? { label: 'On', tone: 'ok' }
+      : lastKnown.autoUpdate === 'off'
+        ? { label: 'Off: turn on in Device admin', tone: 'warn' }
+        : { label: `Off: needs v${lastKnown.autoUpdateMinApp || '0.2.22'}`, tone: 'warn' },
   } : {
     // Truly never-registered slot — keep the original "pending" copy.
     health: { label: 'Offline', tone: 'err' },
@@ -1472,6 +1479,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     tier: '—', orientation: screen.orient || '—',
     storage: '—', free: '—', appVersion: '—', revision: '—',
     android: '—', webView: '—',
+    autoUpdate: { label: '—' },
   };
 
   // Any tablet that has ever registered has a deviceId on the server, even
@@ -2289,6 +2297,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                 <StatusLine label="Cache" value={statusValues.storage} mono />
                 <StatusLine label="Free disk" value={statusValues.free} mono />
                 <StatusLine label="App version" value={statusValues.appVersion} mono />
+                <StatusLine label="Auto-update" value={statusValues.autoUpdate.label} tone={statusValues.autoUpdate.tone} />
                 <StatusLine label="Android" value={statusValues.android} mono />
                 <StatusLine label="WebView" value={statusValues.webView} mono />
                 <StatusLine label="Playlist" value={statusValues.revision} mono />
