@@ -15,6 +15,49 @@ import java.util.UUID
 private val Context.dataStore by preferencesDataStore(name = "screens_device")
 
 /**
+ * v0.2.16: web page mode — one live URL shown full screen instead of the
+ * playlist. [url] carries a display token: keep it out of logs and toString.
+ */
+data class WebPageConfig(
+    val url: String,
+    /** Scheduled full reload interval; 0 = never (watchdog reloads still happen). */
+    val reloadEveryMin: Int,
+    /** v0.2.17: CSS width the page is laid out at, then scaled to fit the
+     *  screen. 0 = no override (the box's own density-adjusted width). */
+    val pageWidth: Int = DEFAULT_PAGE_WIDTH,
+) {
+    val host: String get() = runCatching { android.net.Uri.parse(url).host }.getOrNull() ?: "?"
+
+    override fun toString(): String =
+        "WebPageConfig(host=$host, reloadEveryMin=$reloadEveryMin, pageWidth=$pageWidth)"
+
+    companion object {
+        const val DEFAULT_RELOAD_MIN = 240
+        const val DEFAULT_PAGE_WIDTH = 1920
+    }
+}
+
+/**
+ * v0.2.23: hold a web page (dashboard) screen awake and over Android's lock
+ * screen. Kept apart from [WebPageConfig] so changing it never rebuilds the
+ * WebView (WebPageScreen keys its session on the whole page config).
+ * [from]/[to] are "HH:MM" in the store's local time, used when [mode] is hours.
+ */
+data class KeepAwakeConfig(
+    val mode: String = MODE_ALWAYS,
+    val from: String = DEFAULT_FROM,
+    val to: String = DEFAULT_TO,
+) {
+    companion object {
+        const val MODE_ALWAYS = "always"
+        const val MODE_HOURS = "hours"
+        const val MODE_OFF = "off"
+        const val DEFAULT_FROM = "08:00"
+        const val DEFAULT_TO = "19:00"
+    }
+}
+
+/**
  * Persistent device-local state. Small — token, deviceId, last-applied settings,
  * playlist ETag. Anything bigger (videos, playlist JSON) lives on disk as files.
  */
@@ -37,6 +80,18 @@ class DeviceStore(private val context: Context) {
         // output. The server value (set from the CMS) is authoritative and
         // refreshes this each poll.
         val Rotation = intPreferencesKey("rotation")
+        // v0.2.16: web page mode. Persisted for the same reason as Rotation:
+        // a reboot (or a launch with the network down) must come straight
+        // back to the page, not flash the playlist until the first poll.
+        // The URL carries a display token — it lives here and in the
+        // WebView only; never logged.
+        val ContentMode = stringPreferencesKey("content_mode")      // "playlist" | "web"
+        val WebUrl = stringPreferencesKey("web_url")
+        val WebReloadMin = intPreferencesKey("web_reload_min")
+        val WebPageWidth = intPreferencesKey("web_page_width")      // v0.2.17
+        val WebKeepAwake = stringPreferencesKey("web_keep_awake")   // v0.2.23
+        val WebAwakeFrom = stringPreferencesKey("web_awake_from")
+        val WebAwakeTo = stringPreferencesKey("web_awake_to")
 
         // Structured location — set via the cascading dropdowns in Device admin.
         val LocRegion     = stringPreferencesKey("loc_region")       // "USA" | "UK" | "EU"
@@ -82,6 +137,28 @@ class DeviceStore(private val context: Context) {
     /** v0.2.8: display rotation in degrees (0/90/180/270). 0 = none. */
     val rotation: Flow<Int> = context.dataStore.data.map { it[Keys.Rotation] ?: 0 }
 
+    /** v0.2.16: the persisted web page config, or null when this screen is
+     *  in playlist mode (or web mode with no URL yet). */
+    val webPage: Flow<WebPageConfig?> = context.dataStore.data.map { prefs ->
+        val url = prefs[Keys.WebUrl]
+        if (prefs[Keys.ContentMode] != "web" || url.isNullOrBlank()) null
+        else WebPageConfig(
+            url = url,
+            reloadEveryMin = prefs[Keys.WebReloadMin] ?: WebPageConfig.DEFAULT_RELOAD_MIN,
+            pageWidth = prefs[Keys.WebPageWidth] ?: WebPageConfig.DEFAULT_PAGE_WIDTH,
+        )
+    }
+
+    /** v0.2.23: persisted so a box rebooted with the network down still holds
+     *  the dashboard awake (or lets it sleep) on its last-known schedule. */
+    val keepAwake: Flow<KeepAwakeConfig> = context.dataStore.data.map { prefs ->
+        KeepAwakeConfig(
+            mode = prefs[Keys.WebKeepAwake] ?: KeepAwakeConfig.MODE_ALWAYS,
+            from = prefs[Keys.WebAwakeFrom] ?: KeepAwakeConfig.DEFAULT_FROM,
+            to = prefs[Keys.WebAwakeTo] ?: KeepAwakeConfig.DEFAULT_TO,
+        )
+    }
+
     // Structured location flows
     val locRegion: Flow<String?>     = context.dataStore.data.map { it[Keys.LocRegion] }
     val locCity: Flow<String?>       = context.dataStore.data.map { it[Keys.LocCity] }
@@ -94,15 +171,20 @@ class DeviceStore(private val context: Context) {
 
     /**
      * `true` once the screen has been through first-run setup. Required fields:
-     * region, city, store, concept, and screen code. Floor and table are optional.
+     * region, city, store, and screen code. Floor and table are optional.
      * Used by [com.smartech.screens.MainActivity] to gate the onboarding screen.
+     *
+     * v0.2.15: concept is no longer part of this. It only applies to retail
+     * stores in multi-concept cities, and the setup form already insists on
+     * it there. Requiring it here kept any concept-less location (offices,
+     * Events, Test, BER, ROM) stuck on the setup screen after "Register",
+     * and re-opened setup if an admin cleared a screen's concept.
      */
     val isOnboarded: Flow<Boolean> = combine(
-        locRegion, locCity, locStoreId, locConcept, locScreenCode,
-    ) { region, city, store, concept, code ->
+        locRegion, locCity, locStoreId, locScreenCode,
+    ) { region, city, store, code ->
         !region.isNullOrBlank() && !city.isNullOrBlank() &&
-            !store.isNullOrBlank() && !concept.isNullOrBlank() &&
-            !code.isNullOrBlank()
+            !store.isNullOrBlank() && !code.isNullOrBlank()
     }
 
     val cacheCapBytes: Flow<Long> =
@@ -123,6 +205,29 @@ class DeviceStore(private val context: Context) {
     suspend fun setRotation(degrees: Int) {
         val norm = if (degrees in intArrayOf(90, 180, 270)) degrees else 0
         context.dataStore.edit { it[Keys.Rotation] = norm }
+    }
+
+    /** v0.2.16: persist the content mode + web settings in one edit. A null
+     *  [url] keeps whatever URL is already stored (the server omits it when
+     *  it can't verify the device secret); [clearUrl] removes it. */
+    suspend fun setContentMode(
+        mode: String,
+        url: String?,
+        reloadEveryMin: Int,
+        pageWidth: Int,
+        keepAwake: KeepAwakeConfig = KeepAwakeConfig(),
+        clearUrl: Boolean = false,
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.ContentMode] = if (mode == "web") "web" else "playlist"
+            if (clearUrl) prefs.remove(Keys.WebUrl)
+            else if (!url.isNullOrBlank()) prefs[Keys.WebUrl] = url
+            prefs[Keys.WebReloadMin] = reloadEveryMin
+            prefs[Keys.WebPageWidth] = pageWidth
+            prefs[Keys.WebKeepAwake] = keepAwake.mode
+            prefs[Keys.WebAwakeFrom] = keepAwake.from
+            prefs[Keys.WebAwakeTo] = keepAwake.to
+        }
     }
 
     /** Persist the server-issued device secret. Blank/null clears it. */
@@ -156,7 +261,7 @@ class DeviceStore(private val context: Context) {
      * helper writes all three keys in a single DataStore transaction so the
      * cascade-clear logic in [setLocRegion] / [setLocCity] doesn't wipe the
      * child fields between writes. Optionally clears `concept` when the
-     * picked store's city has no in-store concepts (BER, ROM).
+     * picked location has no in-store concepts (BER, ROM, offices).
      */
     suspend fun setLocStoreCascade(
         storeId: String?,

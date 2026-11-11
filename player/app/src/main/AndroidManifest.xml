@@ -8,6 +8,10 @@
     <!-- Required for SSID lookup on Android 8.1+ via WifiManager.connectionInfo. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- v0.2.23: dashboard screens wake the box with ACQUIRE_CAUSES_WAKEUP
+         (ScreenAwake). Not enforced at targetSdk 34; Android 15 targets
+         need it declared, so it's here before that bump bites. -->
+    <uses-permission android:name="android.permission.TURN_SCREEN_ON" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -94,6 +98,18 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/install_auto_confirm_service" />
         </service>
+
+        <!-- Reopen the player after a self-update (v0.2.21). The install
+             kills the app and the installer's "Open" button needs a tap;
+             MY_PACKAGE_REPLACED is delivered to the new version only, and
+             only by the system, so the receiver needn't be exported. -->
+        <receiver
+            android:name=".update.UpdateRelaunchReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- FileProvider exposes the downloaded APK to the system
              PackageInstaller as a content:// URI. The authority must
