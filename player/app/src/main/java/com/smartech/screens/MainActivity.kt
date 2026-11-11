@@ -27,6 +27,7 @@ import com.smartech.screens.player.PlayerController
 import com.smartech.screens.player.PlayerScreen
 import com.smartech.screens.player.ProductInfoCardOverlay
 import com.smartech.screens.player.RotatedRoot
+import com.smartech.screens.player.ScreenAwake
 import com.smartech.screens.player.TabletCommandPalette
 import com.smartech.screens.player.TapNextOverlay
 import com.smartech.screens.player.WebPageScreen
@@ -38,6 +39,7 @@ import com.smartech.screens.util.DisplayModes
 import com.smartech.screens.util.InputMode
 import com.smartech.screens.util.LogBuffer
 import com.smartech.screens.util.cornerZoneDp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -45,6 +47,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
 @OptIn(UnstableApi::class)
@@ -52,6 +57,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var controller: PlayerController
     private lateinit var watchdog: com.smartech.screens.player.PlaybackWatchdog
+    private lateinit var screenAwake: ScreenAwake
 
     /**
      * Staff-unlock event bus. Emits Unit every time the unlock gesture
@@ -274,6 +280,32 @@ class MainActivity : ComponentActivity() {
                     DisplayModes.apply(this@MainActivity, 0)
                 } else {
                     DisplayModes.apply(this@MainActivity, mode)
+                }
+            }
+        }
+
+        // v0.2.23: a dashboard (web page) screen holds the box awake and over
+        // the lock screen — always, or between the CMS hours. Re-checked every
+        // tick, which is also what wakes the screen when the hours start or
+        // something turned it off. lifecycleScope keeps running while the
+        // activity is stopped (screen off), which is exactly when it matters.
+        // Playlist screens stay on plain keep-screen-on.
+        screenAwake = ScreenAwake(this)
+        lifecycleScope.launch {
+            combine(
+                repo.webPageFlow.map { it != null }.distinctUntilChanged(),
+                repo.keepAwakeFlow,
+            ) { web, cfg -> web to cfg }.collectLatest { (web, cfg) ->
+                while (true) {
+                    if (!web) {
+                        screenAwake.restoreDefault()
+                        repo.awakeHeld = false
+                        break
+                    }
+                    val city = runCatching { repo.store.locCity.first() }.getOrNull()
+                    if (ScreenAwake.shouldHold(cfg, city)) screenAwake.hold() else screenAwake.release()
+                    repo.awakeHeld = screenAwake.isHolding
+                    delay(ScreenAwake.TICK_MS)
                 }
             }
         }
@@ -640,6 +672,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         handler.removeCallbacks(unlockRunnable)
         if (::watchdog.isInitialized) watchdog.stop()
+        if (::screenAwake.isInitialized) screenAwake.destroy()
         controller.release()
         super.onDestroy()
     }

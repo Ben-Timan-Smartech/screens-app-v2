@@ -8,6 +8,10 @@
     <!-- Required for SSID lookup on Android 8.1+ via WifiManager.connectionInfo. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- v0.2.23: dashboard screens wake the box with ACQUIRE_CAUSES_WAKEUP
+         (ScreenAwake). Not enforced at targetSdk 34; Android 15 targets
+         need it declared, so it's here before that bump bites. -->
+    <uses-permission android:name="android.permission.TURN_SCREEN_ON" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />

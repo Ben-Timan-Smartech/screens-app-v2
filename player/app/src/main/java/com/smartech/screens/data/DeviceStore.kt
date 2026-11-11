@@ -38,6 +38,26 @@ data class WebPageConfig(
 }
 
 /**
+ * v0.2.23: hold a web page (dashboard) screen awake and over Android's lock
+ * screen. Kept apart from [WebPageConfig] so changing it never rebuilds the
+ * WebView (WebPageScreen keys its session on the whole page config).
+ * [from]/[to] are "HH:MM" in the store's local time, used when [mode] is hours.
+ */
+data class KeepAwakeConfig(
+    val mode: String = MODE_ALWAYS,
+    val from: String = DEFAULT_FROM,
+    val to: String = DEFAULT_TO,
+) {
+    companion object {
+        const val MODE_ALWAYS = "always"
+        const val MODE_HOURS = "hours"
+        const val MODE_OFF = "off"
+        const val DEFAULT_FROM = "08:00"
+        const val DEFAULT_TO = "19:00"
+    }
+}
+
+/**
  * Persistent device-local state. Small — token, deviceId, last-applied settings,
  * playlist ETag. Anything bigger (videos, playlist JSON) lives on disk as files.
  */
@@ -69,6 +89,9 @@ class DeviceStore(private val context: Context) {
         val WebUrl = stringPreferencesKey("web_url")
         val WebReloadMin = intPreferencesKey("web_reload_min")
         val WebPageWidth = intPreferencesKey("web_page_width")      // v0.2.17
+        val WebKeepAwake = stringPreferencesKey("web_keep_awake")   // v0.2.23
+        val WebAwakeFrom = stringPreferencesKey("web_awake_from")
+        val WebAwakeTo = stringPreferencesKey("web_awake_to")
 
         // Structured location — set via the cascading dropdowns in Device admin.
         val LocRegion     = stringPreferencesKey("loc_region")       // "USA" | "UK" | "EU"
@@ -123,6 +146,16 @@ class DeviceStore(private val context: Context) {
             url = url,
             reloadEveryMin = prefs[Keys.WebReloadMin] ?: WebPageConfig.DEFAULT_RELOAD_MIN,
             pageWidth = prefs[Keys.WebPageWidth] ?: WebPageConfig.DEFAULT_PAGE_WIDTH,
+        )
+    }
+
+    /** v0.2.23: persisted so a box rebooted with the network down still holds
+     *  the dashboard awake (or lets it sleep) on its last-known schedule. */
+    val keepAwake: Flow<KeepAwakeConfig> = context.dataStore.data.map { prefs ->
+        KeepAwakeConfig(
+            mode = prefs[Keys.WebKeepAwake] ?: KeepAwakeConfig.MODE_ALWAYS,
+            from = prefs[Keys.WebAwakeFrom] ?: KeepAwakeConfig.DEFAULT_FROM,
+            to = prefs[Keys.WebAwakeTo] ?: KeepAwakeConfig.DEFAULT_TO,
         )
     }
 
@@ -182,6 +215,7 @@ class DeviceStore(private val context: Context) {
         url: String?,
         reloadEveryMin: Int,
         pageWidth: Int,
+        keepAwake: KeepAwakeConfig = KeepAwakeConfig(),
         clearUrl: Boolean = false,
     ) {
         context.dataStore.edit { prefs ->
@@ -190,6 +224,9 @@ class DeviceStore(private val context: Context) {
             else if (!url.isNullOrBlank()) prefs[Keys.WebUrl] = url
             prefs[Keys.WebReloadMin] = reloadEveryMin
             prefs[Keys.WebPageWidth] = pageWidth
+            prefs[Keys.WebKeepAwake] = keepAwake.mode
+            prefs[Keys.WebAwakeFrom] = keepAwake.from
+            prefs[Keys.WebAwakeTo] = keepAwake.to
         }
     }
 

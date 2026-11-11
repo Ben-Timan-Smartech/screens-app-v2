@@ -575,6 +575,10 @@ class PlayerRepository(
         val reloadEveryMin: Int = WebPageConfig.DEFAULT_RELOAD_MIN,
         /** v0.2.17. An older server omits it → the 1920 default. */
         val pageWidth: Int = WebPageConfig.DEFAULT_PAGE_WIDTH,
+        /** v0.2.23: "always" | "hours" | "off" — see [KeepAwakeConfig]. */
+        val keepAwake: String = KeepAwakeConfig.MODE_ALWAYS,
+        val awakeFrom: String = KeepAwakeConfig.DEFAULT_FROM,
+        val awakeTo: String = KeepAwakeConfig.DEFAULT_TO,
     )
 
     /** v0.1.35: a sibling in this screen's sync group. The Device
@@ -707,13 +711,22 @@ class PlayerRepository(
     val webPageFlow: Flow<WebPageConfig?> =
         if (WEB_MODE_SUPPORTED) store.webPage else flowOf(null)
 
+    /** v0.2.23: when to hold a web page screen awake and over the lock screen.
+     *  Only acted on while [webPageFlow] is non-null — playlist screens keep
+     *  their plain keep-screen-on behaviour. */
+    val keepAwakeFlow: Flow<KeepAwakeConfig> = store.keepAwake
+
+    /** v0.2.23: true while ScreenAwake is holding the box awake. Heartbeat only. */
+    @Volatile var awakeHeld: Boolean = false
+
     /** Signature of the last content mode we persisted, so the 3s poll only
      *  writes DataStore on a real change (same idea as _rotationApplied). */
     private var _contentModeApplied: String? = null
 
     private fun applyContentMode(mode: String, web: LiveWeb?) {
         val m = if (mode == "web") "web" else "playlist"
-        val sig = "$m|${web?.url?.hashCode()}|${web?.reloadEveryMin}|${web?.pageWidth}|${web == null}"
+        val sig = "$m|${web?.url?.hashCode()}|${web?.reloadEveryMin}|${web?.pageWidth}|" +
+            "${web?.keepAwake}|${web?.awakeFrom}|${web?.awakeTo}|${web == null}"
         if (sig == _contentModeApplied) return
         _contentModeApplied = sig
         liveScope.launch {
@@ -722,6 +735,8 @@ class PlayerRepository(
                 url = web?.url,
                 reloadEveryMin = web?.reloadEveryMin ?: WebPageConfig.DEFAULT_RELOAD_MIN,
                 pageWidth = web?.pageWidth ?: WebPageConfig.DEFAULT_PAGE_WIDTH,
+                keepAwake = web?.let { KeepAwakeConfig(it.keepAwake, it.awakeFrom, it.awakeTo) }
+                    ?: KeepAwakeConfig(),
                 // No web block at all = the server holds no URL for us.
                 // A block with url=null = it couldn't verify our secret;
                 // keep what we have rather than blanking the board.
@@ -2298,6 +2313,10 @@ class PlayerRepository(
         // we check a box can run web page mode) and web page health.
         val webView = com.smartech.screens.util.WebViewInfo.current(appContext)
         val web = _webHealth.value
+        // v0.2.23: is the screen on and is the lock screen up — how the CMS
+        // tells whether a dashboard box is awake and unlocked.
+        val power = appContext.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+        val keyguard = appContext.getSystemService(android.content.Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
         val body = """
             {
               "deviceId": "$deviceId",
@@ -2331,7 +2350,10 @@ class PlayerRepository(
               "webLastError": ${qOrNull(web.lastError)},
               "webLastErrorAt": ${web.lastErrorAtMs?.let { it / 1000.0 } ?: "null"},
               "webViewport": ${qOrNull(web.viewport)},
-              "autoConfirmEnabled": ${com.smartech.screens.update.InstallAutoConfirm.isServiceEnabled(appContext)}
+              "autoConfirmEnabled": ${com.smartech.screens.update.InstallAutoConfirm.isServiceEnabled(appContext)},
+              "screenOn": ${power?.isInteractive ?: "null"},
+              "keyguardLocked": ${keyguard?.isKeyguardLocked ?: "null"},
+              "awakeHeld": $awakeHeld
             }
         """.trimIndent()
         runCatching {
