@@ -32,6 +32,9 @@ Rules:
   web page screens have it; playlist screens are unchanged.
 - **See whether a dashboard box is awake.** The Content card shows whether the
   screen is on, and whether the page is showing over the lock screen.
+- **Brand images are labelled as images.** The media server was marking every
+  Drive file as a video, so a still such as a brand logo wouldn't preview in a
+  browser. Images now go out as images. Screens were never affected.
 
 ## v0.2.22
 
