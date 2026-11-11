@@ -323,7 +323,7 @@ fun DeviceAdminScreen(
                     InfoRow("Display",     "${info.widthPx} × ${info.heightPx} · ${info.orientation}")
                     InfoRow("RAM",        "${info.ramMb} MB")
                     InfoRow("Cached",     "${repository.cache.cachedIds().size} videos · ${formatBytes(repository.cache.totalBytes())}")
-                    InfoRow("Free disk",  formatBytes(ctx.filesDir.usableSpace))
+                    InfoRow("Free disk",  formatBytes(repository.cache.usableSpace()))
                 }
             }
 
@@ -383,9 +383,10 @@ fun DeviceAdminScreen(
                             val picked = LocationTaxonomy.storeById(v)
                             val cityCode = picked?.cityCode
                             val regionName = LocationTaxonomy.regionOfCity(cityCode)?.name
+                            // Offices and single-concept cities carry no concept.
                             val clearConcept = cityCode != null &&
-                                cityCode !in LocationTaxonomy.MULTI_CONCEPT_CITIES
-                            val clearFloorTable = cityCode != "NYC"
+                                !LocationTaxonomy.conceptApplies(cityCode, v)
+                            val clearFloorTable = !LocationTaxonomy.floorApplies(cityCode, v)
                             scope.launch {
                                 store.setLocStoreCascade(v, cityCode, regionName, clearConcept, clearFloorTable)
                                 LogBuffer.i("Admin", "Store → ${picked?.name ?: "—"} by ${user.name}")

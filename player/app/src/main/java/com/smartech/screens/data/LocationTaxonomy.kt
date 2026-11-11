@@ -1,5 +1,9 @@
 package com.smartech.screens.data
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
 /**
  * Pickable values for the cascading location dropdowns in the on-tablet
  * Device admin screen. Mirrored on the CMS side in
@@ -12,22 +16,36 @@ object LocationTaxonomy {
 
     enum class Region { USA, UK, EU, GLOBAL }
 
-    data class City(val code: String, val region: Region)
+    /** v0.2.19: [timeZone] is the IANA zone the store's opening hours run
+     *  in. The overnight update window uses it instead of the box's own
+     *  clock zone, which is often left at the factory default (the NYC
+     *  boxes shipped on a UTC+8 zone, so "22:00–06:00" landed mid-shift).
+     *  Null = no single zone (GLB), fall back to the device's zone. */
+    data class City(val code: String, val region: Region, val timeZone: String? = null)
 
+    /** v0.2.15: [kind] is [KIND_RETAIL] or [KIND_OFFICE]. Offices are
+     *  added from the CMS (Settings → Locations) and never ask for a
+     *  concept or floor. */
     data class Store(
         val id: String,
         val name: String,
         val address: String,
         val cityCode: String,
-    )
+        val kind: String = KIND_RETAIL,
+    ) {
+        val isOffice: Boolean get() = kind == KIND_OFFICE
+    }
+
+    const val KIND_RETAIL = "retail"
+    const val KIND_OFFICE = "office"
 
     val regions: List<Region> = Region.entries
 
     val cities: List<City> = listOf(
-        City("NYC", Region.USA),
-        City("LDN", Region.UK),
-        City("BER", Region.EU),
-        City("ROM", Region.EU),
+        City("NYC", Region.USA, "America/New_York"),
+        City("LDN", Region.UK, "Europe/London"),
+        City("BER", Region.EU, "Europe/Berlin"),
+        City("ROM", Region.EU, "Europe/Rome"),
         // v0.1.37: GLB hosts the "Events" + "Test" stores and any
         // custom-added store that isn't anchored to a real retail
         // city. Region GLOBAL keeps them out of the cascade dropdowns
@@ -81,21 +99,28 @@ object LocationTaxonomy {
         ),
     )
 
-    @Volatile private var custom: List<Store> = emptyList()
+    // v0.2.15: a StateFlow (was a @Volatile list) so the setup screen
+    // redraws when a location added in the CMS arrives mid-setup.
+    private val _stores = MutableStateFlow(builtIn)
+    val storesFlow: StateFlow<List<Store>> = _stores.asStateFlow()
 
     /**
      * v0.1.38: replace the dynamic store list with the server's
-     * /api/stores response. Called once at app launch from
+     * /api/stores response. Called at app launch and while the setup
+     * screen is open, from
      * [com.smartech.screens.data.PlayerRepository.refreshStoresFromServer].
-     * Built-ins always win on id collision.
+     * Built-ins always win on id collision. Returns true if the list changed.
      */
-    fun setCustomStores(next: List<Store>) {
+    fun setCustomStores(next: List<Store>): Boolean {
         val builtInIds = builtIn.map { it.id }.toSet()
-        custom = next.filter { it.id !in builtInIds }
+        val merged = builtIn + next.filter { it.id !in builtInIds }
+        if (merged == _stores.value) return false
+        _stores.value = merged
+        return true
     }
 
     /** Built-ins first, then any custom stores fetched from the server. */
-    val stores: List<Store> get() = builtIn + custom
+    val stores: List<Store> get() = _stores.value
 
     val concepts: List<String> = listOf(
         "Smartech", "Playhouse", "Sanctuary", "Bikeshop",
@@ -123,7 +148,19 @@ object LocationTaxonomy {
     /** Cities where multiple in-store concepts (Smartech, Playhouse, etc) coexist. */
     val MULTI_CONCEPT_CITIES: Set<String> = setOf("NYC", "LDN")
 
+    /** Concept is only asked for at retail stores in a multi-concept city.
+     *  Offices, Events/Test and single-concept cities (BER, ROM) skip it. */
+    fun conceptApplies(cityCode: String?, storeId: String?): Boolean =
+        cityCode != null && cityCode in MULTI_CONCEPT_CITIES && storeById(storeId)?.isOffice != true
+
+    /** Floors only exist at the NYC store; offices never use them. */
+    fun floorApplies(cityCode: String?, storeId: String?): Boolean =
+        cityCode == "NYC" && storeById(storeId)?.isOffice != true
+
     /** Region the given city sits in. Used to auto-fill the region row. */
     fun regionOfCity(cityCode: String?): Region? =
         cityCode?.let { code -> cities.firstOrNull { it.code == code }?.region }
+
+    fun timeZoneOfCity(cityCode: String?): String? =
+        cityCode?.let { code -> cities.firstOrNull { it.code == code }?.timeZone }
 }

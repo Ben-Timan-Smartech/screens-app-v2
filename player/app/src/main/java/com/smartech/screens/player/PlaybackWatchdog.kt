@@ -580,6 +580,11 @@ class PlaybackWatchdog(
             PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE,
             PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
             PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+            // v0.2.19: playlist items always play from the local cache, so
+            // an unspecified IO error is an unreadable file on disk too.
+            // MEZ.F.10 (NYC) re-prepared the same file every 30 s for a
+            // day without ever re-downloading it.
+            PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
         )
 
         /** Cap purge+re-download attempts before we back off, so a file

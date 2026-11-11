@@ -33,8 +33,10 @@
 FROM python:3.11-slim
 
 # curl is convenient for Cloud Run startup probes and ad-hoc debugging.
+# ffmpeg (v0.2.20) compresses splash uploads to 1080p H.264 so legacy boxes
+# can decode them; serve.py skips compression if it's missing.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

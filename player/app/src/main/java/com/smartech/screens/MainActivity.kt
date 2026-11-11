@@ -10,6 +10,7 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.collectAsState
@@ -21,12 +22,15 @@ import androidx.compose.ui.Alignment
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
 import com.smartech.screens.data.PlayerRepository
+import com.smartech.screens.data.WebPageConfig
 import com.smartech.screens.player.PlayerController
 import com.smartech.screens.player.PlayerScreen
 import com.smartech.screens.player.ProductInfoCardOverlay
 import com.smartech.screens.player.RotatedRoot
+import com.smartech.screens.player.ScreenAwake
 import com.smartech.screens.player.TabletCommandPalette
 import com.smartech.screens.player.TapNextOverlay
+import com.smartech.screens.player.WebPageScreen
 import com.smartech.screens.staff.HoldProgressIndicator
 import com.smartech.screens.staff.OnboardingScreen
 import com.smartech.screens.staff.StaffOverlay
@@ -35,18 +39,25 @@ import com.smartech.screens.util.DisplayModes
 import com.smartech.screens.util.InputMode
 import com.smartech.screens.util.LogBuffer
 import com.smartech.screens.util.cornerZoneDp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 @OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
 
     private lateinit var controller: PlayerController
     private lateinit var watchdog: com.smartech.screens.player.PlaybackWatchdog
+    private lateinit var screenAwake: ScreenAwake
 
     /**
      * Staff-unlock event bus. Emits Unit every time the unlock gesture
@@ -171,11 +182,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        // Keep the screen awake and full-bleed. Retail tablets / TVs should never dim.
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    /** Full-bleed: no status or nav bar. */
+    private fun hideSystemBars() {
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = (
             android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -185,6 +193,25 @@ class MainActivity : ComponentActivity() {
                 or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                 or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
             )
+    }
+
+    /** v0.2.17: Android drops the immersive flags when another window takes
+     *  focus (an install prompt, a system dialog, the notification shade), and
+     *  IMMERSIVE_STICKY doesn't bring them back, so the nav bar could stay up
+     *  over the content. Re-apply on every regain. */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // v0.2.21: we're up, so the post-update relaunch has nothing left to do.
+        com.smartech.screens.update.InstallAutoConfirm.clearRelaunchPending()
+
+        // Keep the screen awake and full-bleed. Retail tablets / TVs should never dim.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        hideSystemBars()
 
         controller = PlayerController(this)
         val repo = (application as ScreensApp).repository
@@ -257,6 +284,32 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // v0.2.23: a dashboard (web page) screen holds the box awake and over
+        // the lock screen — always, or between the CMS hours. Re-checked every
+        // tick, which is also what wakes the screen when the hours start or
+        // something turned it off. lifecycleScope keeps running while the
+        // activity is stopped (screen off), which is exactly when it matters.
+        // Playlist screens stay on plain keep-screen-on.
+        screenAwake = ScreenAwake(this)
+        lifecycleScope.launch {
+            combine(
+                repo.webPageFlow.map { it != null }.distinctUntilChanged(),
+                repo.keepAwakeFlow,
+            ) { web, cfg -> web to cfg }.collectLatest { (web, cfg) ->
+                while (true) {
+                    if (!web) {
+                        screenAwake.restoreDefault()
+                        repo.awakeHeld = false
+                        break
+                    }
+                    val city = runCatching { repo.store.locCity.first() }.getOrNull()
+                    if (ScreenAwake.shouldHold(cfg, city)) screenAwake.hold() else screenAwake.release()
+                    repo.awakeHeld = screenAwake.isHolding
+                    delay(ScreenAwake.TICK_MS)
+                }
+            }
+        }
+
         val tvLike = InputMode.isTvLike(this)
         isTvLike = tvLike
         Log.i(
@@ -281,6 +334,31 @@ class MainActivity : ComponentActivity() {
                 // unaffected. Read from the persisted store value so a rotated
                 // panel is correct on boot, before the first /api/state poll.
                 val displayRotation by repo.store.rotation.collectAsState(initial = 0)
+                // v0.2.16: web page mode — one live URL full screen instead of
+                // the playlist (modern build only; always null on legacy).
+                // Paired with a "loaded" flag so a web page screen boots
+                // straight to the page instead of flashing the playlist while
+                // DataStore does its first read. Legacy starts "loaded".
+                val webSlot by remember {
+                    repo.webPageFlow
+                        .map<WebPageConfig?, Pair<WebPageConfig?, Boolean>> { it to true }
+                        .catch { emit(null to true) }
+                }.collectAsState(initial = Pair<WebPageConfig?, Boolean>(null, !PlayerRepository.WEB_MODE_SUPPORTED))
+                val (webPage, webKnown) = webSlot
+                val webActive = webPage != null
+                // The playback watchdog would read a stopped player as a stall
+                // and restart the app, so it's off while the page is up; the
+                // page has its own watchdog. Stopping the player stops a hidden
+                // video loop from burning the box under the WebView. Switching
+                // back recomposes PlayerScreen, which re-applies the playlist.
+                LaunchedEffect(webActive) {
+                    if (webActive) {
+                        watchdog.stop()
+                        controller.suspendForWebPage()
+                    } else {
+                        watchdog.start()
+                    }
+                }
 
                 RotatedRoot(displayRotation) {
                 Box(Modifier.fillMaxSize()) {
@@ -292,7 +370,11 @@ class MainActivity : ComponentActivity() {
                     // it's visible and takes precedence over this no-op.
                     BackHandler(enabled = true) { /* swallow */ }
 
-                    PlayerScreen(controller = controller, repository = repo)
+                    when {
+                        webPage != null -> WebPageScreen(config = webPage, repository = repo)
+                        webKnown -> PlayerScreen(controller = controller, repository = repo)
+                        else -> Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
+                    }
 
                     // Staff overlay sits on top — invisible unless either the
                     // four-corner tap (touch) or the hold-OK gesture (TV)
@@ -346,7 +428,8 @@ class MainActivity : ComponentActivity() {
                     // WebView is rendered in PlayerScreen), so suppress the card
                     // when one is set — otherwise the card would paint over it.
                     val experienceActive by repo.experienceUrlFlow.collectAsState()
-                    if (!staffUp && experienceActive == null) {
+                    // v0.2.16: same for a web page — it owns the screen.
+                    if (!staffUp && experienceActive == null && !webActive) {
                         val playingItems = (cardState as? PlayerRepository.State.Playing)
                             ?.items?.map { it.item } ?: emptyList()
                         val currentItem = cardMediaId?.let { id ->
@@ -369,7 +452,7 @@ class MainActivity : ComponentActivity() {
                     // or a guided experience owns the screen; `tapNext` is
                     // already false for sync-group members (server-forced).
                     val tapNextOn by repo.tapNextFlow.collectAsState()
-                    if (!staffUp && experienceActive == null) {
+                    if (!staffUp && experienceActive == null && !webActive) {
                         TapNextOverlay(
                             enabled = tapNextOn && cardState is PlayerRepository.State.Playing,
                             onNext = { controller.skipToNext() },
@@ -589,6 +672,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         handler.removeCallbacks(unlockRunnable)
         if (::watchdog.isInitialized) watchdog.stop()
+        if (::screenAwake.isInitialized) screenAwake.destroy()
         controller.release()
         super.onDestroy()
     }

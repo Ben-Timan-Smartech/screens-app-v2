@@ -364,7 +364,11 @@ const useLibraryCount = () => {
 // pushToScreens — POST /api/push with selected videos, target deviceIds, and
 // mode ("replace" or "append"). Empty deviceIds means "every registered screen".
 const pushToScreens = async (videos, { deviceIds = [], mode = 'replace' } = {}) => {
-  const items = videos.map((v) => ({
+  // A tm:rw video that hasn't synced has no file (mediaUrl null). The server
+  // strips these too; dropping them here keeps the "N videos" counts honest.
+  const playable = videos.filter((v) => v && v.mediaUrl && !v.pendingSync);
+  if (videos.length && !playable.length) throw new Error('none of those videos has synced yet');
+  const items = playable.map((v) => ({
     id: v.id,
     type: v.type || 'video',        // v0.2.14: "image" stills play for durationSec
     title: v.title,
@@ -473,6 +477,22 @@ const setScreenRotation = async (deviceId, rotation) => {
   });
   if (!res.ok) throw new Error(`rotation failed: ${res.status}`);
   return res.json();
+};
+
+// v0.2.16: setScreenContentMode — POST /api/screens/<id>/content-mode.
+// `patch` is { mode: 'playlist'|'web', url?, reloadEveryMin? }; leave `url` out
+// to keep the stored one (the CMS never holds it after save — the URL carries
+// a display token, so the server only ever returns host + a short hint).
+// Server 400s carry a readable `error`, which we surface as the message.
+const setScreenContentMode = async (deviceId, patch) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/content-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body.ok === false) throw new Error(body.error || `content mode failed: ${res.status}`);
+  return body;
 };
 
 // v0.1.97: useExperiences — the guided-experience library (vendored + uploaded).
@@ -663,11 +683,12 @@ const setScreenLocation = async (deviceId, fields) => {
 // any tablet that fetches /api/stores at launch see it.
 // Built-in stores can't be edited from here; the server rejects
 // reserved ids with HTTP 409.
-const addStore = async ({ id, name, address, city }) => {
+// v0.2.15: kind is 'retail' (default) or 'office'.
+const addStore = async ({ id, name, address, city, kind = 'retail' }) => {
   const res = await fetch('/api/stores', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, name, address, city }),
+    body: JSON.stringify({ id, name, address, city, kind }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -679,6 +700,25 @@ const addStore = async ({ id, name, address, city }) => {
   if (out.store && !LOCATION_TAXONOMY.stores.some(s => s.id === out.store.id)) {
     LOCATION_TAXONOMY.stores.push(out.store);
   }
+  window.dispatchEvent(new CustomEvent('stores-refresh'));
+  return out.store;
+};
+
+// updateStore — v0.2.15. PATCH /api/stores/<id>, e.g. { kind: 'office' }.
+// Custom stores only; built-ins 404.
+const updateStore = async (id, patch) => {
+  const res = await fetch(`/api/stores/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `update-store failed: ${res.status}`);
+  }
+  const out = await res.json();
+  const i = LOCATION_TAXONOMY.stores.findIndex(s => s.id === id);
+  if (i >= 0 && out.store) LOCATION_TAXONOMY.stores[i] = out.store;
   window.dispatchEvent(new CustomEvent('stores-refresh'));
   return out.store;
 };
@@ -719,13 +759,23 @@ const refreshStoresFromServer = async () => {
 // Uses XMLHttpRequest because fetch() doesn't expose upload progress
 // events. Cancellable via the returned `abort` function for users
 // who change their mind mid-upload of a big file.
-const uploadVideo = ({ file, brand, title, product, durationSec, onProgress }) => {
+// compress: true asks the server to re-encode to 1080p H.264 first (splashes;
+// a still is resized instead). The server then answers 202 with a jobId and
+// compresses in the background; we poll it, reporting `onCompress(0..1)`,
+// and resolve with the same { video, compression } a plain upload returns.
+const uploadVideo = ({ file, brand, title, product, durationSec, compress, onProgress, onCompress }) => {
+  // Cloud Run refuses any single request over 32 MiB (its own 413 page), so
+  // anything near that goes up in 8 MiB pieces instead.
+  if (file.size > UPLOAD_CHUNK_THRESHOLD) {
+    return uploadInChunks({ file, brand, title, product, durationSec, compress, onProgress, onCompress });
+  }
   const form = new FormData();
   form.append('file', file);
   form.append('brand', brand);
   if (title) form.append('title', title);
   if (product) form.append('product', product);
   if (durationSec != null) form.append('durationSec', String(durationSec));
+  if (compress) form.append('compress', '1');
 
   const xhr = new XMLHttpRequest();
   const promise = new Promise((resolve, reject) => {
@@ -736,8 +786,11 @@ const uploadVideo = ({ file, brand, title, product, durationSec, onProgress }) =
     });
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        try { resolve(JSON.parse(xhr.responseText)); }
-        catch { reject(new Error('Upload succeeded but response was not JSON')); }
+        let body;
+        try { body = JSON.parse(xhr.responseText); }
+        catch { reject(new Error('Upload succeeded but response was not JSON')); return; }
+        if (body.jobId) followUploadJob(body.jobId, onCompress).then(resolve, reject);
+        else resolve(body);
       } else {
         reject(new Error(`Upload failed: HTTP ${xhr.status} ${xhr.responseText || ''}`.trim()));
       }
@@ -749,6 +802,94 @@ const uploadVideo = ({ file, brand, title, product, durationSec, onProgress }) =
   });
   promise.abort = () => xhr.abort();
   return promise;
+};
+
+const UPLOAD_CHUNK_THRESHOLD = 24 * 1024 * 1024;
+const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+
+// Chunked upload (POST /api/library/upload-chunks/<id>?index=N, then
+// /complete). Same promise shape as uploadVideo, including .abort(). Each
+// piece is retried a few times so one dropped request doesn't sink the file.
+const uploadInChunks = ({ file, brand, title, product, durationSec, compress, onProgress, onCompress }) => {
+  const sid = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
+  const ctrl = new AbortController();
+  const base = `/api/library/upload-chunks/${sid}`;
+  const reason = async (r) => {
+    const d = await r.json().catch(() => null);
+    return (d && (d.detail || d.error)) || `HTTP ${r.status}`;
+  };
+  const sendPiece = (index, blob, sentBefore) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && typeof onProgress === 'function') onProgress((sentBefore + e.loaded) / file.size);
+    });
+    xhr.addEventListener('load', () => resolve(xhr));
+    xhr.addEventListener('error', () => reject(new Error('network')));
+    xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')));
+    ctrl.signal.addEventListener('abort', () => xhr.abort());
+    xhr.open('POST', `${base}?index=${index}`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.send(blob);
+  });
+  const promise = (async () => {
+    const pieces = Math.ceil(file.size / UPLOAD_CHUNK_BYTES);
+    for (let i = 0; i < pieces; i++) {
+      const start = i * UPLOAD_CHUNK_BYTES;
+      const blob = file.slice(start, Math.min(file.size, start + UPLOAD_CHUNK_BYTES));
+      for (let attempt = 1; ; attempt++) {
+        let xhr = null;
+        try { xhr = await sendPiece(i, blob, start); }
+        catch (e) {
+          if (e.message === 'Upload cancelled' || attempt >= 4) throw new Error(e.message === 'network' ? 'Upload network error' : e.message);
+        }
+        if (xhr && xhr.status >= 200 && xhr.status < 300) break;
+        if (xhr && xhr.status !== 502 && xhr.status !== 503 && xhr.status !== 504) {
+          let msg = `HTTP ${xhr.status}`;
+          try { const d = JSON.parse(xhr.responseText); msg = d.detail || d.error || msg; } catch { /* not JSON */ }
+          throw new Error(`Upload failed: ${msg}`);
+        }
+        if (attempt >= 4) throw new Error('Upload failed: the server kept dropping the connection');
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
+    }
+    const r = await fetch(`${base}/complete`, {
+      method: 'POST', credentials: 'include', signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ size: file.size, filename: file.name, contentType: file.type,
+                             brand, title, product, durationSec, compress: !!compress }),
+    });
+    if (!r.ok) throw new Error(`Upload failed: ${await reason(r)}`);
+    const body = await r.json();
+    return body.jobId ? followUploadJob(body.jobId, onCompress) : body;
+  })();
+  promise.abort = () => ctrl.abort();
+  return promise;
+};
+
+// Poll a background upload job until it's done. A few failed polls in a row
+// (a deploy restarting the server) give up with a plain message.
+const followUploadJob = async (jobId, onCompress) => {
+  let misses = 0;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000));
+    let job = null;
+    let gone = false;
+    try {
+      const r = await fetch(`/api/library/upload-jobs/${jobId}`, { credentials: 'include' });
+      job = await r.json().catch(() => null);
+      gone = r.status === 404;
+      if (!r.ok) job = null;
+    } catch { /* network blip: count it as a miss */ }
+    if (gone) throw new Error('The upload stopped before it finished. Try again.');
+    if (!job) {
+      if (++misses >= 10) throw new Error('Lost touch with the server while compressing. Try again.');
+      continue;
+    }
+    misses = 0;
+    if (typeof onCompress === 'function') onCompress(job.progress || 0, job.state);
+    if (job.state === 'done') return { ok: true, video: job.video, compression: job.compression };
+    if (job.state === 'error') throw new Error(job.error || 'Upload failed');
+  }
 };
 
 // calibrateSyncGroup — POST /api/sync-groups/<groupId>/calibrate.
@@ -1430,6 +1571,9 @@ const Sidebar = ({ current = 'dashboard', orgName = 'Smartech Group' }) => {
       {can(user, 'screens.view') && (
         <SidebarItem icon={<Icon.sync />} label="Sync groups" current={current === 'sync-groups'} onClick={() => navigate('/sync-groups')} />
       )}
+      {can(user, 'events.view') && (
+        <SidebarItem icon={<Icon.schedule />} label="Events" current={current === 'events'} onClick={() => navigate('/events')} />
+      )}
       {/* v0.1.56: Schedules hidden. The page still exists at
           /schedules for anyone who knows the URL, but it's not
           surfaced in the sidebar until the scheduling feature
@@ -1665,12 +1809,12 @@ Object.assign(window, {
   seed, brandPalettes, navigate, getRoute, useRoute, useDarkMode,
   useViewport, useDrawer,
   showToast, ToastHost, useLiveScreens, useFleet, useActivity, useLibrary, pushToScreens, sendScreenCommand, sendBulkScreenCommand, setMixSplash,
-  setScreenProductCard, setScreenRotation,
+  setScreenProductCard, setScreenRotation, setScreenContentMode,
   setScreenExperience, setScreenTapNext, setScreenProgressBar,
   useExperiences, uploadExperience, deleteExperience,
   setScreenAudio, setScreenPollMode, setScreenSyncGroup, setScreenDisplayMode, setScreenName, setScreenLocation, calibrateSyncGroup, setVideoDefaultUnmute, uploadVideo,
   setScreenPlaylist, PushPicker,
-  addStore, deleteStore, refreshStoresFromServer,
+  addStore, updateStore, deleteStore, refreshStoresFromServer,
 });
 
 // v0.1.38: pull any custom stores the server has on boot so the
