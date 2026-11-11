@@ -37,6 +37,9 @@ Rules:
   go. Update and Reboot ask you to confirm first. This is the quickest way to
   move a store onto this version, since screens on older players don't update
   themselves overnight any more.
+- **Brand images are labelled as images.** The media server was marking every
+  Drive file as a video, so a still such as a brand logo wouldn't preview in a
+  browser. Images now go out as images. Screens were never affected.
 
 ## v0.2.22
 
