@@ -380,6 +380,86 @@ def video_heavy_reasons(width, height, size_mb) -> list[str]:
     return reasons
 
 
+# ── v0.2.14: still-image content ────────────────────────────────────
+# Brand folders can hold stills (posters / packshots) alongside the MP4s.
+# We sync them into the same library so an operator can push an image to a
+# screen and have it show for a fixed dwell, exactly like a video. The
+# player turns each still into a timed ExoPlayer item (setImageDurationMs),
+# so the loop / group-sync / progress-bar machinery is reused unchanged.
+#
+# GIF is deliberately excluded — Media3's BitmapFactory image decoder
+# doesn't support animated GIF, so one would never render on the fleet.
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+VIDEO_EXTS = (".mp4", ".mov")
+
+# How long a still shows on screen, in seconds. Fed to the player's
+# setImageDurationMs and to the server-side group-sync loop math, so it must
+# be a real positive number. Overridable per-deploy; default 10 s.
+try:
+    IMAGE_DWELL_SEC = max(1, int(os.environ.get("SCREENS_IMAGE_DWELL_SEC", "10") or 10))
+except ValueError:
+    IMAGE_DWELL_SEC = 10
+
+# Decoded-bitmap OOM guard for the legacy 1 GB boxes: a still whose long
+# edge is above this (when the dimension is known) decodes to a very large
+# Bitmap and is flagged "hires" so the CMS warns before it's pushed. A
+# still doesn't stress the H.264 decoder the way a 4K clip does, so this is
+# a memory guard, not the video ceiling.
+MAX_SAFE_IMAGE_LONG_EDGE = 4096
+
+
+def _media_kind(name: str) -> "str | None":
+    """'video' | 'image' | None for a filename, decided by extension."""
+    low = name.lower()
+    if low.endswith(VIDEO_EXTS):
+        return "video"
+    if low.endswith(IMAGE_EXTS):
+        return "image"
+    return None
+
+
+def image_heavy_reasons(width, height, size_mb) -> list[str]:
+    """Still-image analogue of [video_heavy_reasons]. Flags stills that are
+    risky to decode on a low-RAM box (by pixel dimensions when known) or
+    unlikely to download intact (by file size)."""
+    reasons: list[str] = []
+    try:
+        if width and height and max(int(width), int(height)) > MAX_SAFE_IMAGE_LONG_EDGE:
+            reasons.append("hires")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if size_mb and float(size_mb) > MAX_SAFE_SIZE_MB:
+            reasons.append("large")
+    except (TypeError, ValueError):
+        pass
+    return reasons
+
+
+def _image_library_entry(brand: dict, idx: int, filename: str, media_url: str,
+                         size_mb: float, width=None, height=None) -> dict:
+    """Build a library.json entry for a still image. Mirrors the video
+    entry shape so every downstream consumer (CMS, /api/state, player) can
+    treat the two uniformly, with `type` as the discriminator and
+    durationSec carrying the on-screen dwell."""
+    return {
+        "id":          f"{brand['id']}-{idx + 1}",
+        "type":        "image",
+        "title":       humanise(Path(filename).stem),
+        "brand":       brand["name"],
+        "product":     detect_product(Path(filename).stem, brand["products"]),
+        "duration":    f"{IMAGE_DWELL_SEC // 60}:{IMAGE_DWELL_SEC % 60:02d}",
+        "durationSec": IMAGE_DWELL_SEC,
+        "screens":     (idx * 7 + 3) % 22,
+        "sizeMb":      size_mb,
+        "filename":    filename,
+        "mediaUrl":    media_url,
+        "width":       width,
+        "height":      height,
+        "heavy":       image_heavy_reasons(width, height, size_mb) or None,
+    }
+
+
 def collect_videos() -> list[dict]:
     out: list[dict] = []
     skipped_dirs = ("/old/", "/archive/", "/_old/", "/raw/")
@@ -395,19 +475,16 @@ def collect_videos() -> list[dict]:
             print(f"[skip] {brand['folder']} — folder not on drive")
             continue
         files: list[Path] = []
-        for ext in ("*.mp4", "*.mov"):
+        for ext in ("*.mp4", "*.mov", "*.jpg", "*.jpeg", "*.png", "*.webp"):
             files += list(folder.rglob(ext))
         files = [f for f in files if not any(s in str(f).lower().replace("\\", "/") for s in skipped_dirs)]
         files.sort(key=lambda p: (p.parent.name, p.name))
 
         for idx, f in enumerate(files):
-            stem = f.stem
-            title = humanise(stem)
-            product = detect_product(stem, brand["products"])
+            kind = _media_kind(f.name)
+            if kind is None:
+                continue
             size_mb = round(f.stat().st_size / (1024 * 1024), 1)
-            video_id = f"{brand['id']}-{idx + 1}"
-            # Synthetic but realistic counts for the "on N screens" badge.
-            screens = (idx * 7 + 3) % 22
             # URL the dev server's /media route uses to stream this file.
             # Brand folder + filename are quoted so spaces/ampersands survive.
             media_url = (
@@ -416,6 +493,15 @@ def collect_videos() -> list[dict]:
                 + "/"
                 + urllib.parse.quote(f.name)
             )
+            if kind == "image":
+                out.append(_image_library_entry(brand, idx, f.name, media_url, size_mb))
+                continue
+            stem = f.stem
+            title = humanise(stem)
+            product = detect_product(stem, brand["products"])
+            video_id = f"{brand['id']}-{idx + 1}"
+            # Synthetic but realistic counts for the "on N screens" badge.
+            screens = (idx * 7 + 3) % 22
             probe = probe_mp4(f)
             duration_sec = probe["durationSec"]
             duration_label = (
@@ -425,6 +511,7 @@ def collect_videos() -> list[dict]:
             out.append(
                 {
                     "id": video_id,
+                    "type": "video",
                     "title": title,
                     "brand": brand["name"],
                     "product": product,
@@ -564,18 +651,33 @@ def collect_videos_drive() -> list[dict]:
             if any(s.strip("/") in joined_lower for s in skipped_dirs):
                 continue
 
-            title = humanise(stem)
-            product = detect_product(stem, brand["products"])
+            kind = _media_kind(name)
+            if kind is None:
+                continue
             try:
                 size_mb = round(int(f.get("size", "0") or 0) / (1024 * 1024), 1)
             except ValueError:
                 size_mb = 0.0
-            video_id = f"{brand['id']}-{file_idx + 1}"
-            screens = (file_idx * 7 + 3) % 22
             # mediaUrl points at the Drive file ID. serve.py's
             # _serve_media detects that shape (no slash after /media/)
             # and routes to the Drive streaming path.
             media_url = "/media/" + urllib.parse.quote(f["id"])
+
+            if kind == "image":
+                # imageMediaMetadata rides along in the list response like
+                # videoMediaMetadata — no extra egress. Absent until Drive
+                # finishes processing an upload, so stay null-safe.
+                imm = f.get("imageMediaMetadata") or {}
+                out.append(_image_library_entry(
+                    brand, file_idx, name, media_url, size_mb,
+                    width=imm.get("width"), height=imm.get("height"),
+                ))
+                continue
+
+            title = humanise(stem)
+            product = detect_product(stem, brand["products"])
+            video_id = f"{brand['id']}-{file_idx + 1}"
+            screens = (file_idx * 7 + 3) % 22
             # v0.2.x: real dimensions + duration now ride along in the Drive
             # list response (videoMediaMetadata) — no extra egress. Absent
             # until Drive finishes processing an upload, so stay null-safe.
@@ -593,6 +695,7 @@ def collect_videos_drive() -> list[dict]:
             heavy = video_heavy_reasons(width, height, size_mb)
             out.append({
                 "id":          video_id,
+                "type":        "video",
                 "title":       title,
                 "brand":       brand["name"],
                 "product":     product,
@@ -720,7 +823,8 @@ def _classify_inventory(brands_id: str, inventory: list[dict]) -> list[dict]:
         print(f"PROGRESS: {idx}/{total} {brand['name']}", flush=True)
     for vf in files:
         name = vf.get("name", "")
-        if not (name.lower().endswith(".mp4") or name.lower().endswith(".mov")):
+        kind = _media_kind(name)
+        if kind is None:
             continue
         brand_rec = brand_for(vf)
         if not brand_rec:
@@ -733,12 +837,18 @@ def _classify_inventory(brands_id: str, inventory: list[dict]) -> list[dict]:
             size_mb = 0.0
         file_idx = per_brand_count.get(brand_rec["id"], 0)
         per_brand_count[brand_rec["id"]] = file_idx + 1
-        screens = (file_idx * 7 + 3) % 22
         media_url = "/media/" + urllib.parse.quote(vf["id"])
+        if kind == "image":
+            # Broad-query inventory stays lean (no imageMediaMetadata), so
+            # dimensions are unknown here — same as videos on this path.
+            out.append(_image_library_entry(brand_rec, file_idx, name, media_url, size_mb))
+            continue
+        screens = (file_idx * 7 + 3) % 22
         title = humanise(Path(name).stem)
         product = detect_product(Path(name).stem, brand_rec["products"])
         out.append({
             "id":          f"{brand_rec['id']}-{file_idx + 1}",
+            "type":        "video",
             "title":       title,
             "brand":       brand_rec["name"],
             "product":     product,
@@ -906,15 +1016,16 @@ def try_incremental_apply(
                 del by_id[fid]
                 removed_count += 1
             continue
-        # We only track folders + video files in the snapshot. If a
-        # changed file is something else (a .txt, an image, etc.),
-        # skip the upsert — the broad-query inventory wouldn't have
-        # included it either.
+        # We only track folders + playable media files (video OR still
+        # image) in the snapshot. If a changed file is something else (a
+        # .txt, a PDF, etc.), skip the upsert — the broad-query inventory
+        # wouldn't have included it either.
         mt = meta.get("mimeType", "")
         name = (meta.get("name") or "").lower()
         is_folder = mt == "application/vnd.google-apps.folder"
-        is_video = ("video/" in mt) or name.endswith(".mp4") or name.endswith(".mov")
-        if not (is_folder or is_video):
+        is_video = ("video/" in mt) or name.endswith(VIDEO_EXTS)
+        is_image = ("image/" in mt) or name.endswith(IMAGE_EXTS)
+        if not (is_folder or is_video or is_image):
             if fid in by_id:
                 del by_id[fid]
                 removed_count += 1

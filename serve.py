@@ -293,6 +293,68 @@ def _release_info() -> dict:
         _release_cache["fetched_at"] = now
     return info
 
+
+# v0.2.22: automatic (overnight) updates only go to screens that can finish
+# one with nobody there: the auto-confirm accessibility service is on, and the
+# player is new enough to get through the installer, Play Protect and the
+# reopen by itself. Anything else would stop on a dialog until someone taps
+# it. Manual updates (the CMS Update button) still go out to every screen.
+# SCREENS_AUTO_UPDATE_GATE=0 turns the gate off; SCREENS_AUTO_UPDATE_MIN_APP
+# raises the bar when a later player handles more of the install.
+AUTO_UPDATE_GATE = os.environ.get("SCREENS_AUTO_UPDATE_GATE", "1") != "0"
+AUTO_UPDATE_MIN_APP = os.environ.get("SCREENS_AUTO_UPDATE_MIN_APP", "0.2.22")
+
+# Players before v0.2.22 ask for the release anonymously, so the only way to
+# let one through for a CMS Update press is by address: draining an "update"
+# command opens a short window for the IP the screen polled from.
+MANUAL_UPDATE_WINDOW_SEC = 15 * 60
+_manual_update_ips: dict[str, float] = {}   # client IP -> window end (epoch s)
+_manual_update_lock = threading.Lock()
+
+
+def _version_tuple(v) -> tuple:
+    try:
+        return tuple(int(p) for p in str(v).split(".")[:3])
+    except (ValueError, TypeError):
+        return (0, 0, 0)
+
+
+def _open_manual_update_window(ip: str) -> None:
+    if not ip:
+        return
+    with _manual_update_lock:
+        now = time.time()
+        for k in [k for k, until in _manual_update_ips.items() if until <= now]:
+            del _manual_update_ips[k]
+        _manual_update_ips[ip] = now + MANUAL_UPDATE_WINDOW_SEC
+
+
+def _release_hold_reason(params: dict, user_agent: str, client_ip: str) -> str | None:
+    """Why this caller shouldn't be offered the latest release right now, or
+    None to offer it. Browsers (the login page's download button) always get
+    it; so does any manual update."""
+    if not AUTO_UPDATE_GATE:
+        return None
+    def p(name: str, default: str = "") -> str:
+        return (params.get(name) or [default])[0]
+    if p("deviceId"):
+        # v0.2.22+ player: says who it is, how the check started and whether
+        # its auto-confirm service is on.
+        if p("trigger", "auto") == "manual":
+            return None
+        if _version_tuple(p("appVersion", "0")) < _version_tuple(AUTO_UPDATE_MIN_APP):
+            return f"automatic updates need player v{AUTO_UPDATE_MIN_APP} or later"
+        if p("autoConfirm") != "1":
+            return "the auto-update accessibility setting is off on this screen"
+        return None
+    if user_agent.lower().startswith("okhttp"):
+        # A player older than v0.2.22: it can't finish an update by itself.
+        with _manual_update_lock:
+            if _manual_update_ips.get(client_ip, 0) > time.time():
+                return None
+        return f"automatic updates need player v{AUTO_UPDATE_MIN_APP} or later"
+    return None
+
 # MEDIA_DIR / SPLASH_DIR are overridable via environment so the same code
 # runs on a dev laptop (default Windows G:\ path) and inside a container
 # where the Drive mount doesn't exist (e.g. Cloud Run). The defaults work
@@ -392,6 +454,9 @@ CUSTOM_STORES_JSON = Path(os.environ.get(
     "SCREENS_CUSTOM_STORES_PATH",
     _state_path_default("custom_stores.json"),
 ))
+# v0.2.15: what a location is. "retail" (the default, and what every store
+# saved before this had) or "office" — offices have no in-store concept.
+_STORE_KINDS = ("retail", "office")
 # v0.1.96: index of CMS-uploaded guided experiences. One entry per uploaded
 # file: {id, name, brand, filename, sizeBytes, uploadedAt, uploadedBy}. The
 # vendored interactive/*.html are listed alongside these at runtime (see
@@ -399,6 +464,16 @@ CUSTOM_STORES_JSON = Path(os.environ.get(
 EXPERIENCES_JSON = Path(os.environ.get(
     "SCREENS_EXPERIENCES_PATH",
     _state_path_default("experiences.json"),
+))
+# v0.2.15: events — a scheduled OR manual TAKEOVER on targeted screens.
+# While an event is active, its playlist + settings replace the screen's
+# normal state; on deactivation, the screen is restored exactly as it was
+# (snapshot captured at activation). One file for the whole event index;
+# per-event snapshots live inside each event record so a deploy / restart
+# never loses the restore info.
+EVENTS_JSON = Path(os.environ.get(
+    "SCREENS_EVENTS_PATH",
+    _state_path_default("events.json"),
 ))
 # v0.1.56: city → brand splash mapping. The dict is mutated by the
 # Settings → Splashes UI; pre-v0.1.56 it lived only in memory, so any
@@ -445,6 +520,37 @@ _custom_stores: dict[str, dict] = {}
 # in here — see _list_experiences). {id, name, brand, filename, sizeBytes,
 # uploadedAt, uploadedBy}
 _experiences: list[dict] = []
+# v0.2.15: list of event records. Shape:
+#   {id, name, startAt, endAt (both nullable for manual-only),
+#    targetMode: "stores"|"screens", stores: [], screens: [deviceIds],
+#    splashes: {
+#      portrait:  {url, type: "video"|"image", durationSec, title?, ...},
+#      landscape: {url, type: "video"|"image", durationSec, title?, ...},
+#    },  # required at /start; portrait/landscape pre-uploaded or picked
+#    splashOn: bool,  # master: does the splash also play when a screen
+#                     # has a specific assignment? Default True.
+#    screenAssignments: {
+#      deviceId: {
+#        items: [...pushed-item shapes...],  # custom playlist for THIS screen
+#        splashOn: null|bool,  # per-screen override of master; null = inherit
+#      }
+#    },
+#    overrides: {mixSplash, audioOn, productCard, ...} (optional),
+#    state: "draft"|"scheduled"|"active"|"ended",
+#    snapshots: {deviceId: {items, mixSplash, productCard, ...}},
+#    createdBy, createdAt, updatedAt, startedAt, endedAt}
+#
+# Content resolution on start, per targeted screen:
+#   - Read screen's orientation; splash = splashes[portrait|landscape]
+#   - assignment = screenAssignments[deviceId] or {}
+#   - effectiveSplashOn = assignment.splashOn if not None else event.splashOn
+#   - If assignment.items set:
+#       items = assignment.items + ([splash] if effectiveSplashOn else [])
+#     Else:
+#       items = [splash]  # splash is the universal fallback
+# `snapshots` is only populated while state=="active" — on stop/end it's
+# consumed by _restore_screen_from_event and cleared.
+_events: list[dict] = []
 
 
 # ── State persistence ────────────────────────────────────────────────
@@ -471,6 +577,376 @@ def _fmt_duration(sec: int) -> str:
     have to special-case uploaded vs synced rows."""
     sec = max(0, int(sec))
     return f"{sec // 60}:{sec % 60:02d}"
+
+
+# v0.2.20: compress splash uploads before they reach the fleet. Legacy retail
+# boxes can't hardware-decode 4K H.264 and freeze on it (the tm:rw landscape
+# splash did exactly that in Times Square, 2026-07-17), and splashes are the
+# fallback loop on every screen during an event, so a heavy one hurts the
+# whole store. Anything bigger than 1080p, faster than 30 fps, or not H.264
+# yuv420p is re-encoded; anything already fine is re-encoded only if that
+# makes it meaningfully smaller. ffmpeg runs as a niced subprocess on a /tmp
+# scratch copy (never on the gcsfuse mount: faststart seeks back over the
+# file). Any failure keeps the original upload, so compression can never
+# make an upload fail.
+_FFMPEG = shutil.which("ffmpeg")
+_FFPROBE = shutil.which("ffprobe")
+_COMPRESS_MAX_INPUT_BYTES = 500 * 1024 * 1024
+_COMPRESS_TIMEOUT_SEC = 240
+# One encode at a time. The Events page uploads both orientations at once, and
+# two 4K decodes side by side on the one instance is the memory spike to avoid.
+_COMPRESS_LOCK = threading.Lock()
+
+
+def _probe_video(path: Path) -> dict | None:
+    """ffprobe the first video stream. None if ffprobe is missing or fails."""
+    if not _FFPROBE:
+        return None
+    import subprocess
+    try:
+        res = subprocess.run(
+            [_FFPROBE, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,width,height,pix_fmt,avg_frame_rate:format=duration",
+             "-of", "json", str(path)],
+            capture_output=True, timeout=30,
+        )
+        if res.returncode != 0:
+            return None
+        info = json.loads(res.stdout or b"{}")
+    except Exception:
+        return None
+    streams = info.get("streams") or []
+    if not streams:
+        return None
+    st = streams[0]
+    fps = 0.0
+    try:
+        num, _, den = str(st.get("avg_frame_rate") or "0/1").partition("/")
+        fps = float(num) / float(den or 1) if float(den or 1) else 0.0
+    except ValueError:
+        pass
+    try:
+        duration = float((info.get("format") or {}).get("duration") or 0)
+    except ValueError:
+        duration = 0.0
+    return {
+        "codec":    st.get("codec_name"),
+        "width":    int(st.get("width") or 0),
+        "height":   int(st.get("height") or 0),
+        "pixFmt":   st.get("pix_fmt"),
+        "fps":      fps,
+        "duration": duration,
+    }
+
+
+def _compress_video_for_fleet(data: bytes, ext: str, on_progress=None) -> tuple[bytes, str, dict]:
+    """Returns (bytes, ext, info). `info` always carries `compressed` (bool)
+    plus whatever ffprobe learned (width/height/durationSec) and, when
+    compression was skipped or failed, a plain-words `compressNote`.
+    `on_progress(fraction)` is called as the encode runs (fraction may
+    overshoot 1 slightly when the probed duration is short)."""
+    with _COMPRESS_LOCK:
+        return _compress_video_for_fleet_locked(data, ext, on_progress)
+
+
+def _compress_video_for_fleet_locked(data: bytes, ext: str, on_progress=None) -> tuple[bytes, str, dict]:
+    info: dict = {"compressed": False, "originalMb": round(len(data) / 1_000_000.0, 1)}
+    if not (_FFMPEG and _FFPROBE):
+        info["compressNote"] = "ffmpeg isn't installed on the server"
+        return data, ext, info
+    if len(data) > _COMPRESS_MAX_INPUT_BYTES:
+        info["compressNote"] = "file too large to compress on upload"
+        return data, ext, info
+    import subprocess
+    import tempfile
+    work = Path(tempfile.mkdtemp(prefix="compress-"))
+    try:
+        src = work / f"in.{ext}"
+        src.write_bytes(data)
+        probe = _probe_video(src)
+        if probe is None:
+            info["compressNote"] = "couldn't read the video"
+            return data, ext, info
+        w, h = probe["width"], probe["height"]
+        info.update({"width": w, "height": h, "durationSec": round(probe["duration"], 1)})
+        portrait = h > w
+        box_w, box_h = (1080, 1920) if portrait else (1920, 1080)
+        needs_fix = (
+            w > box_w or h > box_h
+            or probe["fps"] > 30.5
+            or probe["codec"] != "h264"
+            or probe["pixFmt"] != "yuv420p"
+        )
+        out = work / "out.mp4"
+        cmd = [
+            # Decoder threads capped too: left alone, ffmpeg starts one frame
+            # thread per host core it can see, each holding 4K frames.
+            _FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+            "-threads", "2", "-i", str(src), "-filter_threads", "1",
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf", (f"scale='min(iw,{box_w})':'min(ih,{box_h})'"
+                    ":force_original_aspect_ratio=decrease:force_divisible_by=2"),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p",
+            "-maxrate", "8M", "-bufsize", "16M",
+            "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+            "-movflags", "+faststart", "-threads", "2",
+        ]
+        if probe["fps"] > 30.5:
+            cmd += ["-r", "30"]
+        # Progress as key=value lines on stdout, so the Events page can show
+        # a real bar (out_time_us against the probed duration).
+        cmd += ["-progress", "pipe:1", "-nostats"]
+        cmd.append(str(out))
+        # Lower priority than the request threads so heartbeats and /api/state
+        # stay responsive while it encodes. `nice` the binary, not preexec_fn,
+        # which isn't safe to use from a threaded server.
+        nice = shutil.which("nice") if os.name == "posix" else None
+        if nice:
+            cmd = [nice, "-n", "10"] + cmd
+        t0 = time.time()
+        if on_progress:
+            on_progress(0.0)
+        dur_us = max(1.0, float(probe["duration"] or 0) * 1_000_000)
+        err_path = work / "ffmpeg.log"
+        killed = threading.Event()
+        with open(err_path, "wb") as err_fh:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err_fh)
+            def _kill() -> None:
+                killed.set()
+                proc.kill()
+            timer = threading.Timer(_COMPRESS_TIMEOUT_SEC, _kill)
+            timer.daemon = True
+            timer.start()
+            try:
+                for line in proc.stdout:
+                    key, _, val = line.decode("ascii", "replace").strip().partition("=")
+                    if key == "out_time_us" and on_progress and val.isdigit():
+                        on_progress(int(val) / dur_us)
+                proc.wait()
+            finally:
+                timer.cancel()
+        if killed.is_set():
+            print(f"[compress] ffmpeg timed out after {_COMPRESS_TIMEOUT_SEC}s; keeping original", file=sys.stderr)
+            info["compressNote"] = "compression took too long, kept the original"
+            return data, ext, info
+        if proc.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
+            err = err_path.read_text("utf-8", "replace").strip().splitlines()[-1:] or [""]
+            print(f"[compress] ffmpeg failed ({proc.returncode}): {err[0][:200]}; keeping original", file=sys.stderr)
+            info["compressNote"] = "compression failed, kept the original"
+            return data, ext, info
+        new = out.read_bytes()
+        if not needs_fix and len(new) >= len(data) * 0.9:
+            info["compressNote"] = "already well compressed"
+            return data, ext, info
+        after = _probe_video(out) or {}
+        info.update({
+            "compressed": True,
+            "width":      after.get("width") or w,
+            "height":     after.get("height") or h,
+            "finalMb":    round(len(new) / 1_000_000.0, 1),
+        })
+        print(f"[compress] {w}x{h} {info['originalMb']} MB -> {info['width']}x{info['height']} "
+              f"{info['finalMb']} MB in {time.time() - t0:.0f}s", file=sys.stderr)
+        return new, "mp4", info
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+# v0.2.20: stills can be uploaded too (an event splash can be a poster). They
+# play for durationSec, the same dwell a Drive-synced still gets.
+_UPLOAD_IMAGE_EXTS = {"jpg", "jpeg", "png", "webp"}
+try:
+    _UPLOAD_IMAGE_DWELL_SEC = max(1, int(os.environ.get("SCREENS_IMAGE_DWELL_SEC", "10") or 10))
+except ValueError:
+    _UPLOAD_IMAGE_DWELL_SEC = 10
+
+
+def _compress_image_for_fleet(data: bytes, ext: str, on_progress=None) -> tuple[bytes, str, dict]:
+    """Downscale a still bigger than the screen (1920x1080, or 1080x1920 for
+    portrait) so the legacy 1 GB boxes don't decode a huge bitmap. Smaller
+    stills are kept as they are. Same return shape as the video version, and
+    the same rule: any failure keeps the original."""
+    with _COMPRESS_LOCK:
+        info: dict = {"compressed": False, "originalMb": round(len(data) / 1_000_000.0, 1)}
+        if not (_FFMPEG and _FFPROBE):
+            info["compressNote"] = "ffmpeg isn't installed on the server"
+            return data, ext, info
+        import subprocess
+        import tempfile
+        work = Path(tempfile.mkdtemp(prefix="compress-"))
+        try:
+            src = work / f"in.{ext}"
+            src.write_bytes(data)
+            if on_progress:
+                on_progress(0.2)
+            probe = _probe_video(src)
+            if probe is None:
+                info["compressNote"] = "couldn't read the image"
+                return data, ext, info
+            w, h = probe["width"], probe["height"]
+            info.update({"width": w, "height": h})
+            box_w, box_h = (1080, 1920) if h > w else (1920, 1080)
+            if w <= box_w and h <= box_h:
+                info["compressNote"] = "already sized for the screens"
+                return data, ext, info
+            out_ext = "png" if ext == "png" else "jpg"
+            out = work / f"out.{out_ext}"
+            cmd = [_FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+                   "-vf", f"scale='min(iw,{box_w})':'min(ih,{box_h})':force_original_aspect_ratio=decrease",
+                   "-frames:v", "1"]
+            if out_ext == "jpg":
+                cmd += ["-q:v", "2"]
+            cmd.append(str(out))
+            try:
+                res = subprocess.run(cmd, capture_output=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                info["compressNote"] = "resizing took too long, kept the original"
+                return data, ext, info
+            if res.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
+                info["compressNote"] = "resizing failed, kept the original"
+                return data, ext, info
+            new = out.read_bytes()
+            after = _probe_video(out) or {}
+            info.update({
+                "compressed": True,
+                "width":      after.get("width") or w,
+                "height":     after.get("height") or h,
+                "finalMb":    round(len(new) / 1_000_000.0, 1),
+            })
+            print(f"[compress] image {w}x{h} {info['originalMb']} MB -> {info['width']}x{info['height']} "
+                  f"{info['finalMb']} MB", file=sys.stderr)
+            return new, out_ext, info
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+# Library uploads are a read-modify-write of library.json. Background upload
+# jobs (below) can now finish while another upload is saving, so serialise it.
+_LIBRARY_WRITE_LOCK = threading.Lock()
+
+
+def _store_library_upload(data: bytes, ext: str, meta: dict, compress_info: dict | None = None) -> dict:
+    """Write an uploaded file to UPLOADS_DIR and append its library.json entry.
+    `meta` is what _serve_api_library_upload validated: video_id, slug, title,
+    brand, product, duration_sec, duration_given, is_image."""
+    safe_filename = f"{meta['video_id']}-{meta['slug']}.{ext}"
+    duration_sec = meta["duration_sec"]
+    if (compress_info and compress_info.get("durationSec")
+            and not meta["duration_given"] and not meta["is_image"]):
+        duration_sec = max(1, min(600, int(round(compress_info["durationSec"]))))
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    target = UPLOADS_DIR / safe_filename
+    with open(target, "wb") as fh:
+        fh.write(data)
+    size_bytes = target.stat().st_size
+
+    brand = meta["brand"]
+    with _LIBRARY_WRITE_LOCK:
+        # Re-read fresh from disk rather than trust the in-memory cache so a
+        # concurrent Drive sync doesn't get clobbered.
+        if LIBRARY_JSON.is_file():
+            with open(LIBRARY_JSON, "r", encoding="utf-8") as f:
+                lib = json.load(f)
+        else:
+            lib = {"brands": [], "videos": []}
+        videos = lib.setdefault("videos", [])
+        brands = lib.setdefault("brands", [])
+
+        # Auto-register a brand record if this is the first video for an
+        # unknown brand. Keeps the brand picker self-healing — the CMS doesn't
+        # need a "create brand" flow for casual uploads.
+        if brand and not any((b.get("id") or "").lower() == brand.lower() for b in brands):
+            brands.append({"id": brand, "name": brand.replace("-", " ").title(), "videos": 0, "products": []})
+
+        entry = {
+            "id":            meta["video_id"],
+            "title":         meta["title"],
+            "brand":         brand,
+            "product":       meta["product"] or None,
+            "durationSec":   duration_sec,
+            "duration":      _fmt_duration(duration_sec),
+            "sizeMb":        round(size_bytes / 1_000_000.0, 1),
+            "filename":      safe_filename,
+            "mediaUrl":      f"/uploaded/{safe_filename}",
+            "uploadedAt":    int(time.time() * 1000),
+            "screens":       0,
+            "defaultUnmute": False,
+        }
+        if meta["is_image"]:
+            entry["type"] = "image"
+        if compress_info and compress_info.get("width") and compress_info.get("height"):
+            entry["width"] = compress_info["width"]
+            entry["height"] = compress_info["height"]
+        videos.append(entry)
+
+        LIBRARY_JSON.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LIBRARY_JSON.with_suffix(LIBRARY_JSON.suffix + ".tmp")
+        tmp.write_text(json.dumps(lib, indent=2), encoding="utf-8")
+        tmp.replace(LIBRARY_JSON)
+        _LIBRARY_CACHE["mtime"] = 0.0   # force re-read on next GET
+
+    _log_activity(
+        kind="upload",
+        text=f"Uploaded \"{meta['title']}\" to {brand}",
+        icon="upload",
+    )
+    return entry
+
+
+# v0.2.20: chunked uploads (see _serve_api_library_upload_chunk). Cloud Run's
+# front end refuses any request over 32 MiB with its own 413, so a bigger file
+# comes up in pieces and is reassembled in /tmp (RAM on Cloud Run, which is
+# why the total is capped).
+_CHUNK_SESSIONS: dict[str, dict] = {}
+_CHUNK_LOCK = threading.Lock()
+_CHUNK_MAX_BYTES = 16 * 1024 * 1024          # the CMS sends 8 MiB pieces
+_CHUNKED_UPLOAD_MAX_BYTES = 500 * 1024 * 1024
+_CHUNK_SESSION_TTL_SEC = 1800
+
+
+# v0.2.20: a compressed upload runs as a background job so the Events page
+# can show how far the encode has got (GET /api/library/upload-jobs/<id>),
+# and a long encode can't run into the request timeout. In memory only: a
+# restart mid-encode loses the job, and the page says the upload failed.
+_UPLOAD_JOBS: dict[str, dict] = {}
+_UPLOAD_JOBS_LOCK = threading.Lock()
+_UPLOAD_JOB_TTL_SEC = 3600
+
+
+def _set_upload_job(job_id: str, **fields) -> None:
+    with _UPLOAD_JOBS_LOCK:
+        job = _UPLOAD_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _start_upload_job(data: bytes, ext: str, meta: dict) -> str:
+    job_id = secrets.token_hex(8)
+    now = time.time()
+    with _UPLOAD_JOBS_LOCK:
+        for stale in [k for k, j in _UPLOAD_JOBS.items() if now - j["createdAt"] > _UPLOAD_JOB_TTL_SEC]:
+            del _UPLOAD_JOBS[stale]
+        # "queued" until the encode lock is free (one encode at a time).
+        _UPLOAD_JOBS[job_id] = {"state": "queued", "progress": 0.0, "createdAt": now}
+    threading.Thread(target=_run_upload_job, args=(job_id, data, ext, meta),
+                     daemon=True, name=f"upload-{job_id}").start()
+    return job_id
+
+
+def _run_upload_job(job_id: str, data: bytes, ext: str, meta: dict) -> None:
+    def progress(fraction: float) -> None:
+        _set_upload_job(job_id, state="compressing", progress=round(max(0.0, min(0.99, fraction)), 3))
+    try:
+        compress = _compress_image_for_fleet if meta["is_image"] else _compress_video_for_fleet
+        out, out_ext, info = compress(data, ext, on_progress=progress)
+        _set_upload_job(job_id, state="saving", progress=1.0)
+        entry = _store_library_upload(out, out_ext, meta, info)
+        _set_upload_job(job_id, state="done", progress=1.0, video=entry, compression=info)
+    except Exception as exc:
+        print(f"[upload] job {job_id} failed: {exc}", file=sys.stderr)
+        _set_upload_job(job_id, state="error", error="The upload couldn't be saved. Try again.")
 
 
 def _parse_multipart(body: bytes, boundary: bytes) -> list[dict]:
@@ -680,6 +1156,712 @@ def _save_city_brand() -> None:
 def _save_experiences() -> None:
     """Persist _experiences. Call inside _STATE_LOCK after any mutation."""
     _atomic_write_json(EXPERIENCES_JSON, _experiences)
+
+
+def _save_events() -> None:
+    """Persist _events. Call inside _STATE_LOCK after any mutation.
+
+    Low write frequency (operator CRUD + start/stop lifecycle), so the
+    inline write is safe (unlike _screens/_per_screen which must defer
+    via *_soon savers — see _save_screens_soon). Snapshots travel with
+    the event record itself, so a Cloud Run restart mid-event doesn't
+    orphan them."""
+    _atomic_write_json(EVENTS_JSON, _events)
+
+
+# ── Event helpers ─────────────────────────────────────────────────────
+# What a snapshot of a screen's state captures when an event activates.
+# Chosen fields = every per-screen setting the operator can set via the
+# CMS, plus `items` (the current pushed playlist) and `revision` (so the
+# tablet re-fetches cleanly on restore). Everything else — pushedAt,
+# pendingCommands, lastHeartbeat — isn't operator-settable and either
+# gets rebuilt naturally or doesn't matter for playback continuity.
+_EVENT_SNAPSHOT_FIELDS = (
+    "items", "mixSplash", "productCard", "rotation",
+    "experienceUrl", "experiencePromptPos",
+    "tapNext", "progressBar", "audioOn", "pollMode",
+    "syncGroup", "displayMode", "revision",
+    # v0.2.16 web page mode: an event (or a content test) switches a web
+    # page screen to playlist mode, and the restore switches it back.
+    "contentMode", "web",
+)
+
+# What an event always takes over on a screen. Any key in the event's
+# `overrides` is added on top. Only these come back from the snapshot when
+# the event ends; everything else the operator changed mid-event (rotation,
+# audio, ...) is left as they set it.
+_EVENT_CONTROLLED_BASE = ("items", "mixSplash", "contentMode", "web")
+
+
+def _event_controlled_keys(event: dict) -> list[str]:
+    keys = list(_EVENT_CONTROLLED_BASE)
+    for k in (event.get("overrides") or {}):
+        if k in _EVENT_SNAPSHOT_FIELDS and k not in keys and k != "revision":
+            keys.append(k)
+    return keys
+
+
+def _target_screen_ids_for_event(event: dict) -> list[str]:
+    """Flatten an event's targeting into a concrete list of deviceIds
+    at this moment. For targetMode='screens' it's just event['screens'];
+    for 'stores' we resolve every registered screen whose location
+    storeId is in event['stores']. Called at START time to decide which
+    screens to snapshot + override, and at STOP time to decide which
+    screens to restore."""
+    if event.get("targetMode") == "screens":
+        return list(event.get("screens") or [])
+    stores = set(event.get("stores") or [])
+    if not stores:
+        return []
+    out = []
+    for device_id, meta in _screens.items():
+        loc = meta.get("location") or {}
+        if (loc.get("storeId") or "") in stores:
+            out.append(device_id)
+    return out
+
+
+def _snapshot_screen_for_event(event: dict, device_id: str) -> None:
+    """Capture the current per-screen state onto the event record so
+    we can restore it when the event ends. Must be called inside
+    _STATE_LOCK. Idempotent — a re-snapshot overwrites the previous
+    one, which happens if a screen is re-added to an active event's
+    target list after a transient drop."""
+    s = _ensure_screen_state(device_id)
+    snap = {k: s.get(k) for k in _EVENT_SNAPSHOT_FIELDS}
+    event.setdefault("snapshots", {})[device_id] = snap
+
+
+def _sync_live_event_targets(event: dict) -> tuple[list[str], list[str]]:
+    """v0.2.20: keep a live event's held screens in step with its target.
+    The event used to snapshot its screens only at start, so a screen that
+    joined afterwards never got it: a box reinstalled mid-event (new
+    deviceId), one whose store was set after the start, or one added to the
+    event's screen list. Now a screen that matches is snapshotted and taken
+    over, and one that no longer matches gets its own playlist back. A screen
+    another live event already holds stays with that event. Returns
+    (joined, left). Must be inside _STATE_LOCK."""
+    held = set((event.get("snapshots") or {}).keys())
+    want = set(_target_screen_ids_for_event(event))
+    taken: set[str] = set()
+    for other in _events:
+        if other is not event and other.get("state") == "active":
+            taken |= set((other.get("snapshots") or {}).keys())
+    joined = sorted(want - held - taken)
+    left = sorted(held - want)
+    for device_id in joined:
+        _snapshot_screen_for_event(event, device_id)
+        _apply_event_override_to_screen(event, device_id)
+    for device_id in left:
+        _restore_screen_from_event(event, device_id)
+    return joined, left
+
+
+def _restore_screen_from_event(event: dict, device_id: str) -> None:
+    """Reverse of _snapshot_. Writes the snapshot back onto the live
+    per-screen state and bumps revision so the tablet sees the change
+    on its next /api/state poll. Must be called inside _STATE_LOCK.
+    Pops the snapshot off the event record so a re-start of the same
+    event takes a fresh snapshot (vs restoring stale pre-event state)."""
+    snaps = event.get("snapshots") or {}
+    snap = snaps.pop(device_id, None)
+    # v0.2.18: only put back what the event took over. Edits to those keys
+    # made during the event were written into the snapshot (see
+    # _edit_target), so they land now; anything else the operator changed
+    # mid-event stays as they set it. Events started before this recorded
+    # no list, so they restore every snapshot field as before.
+    controlled = (event.get("controlled") or {}).pop(device_id, None)
+    if snap is None:
+        return
+    s = _ensure_screen_state(device_id)
+    for k in (controlled or _EVENT_SNAPSHOT_FIELDS):
+        if k == "revision":
+            continue  # bumped separately below
+        if k in snap:
+            s[k] = snap[k]
+    # Bump revision so the tablet detects the change immediately.
+    s["revision"] = int(s.get("revision") or 0) + 1
+    s["pushedAt"] = time.time()
+
+
+def _cancel_preview_on(s: dict) -> bool:
+    """End a running content test on one screen's state dict: put the
+    pre-test fields back and drop the preview markers. Returns True if a
+    test was running. Doesn't touch revision; the caller bumps it.
+    Must be inside _STATE_LOCK.
+
+    Called by the scheduler at expiry, by DELETE /api/screens/<id>/preview,
+    and before any real edit to the screen. An edit made during a test
+    would otherwise be overwritten by the timed restore: test, like it,
+    push it, and 40 seconds later the screen snaps back."""
+    snap = s.pop("_previewSnapshot", None)
+    expires = s.pop("_previewExpiresAtMs", None)
+    if snap is None and expires is None:
+        return False
+    if snap:
+        for k in _EVENT_SNAPSHOT_FIELDS:
+            if k == "revision":
+                continue
+            if k in snap:
+                s[k] = snap[k]
+    return True
+
+
+def _effective_orientation(device_id: str) -> str:
+    """"portrait" or "landscape" as the screen is actually seen.
+
+    The tablet reports the panel's own orientation, but a CMS rotation of
+    90/270 is done inside the player and Android never hears about it, so a
+    TV mounted on its side still reports landscape. Swap it here. Must be
+    inside _STATE_LOCK."""
+    raw = str((_screens.get(device_id) or {}).get("orientation") or "landscape").lower()
+    orient = "portrait" if raw.startswith("port") else "landscape"
+    rot = int((_per_screen.get(device_id) or {}).get("rotation") or 0)
+    if rot in (90, 270):
+        orient = "landscape" if orient == "portrait" else "portrait"
+    return orient
+
+
+def _resolve_event_items_for_screen(event: dict, device_id: str) -> list[dict]:
+    """Compute the final item list for a screen under an active event.
+
+    Rules (per the event spec):
+      1. splash = event.splashes[orientation]. If missing, the screen
+         gets an empty list (will show black). /start-time validation
+         enforces that both orientations have a splash, so this only
+         bites if a per-orientation entry was cleared mid-event via
+         PATCH — flagged in logs if it happens.
+      2. assignment = event.screenAssignments[deviceId], else {}.
+      3. effectiveSplashOn = assignment.splashOn if not None, else
+         event.splashOn (master toggle).
+      4. If assignment.items is non-empty:
+           - splashOn → items = [...assignment.items, splash]
+           - splashOff → items = assignment.items
+         Else (no assignment):
+           - items = [splash]  — splash is the universal fallback,
+             regardless of the splashOn toggle.
+    """
+    orient = _effective_orientation(device_id)
+    splash_item = (event.get("splashes") or {}).get(orient)
+
+    assignment = (event.get("screenAssignments") or {}).get(device_id) or {}
+    assigned_items = list(assignment.get("items") or [])
+
+    master_splash_on = bool(event.get("splashOn", True))
+    assigned_override = assignment.get("splashOn")  # None | True | False
+    effective_splash_on = (
+        master_splash_on if assigned_override is None else bool(assigned_override)
+    )
+
+    if assigned_items:
+        if effective_splash_on and splash_item:
+            return assigned_items + [splash_item]
+        return assigned_items
+    # Fallback: splash is the whole loop.
+    if splash_item:
+        return [splash_item]
+    print(f"[event] no splash resolved for {device_id} (orient={orient}, event={event.get('id')})", file=sys.stderr)
+    return []
+
+
+def _apply_event_override_to_screen(event: dict, device_id: str) -> None:
+    """Overwrite the live per-screen playlist + settings with the
+    event's resolved content for THIS screen (splash + assignment).
+    Does NOT persist the snapshot — call _snapshot_screen_for_event
+    FIRST. Must be inside _STATE_LOCK."""
+    s = _ensure_screen_state(device_id)
+    overrides = event.get("overrides") or {}
+    # mixSplash defaults to False during an event — the event's own
+    # splash resolution is the whole game, no brand-splash interleave
+    # unless the operator explicitly flipped the override on.
+    s["mixSplash"] = bool(overrides.get("mixSplash", False))
+    for key in ("productCard", "audioOn", "tapNext", "progressBar",
+                "experienceUrl", "experiencePromptPos", "rotation",
+                "pollMode", "syncGroup", "displayMode"):
+        if key in overrides:
+            s[key] = overrides[key]
+    # After the overrides: a rotation override changes which splash fits.
+    s["items"] = _resolve_event_items_for_screen(event, device_id)
+    # A web page screen shows the event too. Its URL stays in `web`, so the
+    # restore flips it straight back to the page.
+    s["contentMode"] = "playlist"
+    event.setdefault("controlled", {})[device_id] = _event_controlled_keys(event)
+    # Clear pending commands so a stale command from before doesn't
+    # fire during the event — restore after the event brings the
+    # pre-event queue back if any.
+    s["pendingCommands"] = []
+    s["revision"] = int(s.get("revision") or 0) + 1
+    s["pushedAt"] = time.time()
+
+
+def _active_event_for_screen(device_id: str, store_id: str | None) -> dict | None:
+    """Find the active event that targets this screen, if any. Events
+    take precedence over the base playlist and over any campaign
+    overlay (campaigns can't layer onto a takeover — that defeats the
+    'perfect restore' guarantee). Only one event may target a given
+    screen at a time (enforced at start-time)."""
+    for ev in _events:
+        if ev.get("state") != "active":
+            continue
+        if ev.get("targetMode") == "screens":
+            if device_id in (ev.get("screens") or []):
+                return ev
+        else:
+            if store_id and store_id in (ev.get("stores") or []):
+                return ev
+    return None
+
+
+def _event_holding(device_id: str) -> dict | None:
+    """The active event currently holding this screen: one that took a
+    snapshot of it at start. Must be inside _STATE_LOCK."""
+    for ev in _events:
+        if ev.get("state") == "active" and device_id in (ev.get("snapshots") or {}):
+            return ev
+    return None
+
+
+def _edit_target(device_id: str, keys: tuple) -> tuple[dict, dict | None]:
+    """Where an operator edit to `keys` on this screen should land.
+
+    Normally the live per-screen state. While an active event holds the
+    screen and controls any of `keys`, the edit goes into the event's saved
+    snapshot instead: the screen keeps showing the event, and the edit takes
+    effect when the event ends (the restore writes the snapshot back).
+    Without this, a fleet-wide push during an event would either break the
+    takeover or be wiped by the restore.
+
+    Returns (dict to edit, event or None). When an event is returned the
+    caller must _save_events(). Must be inside _STATE_LOCK."""
+    live = _ensure_screen_state(device_id)
+    ev = _event_holding(device_id)
+    if ev is None:
+        return live, None
+    controlled = (ev.get("controlled") or {}).get(device_id) or list(_EVENT_CONTROLLED_BASE)
+    if not set(keys) & set(controlled):
+        return live, None
+    snap = ev["snapshots"][device_id]
+    snap.setdefault("items", [])
+    snap.setdefault("revision", 0)
+    if snap.get("items") is None:
+        snap["items"] = []
+    return snap, ev
+
+
+# A playlist item with no `url` is a tm:rw video whose file never synced from
+# Drive (the library flags it `pendingSync`, mediaUrl=None). The player's state
+# parser needs a url on every item, so ONE such item made it reject the whole
+# /api/state payload and sit on the fallback splash. That took B2, C1 and E6
+# at Selfridges dark from 2026-11-05 to 11-10. Such items are now kept off the
+# wire to tablets and stripped when a playlist is saved.
+def _playable_item(it) -> bool:
+    if not isinstance(it, dict):
+        return False
+    url = it.get("url")
+    return isinstance(url, str) and bool(url.strip())
+
+
+def _split_playable(items) -> tuple[list, list]:
+    """(playable items, skipped items) — order kept."""
+    keep: list = []
+    skipped: list = []
+    for it in items or []:
+        (keep if _playable_item(it) else skipped).append(it)
+    return keep, skipped
+
+
+# deviceId -> revision we last logged skipped items for. /api/state is polled
+# every few seconds; log once per playlist revision, not once per poll.
+_UNPLAYABLE_LOGGED: dict[str, int] = {}
+
+
+# v0.2.15: preload window — a signed-off event's content is advertised
+# to its targeted screens this far before startAt so tablets have time
+# to pre-cache. 24h is plenty for the usual signage asset (50-800MB)
+# over a store wifi; smaller for a last-minute sign-off still works
+# because the tablet polls every 3-30s and starts caching as soon as it
+# sees the preload list.
+_EVENT_PRELOAD_WINDOW_SEC = 24 * 60 * 60
+
+
+def _preload_items_for_screen(device_id: str, store_id: str | None, now_dt=None) -> list[dict]:
+    """Return the de-duped list of pushed-item shapes a tablet should
+    pre-cache ahead of upcoming events. Used by the /api/state resolver
+    (which already runs under _STATE_LOCK, so this stays lock-free).
+    Order of items doesn't matter — the tablet treats this as a cache
+    hint, not a playlist.
+
+    Events qualify when:
+      - state == "signed-off"
+      - startAt is set AND now < startAt <= now + _EVENT_PRELOAD_WINDOW_SEC
+      - this screen is in the event's target set
+    Each item is deduplicated across events by its `url`, so a shared
+    splash file isn't downloaded twice."""
+    now_dt = now_dt or _now_utc()
+    try:
+        import datetime
+        window_end = now_dt + datetime.timedelta(seconds=_EVENT_PRELOAD_WINDOW_SEC)
+    except Exception:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def _consider(item):
+        url = (item or {}).get("url")
+        if not url or url in seen:
+            return
+        seen.add(url)
+        out.append(item)
+
+    for ev in _events:
+        if ev.get("state") != "signed-off":
+            continue
+        start = _parse_iso_utc(ev.get("startAt", ""))
+        if not start:
+            continue  # manual-only sign-off; no preload window to key off
+        if not (now_dt < start <= window_end):
+            continue
+        # Target match
+        if ev.get("targetMode") == "screens":
+            if device_id not in (ev.get("screens") or []):
+                continue
+        else:
+            if not store_id or store_id not in (ev.get("stores") or []):
+                continue
+        # Collect every item the resolver might play on this screen.
+        splashes = ev.get("splashes") or {}
+        for sp in (splashes.get("portrait"), splashes.get("landscape")):
+            if sp:
+                _consider(sp)
+        assignment = (ev.get("screenAssignments") or {}).get(device_id) or {}
+        for it in (assignment.get("items") or []):
+            _consider(it)
+    return out
+
+
+# v0.2.15: scheduler daemon tick interval. 5s balances freshness
+# (worst-case 5s lag between startAt and auto-start) against work on
+# small fleets (iterate _events + check previews, O(N) over tiny lists).
+_EVENT_SCHEDULER_TICK_SEC = 5.0
+
+
+def _event_scheduler_loop() -> None:
+    """Background daemon:
+      - auto-start signed-off events whose startAt has passed
+      - auto-stop active events whose endAt has passed
+      - auto-restore screen previews whose window has expired (E2.5)
+
+    All work runs under _STATE_LOCK but the operations are tiny CPU
+    passes — no I/O inside the lock. The actual flush of events.json
+    and _per_screen happens from _save_events / _save_per_screen_soon
+    which this daemon triggers.
+    """
+    import datetime
+    while True:
+        time.sleep(_EVENT_SCHEDULER_TICK_SEC)
+        try:
+            now_dt = _now_utc()
+            now_iso = now_dt.isoformat()
+            touched_events = False
+            touched_per_screen = False
+            activity_messages: list[tuple[str, str]] = []  # (text, kind) to log after lock release
+            with _STATE_LOCK:
+                for ev in _events:
+                    state = ev.get("state")
+                    # Auto-start
+                    if state == "signed-off":
+                        start_dt = _parse_iso_utc(ev.get("startAt", ""))
+                        if start_dt and start_dt <= now_dt:
+                            targets = _target_screen_ids_for_event(ev)
+                            # Mirror the /start endpoint's conflict check:
+                            # if any target is already in another live event,
+                            # SKIP (log + leave in signed-off). Operator must
+                            # intervene.
+                            conflict = None
+                            for other in _events:
+                                if other.get("id") == ev.get("id") or other.get("state") != "active":
+                                    continue
+                                other_t = set(_target_screen_ids_for_event(other))
+                                if other_t.intersection(targets):
+                                    conflict = other.get("id")
+                                    break
+                            if conflict:
+                                print(f"[event-scheduler] {ev.get('id')} not auto-started: targets conflict with active event {conflict}", file=sys.stderr)
+                                continue
+                            if not targets:
+                                print(f"[event-scheduler] {ev.get('id')} not auto-started: no targets resolved", file=sys.stderr)
+                                continue
+                            # Splashes already validated at sign-off time;
+                            # defensively re-check so a mid-flight PATCH
+                            # that cleared one doesn't crash the daemon.
+                            sp = ev.get("splashes") or {}
+                            if not sp.get("portrait") or not sp.get("landscape"):
+                                print(f"[event-scheduler] {ev.get('id')} not auto-started: splashes missing", file=sys.stderr)
+                                continue
+                            for device_id in targets:
+                                _snapshot_screen_for_event(ev, device_id)
+                                _apply_event_override_to_screen(ev, device_id)
+                            ev["state"] = "active"
+                            ev["startedAt"] = now_iso
+                            ev["updatedAt"] = now_iso
+                            touched_events = True
+                            touched_per_screen = True
+                            activity_messages.append((
+                                f"Auto-started event '{ev.get('name') or ev.get('id')}' on {len(targets)} screen(s)",
+                                "event",
+                            ))
+                    # Auto-stop
+                    elif state == "active":
+                        end_dt = _parse_iso_utc(ev.get("endAt", ""))
+                        if end_dt and end_dt <= now_dt:
+                            snaps = dict(ev.get("snapshots") or {})
+                            for device_id in snaps.keys():
+                                _restore_screen_from_event(ev, device_id)
+                            ev["state"] = "ended"
+                            ev["endedAt"] = now_iso
+                            ev["updatedAt"] = now_iso
+                            ev["snapshots"] = {}
+                            touched_events = True
+                            touched_per_screen = True
+                            activity_messages.append((
+                                f"Auto-ended event '{ev.get('name') or ev.get('id')}' — {len(snaps)} screen(s) restored",
+                                "event",
+                            ))
+                        else:
+                            joined, left = _sync_live_event_targets(ev)
+                            if joined or left:
+                                ev["updatedAt"] = now_iso
+                                touched_events = True
+                                touched_per_screen = True
+                                name = ev.get("name") or ev.get("id")
+                                if joined:
+                                    activity_messages.append((f"{len(joined)} screen(s) joined live event '{name}'", "event"))
+                                if left:
+                                    activity_messages.append((f"{len(left)} screen(s) left live event '{name}', back on their playlists", "event"))
+
+                # E2.5 preview auto-restore. Each per-screen state can
+                # carry a `_previewExpiresAtMs` + `_previewSnapshot` set
+                # by the preview endpoint; when expiry passes, restore.
+                for device_id, s in list(_per_screen.items()):
+                    expires_ms = s.get("_previewExpiresAtMs")
+                    if not expires_ms:
+                        continue
+                    if expires_ms > int(now_dt.timestamp() * 1000):
+                        continue
+                    _cancel_preview_on(s)
+                    s["revision"] = int(s.get("revision") or 0) + 1
+                    s["pushedAt"] = now_dt.timestamp()
+                    touched_per_screen = True
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    activity_messages.append((
+                        f"Test on {screen_name} finished — back to its playlist",
+                        "preview",
+                    ))
+
+                if touched_events:
+                    _save_events()
+                if touched_per_screen:
+                    _save_per_screen_soon()
+            # Log activity outside the lock so a slow activity sink
+            # (future webhook, etc.) can't stall the daemon.
+            for text, kind in activity_messages:
+                _log_activity(kind=kind, text=text, icon="check")
+        except Exception as e:
+            print(f"[event-scheduler] tick failed: {e}", file=sys.stderr)
+            # Keep looping — daemon must never die silently.
+
+
+def _validate_event_payload(body: dict, *, require_name: bool = True) -> tuple[dict | None, str | None]:
+    """Shape-check POST/PATCH input. Returns (clean_patch, None) on
+    success or (None, error) on invalid. require_name=False lets a
+    PATCH update any subset of fields."""
+    out: dict = {}
+
+    name = (body.get("name") or "").strip() if isinstance(body.get("name"), str) else ""
+    if require_name and not name:
+        return None, "Missing 'name'"
+    if name:
+        if len(name) > 120:
+            return None, "name too long (max 120 chars)"
+        out["name"] = name
+
+    for date_field in ("startAt", "endAt"):
+        if date_field in body:
+            raw = body.get(date_field)
+            if raw is None:
+                out[date_field] = None  # manual-only mode
+            else:
+                parsed = _parse_iso_utc(raw) if isinstance(raw, str) else None
+                if parsed is None:
+                    return None, f"Invalid {date_field} (ISO-8601 UTC expected or null)"
+                out[date_field] = parsed.isoformat()
+
+    if "targetMode" in body:
+        tm = body.get("targetMode")
+        if tm not in ("stores", "screens"):
+            return None, "targetMode must be 'stores' or 'screens'"
+        out["targetMode"] = tm
+
+    if "stores" in body:
+        stores = body.get("stores") or []
+        if not isinstance(stores, list) or not all(isinstance(s, str) and s for s in stores):
+            return None, "stores must be a list of storeId strings"
+        out["stores"] = list(dict.fromkeys(stores))
+
+    if "screens" in body:
+        screens = body.get("screens") or []
+        if not isinstance(screens, list) or not all(isinstance(s, str) and s for s in screens):
+            return None, "screens must be a list of deviceId strings"
+        out["screens"] = list(dict.fromkeys(screens))
+
+    def _clean_item(item, where):
+        if not isinstance(item, dict):
+            return None, f"{where} must be an object"
+        if not item.get("id") or not item.get("url"):
+            return None, f"{where} needs id and url"
+        return {
+            "id":          item.get("id"),
+            "title":       item.get("title") or item.get("id"),
+            "brand":       item.get("brand"),
+            "product":     item.get("product"),
+            "durationSec": item.get("durationSec") or 15,
+            "url":         item.get("url"),
+            "sizeMb":      item.get("sizeMb"),
+            "width":       item.get("width"),
+            "height":      item.get("height"),
+            "type":        item.get("type") or "video",
+        }, None
+
+    # v0.2.15 shape: splashes.portrait + splashes.landscape are the
+    # event-wide fallback content. Each is an item shape (same as a
+    # playlist item). Both are REQUIRED to /start, but at /create and
+    # /patch time either can be unset so the operator can fill them in
+    # progressively.
+    if "splashes" in body:
+        sp = body.get("splashes")
+        if sp is None:
+            out["splashes"] = {}
+        elif not isinstance(sp, dict):
+            return None, "splashes must be an object or null"
+        else:
+            cleaned_sp: dict = {}
+            for key in ("portrait", "landscape"):
+                if key not in sp:
+                    continue
+                raw = sp.get(key)
+                if raw is None:
+                    cleaned_sp[key] = None
+                    continue
+                item, err = _clean_item(raw, f"splashes.{key}")
+                if err:
+                    return None, err
+                cleaned_sp[key] = item
+            out["splashes"] = cleaned_sp
+
+    if "splashOn" in body:
+        v = body.get("splashOn")
+        if not isinstance(v, bool):
+            return None, "splashOn must be a boolean"
+        out["splashOn"] = v
+
+    # v0.2.15: per-screen content assignments. Nested shape:
+    #   { deviceId: { items: [...], splashOn: null|bool } }
+    # Null splashOn means "inherit the master setting"; True/False
+    # override just for this screen.
+    if "screenAssignments" in body:
+        sa = body.get("screenAssignments")
+        if sa is None:
+            out["screenAssignments"] = {}
+        elif not isinstance(sa, dict):
+            return None, "screenAssignments must be an object or null"
+        else:
+            cleaned_sa: dict = {}
+            for device_id, entry in sa.items():
+                if not isinstance(device_id, str) or not device_id:
+                    return None, "screenAssignments keys must be deviceId strings"
+                if not isinstance(entry, dict):
+                    return None, f"screenAssignments[{device_id}] must be an object"
+                items_raw = entry.get("items") or []
+                if not isinstance(items_raw, list):
+                    return None, f"screenAssignments[{device_id}].items must be a list"
+                items_cleaned = []
+                for i, raw in enumerate(items_raw):
+                    item, err = _clean_item(raw, f"screenAssignments[{device_id}].items[{i}]")
+                    if err:
+                        return None, err
+                    items_cleaned.append(item)
+                sp_on = entry.get("splashOn")
+                if sp_on is not None and not isinstance(sp_on, bool):
+                    return None, f"screenAssignments[{device_id}].splashOn must be bool or null"
+                cleaned_sa[device_id] = {"items": items_cleaned, "splashOn": sp_on}
+            out["screenAssignments"] = cleaned_sa
+
+    if "overrides" in body:
+        ov = body.get("overrides")
+        if ov is not None and not isinstance(ov, dict):
+            return None, "overrides must be an object or null"
+        out["overrides"] = ov or {}
+
+    # endAt > startAt when both set.
+    if "startAt" in out and "endAt" in out and out["startAt"] and out["endAt"]:
+        s_dt = _parse_iso_utc(out["startAt"]) ; e_dt = _parse_iso_utc(out["endAt"])
+        if s_dt and e_dt and e_dt <= s_dt:
+            return None, "endAt must be after startAt"
+
+    return out, None
+
+
+def _public_event(event: dict) -> dict:
+    """CMS-shape projection. Strips snapshots (not useful on the wire)
+    and attaches a computed `effectiveScreenCount` so the list view
+    can show how many screens an event targets right now (resolving
+    stores against the live fleet for targetMode='stores')."""
+    # Snapshots can hold a web page screen's token URL; `controlled` is
+    # internal restore bookkeeping. Neither goes to the CMS.
+    out = {k: v for k, v in event.items() if k not in ("snapshots", "controlled")}
+    try:
+        with _STATE_LOCK:
+            # v0.2.20: the deviceIds too, so the Events page can list each
+            # screen and give it its own content. While live that's the
+            # screens the event actually holds (the ones it'll restore).
+            if event.get("state") == "active" and event.get("snapshots"):
+                ids = list(event["snapshots"].keys())
+            else:
+                ids = _target_screen_ids_for_event(event)
+            out["targetScreenIds"] = ids
+            out["effectiveScreenCount"] = len(ids)
+    except Exception:
+        out["effectiveScreenCount"] = len(event.get("screens") or []) or len(event.get("stores") or [])
+    return out
+
+
+# _parse_iso_utc + _now_utc are defined by the campaigns PR when it
+# lands; include a local alternative here so the events branch builds
+# standalone if campaigns hasn't merged yet. The campaigns version
+# wins at import time if both are present (Python's "last wins" rule).
+try:
+    _parse_iso_utc  # noqa: F821
+except NameError:
+    def _parse_iso_utc(value):
+        import datetime
+        if not isinstance(value, str) or not value:
+            return None
+        s = value.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.datetime.fromisoformat(s)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc)
+try:
+    _now_utc  # noqa: F821
+except NameError:
+    def _now_utc():
+        import datetime
+        return datetime.datetime.now(datetime.timezone.utc)
 
 
 # v0.1.96 — the self-containment check. This is the rule that makes a guided
@@ -900,22 +2082,80 @@ def _save_secrets() -> None:
 # a logoUrl, breaking ties on higher liveCount.
 _BRAND_LOGO_CACHE: dict = {"fetchedAt": 0.0, "map": {}, "hash": "0"}
 _BRAND_LOGO_TTL = 6 * 60 * 60   # 6 hours
+# v0.2.15: non-blocking refresh. Request threads NEVER hold the Cloud Run
+# instance while this cache is being hydrated — if the TTL has expired, the
+# caller returns the stale map immediately and a single background thread
+# refreshes. Fixes the 2026-10-16 incident where N screens polling in
+# parallel each ran a synchronous `/brands` fetch under `_STATE_LOCK`, and
+# with the tm:rw index API 429-ing, every one of them held the lock for
+# ~8s × retry chain → fleet-wide pile-up → Cloud Run 300s timeouts.
+_BRAND_LOGO_REFRESH_LOCK = threading.Lock()
+# Timestamp of the last 429 from tm:rw; if we got rate-limited, wait at
+# least this long before trying again (seconds). Prevents the caller's own
+# refresh storms from compounding the problem we're mitigating.
+_TMRW_RATE_LIMIT_BACKOFF_SEC = 300.0   # 5 min
+_BRAND_LOGO_429_UNTIL = 0.0
 
 
 def _brand_logo_map() -> dict:
-    """Return {brandNameLower: logoUrl}. Best-effort: a missing key,
-    network error, or unexpected shape leaves the previous map in place
-    (or an empty one) so the library still serves — brands just render
-    their generated letter mark instead of a logo."""
+    """Return {brandNameLower: logoUrl}. Non-blocking: on TTL expiry
+    returns the current (stale) map and kicks a background refresh.
+    Best-effort: a missing key, network error, or unexpected shape
+    leaves the previous map in place (or an empty one) so the library
+    still serves — brands just render their generated letter mark."""
     now = time.time()
     cached = _BRAND_LOGO_CACHE["map"]
-    if cached and (now - _BRAND_LOGO_CACHE["fetchedAt"]) < _BRAND_LOGO_TTL:
+    fresh_enough = cached and (now - _BRAND_LOGO_CACHE["fetchedAt"]) < _BRAND_LOGO_TTL
+    if fresh_enough:
         return cached
+    # Need to refresh. Return current cache immediately; a background
+    # thread does the slow HTTP work. First-ever call (no cache at all)
+    # waits for the synchronous one-shot hydrate so startup doesn't
+    # serve a totally empty map — subsequent calls return instantly.
+    if cached:
+        _schedule_brand_logo_refresh()
+        return cached
+    # Cold hydrate — one-shot, synchronous, serialised so N parallel
+    # callers don't all fire a /brands request.
+    with _BRAND_LOGO_REFRESH_LOCK:
+        if _BRAND_LOGO_CACHE["map"]:
+            return _BRAND_LOGO_CACHE["map"]
+        _brand_logo_refresh_now()
+    return _BRAND_LOGO_CACHE["map"]
+
+
+def _schedule_brand_logo_refresh() -> None:
+    """Fire a one-shot background refresh if nothing's running already.
+    Request threads never block on this — they continue with the stale
+    map."""
+    if not _BRAND_LOGO_REFRESH_LOCK.acquire(blocking=False):
+        return
+    def _worker():
+        try:
+            _brand_logo_refresh_now()
+        except Exception as e:
+            print(f"[brandlogos] background refresh crashed: {e}", file=sys.stderr)
+        finally:
+            _BRAND_LOGO_REFRESH_LOCK.release()
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _brand_logo_refresh_now() -> None:
+    """Does the actual /brands fetch + map rebuild. Must only be called
+    with _BRAND_LOGO_REFRESH_LOCK held (either the cold-hydrate path
+    above or the background worker)."""
+    global _BRAND_LOGO_429_UNTIL
+    now = time.time()
+    cached = _BRAND_LOGO_CACHE["map"]
+    # Honour 429 backoff — don't hammer tm:rw while it's rate-limiting us.
+    if now < _BRAND_LOGO_429_UNTIL:
+        _BRAND_LOGO_CACHE["fetchedAt"] = now
+        return
     entry = _secrets.get("brandApiKey") or {}
     key = (entry.get("value") or "").strip()
     if not key:
         _BRAND_LOGO_CACHE["fetchedAt"] = now   # don't retry every poll
-        return cached
+        return
     req = urllib.request.Request(
         f"{BRAND_API_BASE}/brands",
         headers={"X-API-Key": key, "Accept": "application/json"},
@@ -923,10 +2163,18 @@ def _brand_logo_map() -> dict:
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
             rows = json.loads(resp.read().decode("utf-8") or "[]")
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            _BRAND_LOGO_429_UNTIL = now + _TMRW_RATE_LIMIT_BACKOFF_SEC
+            print(f"[brandlogos] /brands rate-limited; backing off {_TMRW_RATE_LIMIT_BACKOFF_SEC:.0f}s", file=sys.stderr)
+        else:
+            print(f"[brandlogos] /brands fetch failed: HTTP {e.code}", file=sys.stderr)
+        _BRAND_LOGO_CACHE["fetchedAt"] = now
+        return
     except Exception as e:
         print(f"[brandlogos] /brands fetch failed: {e}", file=sys.stderr)
         _BRAND_LOGO_CACHE["fetchedAt"] = now
-        return cached
+        return
     best: dict[str, dict] = {}
     for r in rows if isinstance(rows, list) else []:
         name = (r.get("name") or "").strip()
@@ -949,7 +2197,6 @@ def _brand_logo_map() -> dict:
     ).hexdigest()[:8]
     _BRAND_LOGO_CACHE.update({"map": new_map, "fetchedAt": now, "hash": new_hash})
     print(f"[brandlogos] {len(new_map)} brand logo(s) from tm:rw", file=sys.stderr)
-    return new_map
 
 
 # v0.1.64: assigned-video map from the tm:rw index /videos feed. Lets
@@ -1030,28 +2277,72 @@ def _extract_prices(row: dict) -> dict | None:
     return out or None
 
 
+# v0.2.15: non-blocking refresh for _tmrw_videos_map, same pattern as
+# _brand_logo_map above. The refresh is particularly brutal — one GET
+# /videos + N × 2 GET /product + /description calls (per unique SKU) each
+# with a 6s timeout. On 2026-10-16, when tm:rw's index API started 429-ing
+# us, a single refresh ran for minutes while holding _STATE_LOCK on the
+# fleet-wide /api/state path. The whole Cloud Run instance stalled, every
+# request hit the 300s request timeout, service dark. Fix: request threads
+# NEVER wait for the refresh — they get the stale map immediately; a
+# single background worker rebuilds; 429s trigger a 5-min backoff so we
+# don't hammer tm:rw while it's catching its breath.
+_TMRW_VIDEOS_REFRESH_LOCK = threading.Lock()
+_TMRW_VIDEOS_429_UNTIL = 0.0
+
+
 def _tmrw_videos_map() -> dict:
-    """Return {brandLower: {"display": <brand>, "videos": {fileNameLower:
-    {fileName, productName, active, orientation, resolution, sku, scope}}}}.
-
-    v0.1.65: one GET /videos call for the whole assigned-video set
-    (marketing videos are few relative to products), grouped by brand —
-    so a tm:rw brand with assigned videos shows up even if it has no
-    Drive folder yet (e.g. "Moods"). Brand-scope rows carry the brand in
-    scopeKey; family/product-scope rows fall back to an explicit `brand`
-    field if present, else scopeKey.
-
-    Best-effort: missing key / network error leaves the previous map in
-    place so the library still serves."""
+    """Non-blocking entry point. Returns the current (possibly stale)
+    brand → videos map immediately; on TTL expiry fires a background
+    refresh. First call ever cold-hydrates once (serialised across
+    callers) so we don't serve an empty map at startup."""
     now = time.time()
     cached = _TMRW_VIDEOS_CACHE["byBrand"]
-    if cached and (now - _TMRW_VIDEOS_CACHE["fetchedAt"]) < _TMRW_VIDEOS_TTL:
+    fresh_enough = cached and (now - _TMRW_VIDEOS_CACHE["fetchedAt"]) < _TMRW_VIDEOS_TTL
+    if fresh_enough:
         return cached
+    if cached:
+        _schedule_tmrw_videos_refresh()
+        return cached
+    # Cold hydrate — serialised so N parallel callers run ONE refresh.
+    with _TMRW_VIDEOS_REFRESH_LOCK:
+        if _TMRW_VIDEOS_CACHE["byBrand"]:
+            return _TMRW_VIDEOS_CACHE["byBrand"]
+        _tmrw_videos_refresh_now()
+    return _TMRW_VIDEOS_CACHE["byBrand"]
+
+
+def _schedule_tmrw_videos_refresh() -> None:
+    """Fire a one-shot background refresh if nothing's running. Request
+    threads NEVER block on this — they continue with the stale map."""
+    if not _TMRW_VIDEOS_REFRESH_LOCK.acquire(blocking=False):
+        return
+    def _worker():
+        try:
+            _tmrw_videos_refresh_now()
+        except Exception as e:
+            print(f"[tmrwvideos] background refresh crashed: {e}", file=sys.stderr)
+        finally:
+            _TMRW_VIDEOS_REFRESH_LOCK.release()
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _tmrw_videos_refresh_now() -> None:
+    """Does the actual /videos + per-SKU enrichment fetch. Must only be
+    called with _TMRW_VIDEOS_REFRESH_LOCK held (cold-hydrate or
+    background worker). Writes into _TMRW_VIDEOS_CACHE in place."""
+    global _TMRW_VIDEOS_429_UNTIL
+    now = time.time()
+    cached = _TMRW_VIDEOS_CACHE["byBrand"]
+    # Honour 429 backoff — don't hammer tm:rw while it's rate-limiting us.
+    if now < _TMRW_VIDEOS_429_UNTIL:
+        _TMRW_VIDEOS_CACHE["fetchedAt"] = now
+        return
     entry = _secrets.get("brandApiKey") or {}
     key = (entry.get("value") or "").strip()
     if not key:
         _TMRW_VIDEOS_CACHE["fetchedAt"] = now
-        return cached
+        return
     req = urllib.request.Request(
         f"{BRAND_API_BASE}/videos",
         headers={"X-API-Key": key, "Accept": "application/json"},
@@ -1059,10 +2350,18 @@ def _tmrw_videos_map() -> dict:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             rows = json.loads(resp.read().decode("utf-8") or "[]")
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            _TMRW_VIDEOS_429_UNTIL = now + _TMRW_RATE_LIMIT_BACKOFF_SEC
+            print(f"[tmrwvideos] /videos rate-limited; backing off {_TMRW_RATE_LIMIT_BACKOFF_SEC:.0f}s", file=sys.stderr)
+        else:
+            print(f"[tmrwvideos] /videos fetch failed: HTTP {e.code}", file=sys.stderr)
+        _TMRW_VIDEOS_CACHE["fetchedAt"] = now
+        return
     except Exception as e:
         print(f"[tmrwvideos] /videos fetch failed: {e}", file=sys.stderr)
         _TMRW_VIDEOS_CACHE["fetchedAt"] = now
-        return cached
+        return
     # v0.1.70: brand attribution. Brand-scope rows carry the brand in
     # scopeKey, but product/family-scope rows carry the SKU / familyId
     # there and have NO brand field — so the old "group by scopeKey"
@@ -1075,11 +2374,32 @@ def _tmrw_videos_map() -> dict:
     # refresh via a single /product?sku= call and shared by both brand
     # resolution AND the Content Library packshot thumbnails.
     _sku_detail: dict[str, dict] = {}
+    # v0.2.15: fail-fast flag — if tm:rw starts rate-limiting us mid-refresh,
+    # abort instead of grinding through N × (/product + /description) calls
+    # that will all 429 anyway. Caller's 5-min backoff then prevents the
+    # next refresh from piling on top. We use a dict instead of a bare bool
+    # so the closure writes propagate (no `nonlocal` boilerplate).
+    _state = {"ratelimited": False}
+
+    def _tmrw_backoff_now() -> None:
+        """Trigger the shared 429 backoff — one scare is enough to stop
+        the whole refresh. The next scheduled refresh is deferred by
+        _TMRW_RATE_LIMIT_BACKOFF_SEC seconds."""
+        global _TMRW_VIDEOS_429_UNTIL
+        _TMRW_VIDEOS_429_UNTIL = time.time() + _TMRW_RATE_LIMIT_BACKOFF_SEC
+        _state["ratelimited"] = True
+        print(f"[tmrwvideos] 429 observed — aborting this refresh, backing off {_TMRW_RATE_LIMIT_BACKOFF_SEC:.0f}s", file=sys.stderr)
 
     def _product_detail(sku: str) -> dict:
         if sku not in _sku_detail:
             d: dict = {"brand": None, "packshot": None,
                        "descShort": None, "descLong": None, "prices": None}
+            # Short-circuit — if a prior call this refresh already saw a
+            # 429, don't make more calls. Caller treats the empty dict
+            # as "unresolved".
+            if _state["ratelimited"]:
+                _sku_detail[sku] = d
+                return d
             try:
                 preq = urllib.request.Request(
                     f"{BRAND_API_BASE}/product?sku={urllib.parse.quote(sku)}",
@@ -1103,22 +2423,33 @@ def _tmrw_videos_map() -> dict:
                     # lives in driveUrl; for others (e.g. Foreo) filePath itself
                     # is the Drive URL and driveUrl is null. Try driveUrl first.
                     d["packshot"] = _drive_thumb_url(main.get("driveUrl") or main.get("filePath"))
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    _tmrw_backoff_now()
+                else:
+                    print(f"[tmrwvideos] product lookup for sku {sku} failed: HTTP {e.code}", file=sys.stderr)
             except Exception as e:
                 print(f"[tmrwvideos] product lookup for sku {sku} failed: {e}", file=sys.stderr)
             # v0.1.86: short/long marketing copy for the product card, from the
             # dedicated /description endpoint. Separate best-effort call so a
             # description miss never loses the packshot/brand fetched above.
-            try:
-                dreq = urllib.request.Request(
-                    f"{BRAND_API_BASE}/description?sku={urllib.parse.quote(sku)}",
-                    headers={"X-API-Key": key, "Accept": "application/json"},
-                )
-                with urllib.request.urlopen(dreq, timeout=6) as dresp:
-                    ddata = json.loads(dresp.read().decode("utf-8") or "{}")
-                d["descShort"] = (ddata.get("short") or "").strip() or None
-                d["descLong"] = (ddata.get("long") or "").strip() or None
-            except Exception as e:
-                print(f"[tmrwvideos] description lookup for sku {sku} failed: {e}", file=sys.stderr)
+            if not _state["ratelimited"]:
+                try:
+                    dreq = urllib.request.Request(
+                        f"{BRAND_API_BASE}/description?sku={urllib.parse.quote(sku)}",
+                        headers={"X-API-Key": key, "Accept": "application/json"},
+                    )
+                    with urllib.request.urlopen(dreq, timeout=6) as dresp:
+                        ddata = json.loads(dresp.read().decode("utf-8") or "{}")
+                    d["descShort"] = (ddata.get("short") or "").strip() or None
+                    d["descLong"] = (ddata.get("long") or "").strip() or None
+                except urllib.error.HTTPError as e:
+                    if e.code == 429:
+                        _tmrw_backoff_now()
+                    else:
+                        print(f"[tmrwvideos] description lookup for sku {sku} failed: HTTP {e.code}", file=sys.stderr)
+                except Exception as e:
+                    print(f"[tmrwvideos] description lookup for sku {sku} failed: {e}", file=sys.stderr)
             _sku_detail[sku] = d
         return _sku_detail[sku]
 
@@ -1136,6 +2467,11 @@ def _tmrw_videos_map() -> dict:
         if not bl:
             return []
         if bl not in _brand_products_cache:
+            # v0.2.15: honour the shared 429 abort flag — don't ask tm:rw
+            # for more while it's rate-limiting us.
+            if _state["ratelimited"]:
+                _brand_products_cache[bl] = []
+                return []
             got: list = []
             try:
                 preq = urllib.request.Request(
@@ -1144,6 +2480,12 @@ def _tmrw_videos_map() -> dict:
                 )
                 with urllib.request.urlopen(preq, timeout=8) as presp:
                     got = json.loads(presp.read().decode("utf-8") or "[]")
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    _tmrw_backoff_now()
+                else:
+                    print(f"[tmrwvideos] products for brand {brand!r} failed: HTTP {e.code}", file=sys.stderr)
+                got = []
             except Exception as e:
                 print(f"[tmrwvideos] products for brand {brand!r} failed: {e}", file=sys.stderr)
                 got = []
@@ -1273,7 +2615,6 @@ def _tmrw_videos_map() -> dict:
     _TMRW_VIDEOS_CACHE.update({"byBrand": by_brand, "fetchedAt": now, "hash": new_hash})
     total = sum(len(v["videos"]) for v in by_brand.values())
     print(f"[tmrwvideos] {total} assigned video(s) across {len(by_brand)} brand(s) from tm:rw", file=sys.stderr)
-    return by_brand
 
 
 def _library_with_logos() -> tuple[dict, str]:
@@ -1300,6 +2641,14 @@ def _library_with_logos() -> tuple[dict, str]:
             ({**b, "logoUrl": logos.get((b.get("name") or "").lower())}
              if logos.get((b.get("name") or "").lower()) else b)
             for b in brands
+        ]
+    # Every brand carries a products list: the upload path used to auto-add
+    # brands without one (the Events splash uploads' "Events" brand), and the
+    # Settings page reads b.products.length.
+    if isinstance(out.get("brands"), list):
+        out["brands"] = [
+            b if isinstance(b.get("products"), list) else {**b, "products": []}
+            for b in out["brands"] if isinstance(b, dict)
         ]
 
     # Tag scanned videos + track which assigned videos we matched, so
@@ -1594,6 +2943,22 @@ def _load_state_from_disk() -> None:
                     print(f"[state] {EXPERIENCES_JSON}: top-level isn't a list, skipping", file=sys.stderr)
             except Exception as e:
                 print(f"[state] load {EXPERIENCES_JSON} failed: {e}", file=sys.stderr)
+
+        # v0.2.15: events — same list-shaped pattern. Active events
+        # carry their snapshots inline, so a crash/restart mid-event
+        # restores the full event state (including which screens are
+        # overridden and what to restore them to).
+        global _events
+        if EVENTS_JSON.is_file():
+            try:
+                raw = json.loads(EVENTS_JSON.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    _events = raw
+                    print(f"[state] loaded {len(raw)} events from {EVENTS_JSON}", file=sys.stderr)
+                else:
+                    print(f"[state] {EVENTS_JSON}: top-level isn't a list, skipping", file=sys.stderr)
+            except Exception as e:
+                print(f"[state] load {EVENTS_JSON} failed: {e}", file=sys.stderr)
 
 
 # ── Activity log ─────────────────────────────────────────────────────
@@ -1946,6 +3311,17 @@ def _ensure_screen_state(device_id: str) -> dict:
             # calibrate to (now + duration). The tablet renders the
             # overlay until `correctedNow()` passes this value.
             "calibrateUntilMs": None,
+            # v0.2.16: what the screen shows. "playlist" (default, every
+            # existing screen) or "web" — one live URL full screen, for
+            # dashboards like the London office board. `web` holds
+            # {url, reloadEveryMin}; it survives a switch back to
+            # playlist so flipping to web again doesn't need the URL
+            # re-pasted. The URL carries a display token: it is only ever
+            # sent to the screen itself (device secret required, see
+            # /api/state) and never to the CMS or the logs. Modern player
+            # only. Set via /api/screens/<id>/content-mode.
+            "contentMode": "playlist",
+            "web": None,
             "pendingCommands": [],                 # list of pending commands for this screen
         }
         _per_screen[device_id] = s
@@ -1969,6 +3345,64 @@ def _ensure_screen_state(device_id: str) -> dict:
     if "calibrateUntilMs" not in s:
         s["calibrateUntilMs"] = None
     return s
+
+
+# ── Web page mode (v0.2.16) ──────────────────────────────────────────
+# The web URL carries a display token, so it's treated like a secret:
+# stored server-side, sent only to the screen that owns it, and shown to
+# the CMS (and the activity log) as host + a short tail hint only.
+WEB_RELOAD_DEFAULT_MIN = 240           # full reload every 4h unless set
+WEB_RELOAD_MAX_MIN = 1440
+# v0.2.17: the width (CSS px) the player lays the page out at before scaling
+# it to fit. Without it Android uses the box's density-adjusted width (960 px
+# on a 1080p box at 2x), which crops a page built for 1920x1080. 0 = no
+# override (the device's own width, like a tablet browser).
+WEB_PAGE_WIDTH_DEFAULT = 1920
+WEB_PAGE_WIDTH_MIN = 640
+WEB_PAGE_WIDTH_MAX = 3840
+# v0.2.23: dashboard boxes (the office Elo) fell to Android's lock screen
+# after a while. "always" = the player holds the screen on and shows the page
+# over the lock screen; "hours" = only between awakeFrom and awakeTo (store
+# local time), letting the box sleep and lock outside them; "off" = the box's
+# own sleep/lock settings apply.
+WEB_KEEP_AWAKE_MODES = ("always", "hours", "off")
+WEB_KEEP_AWAKE_DEFAULT = "always"
+WEB_AWAKE_FROM_DEFAULT = "08:00"
+WEB_AWAKE_TO_DEFAULT = "19:00"
+_HHMM_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+def _web_host(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        return urllib.parse.urlparse(url).hostname or None
+    except ValueError:
+        return None
+
+
+def _web_url_hint(url: str | None) -> str | None:
+    """Host plus the last 4 characters, so an operator can tell two
+    pasted URLs apart without the CMS ever holding the token."""
+    if not url:
+        return None
+    host = _web_host(url) or "?"
+    return f"{host}/…{url[-4:]}" if len(url) > len(host) + 12 else host
+
+
+def _web_public(state: dict) -> dict:
+    """CMS-safe view of a screen's web settings — never the URL."""
+    web = state.get("web") or {}
+    return {
+        "contentMode": state.get("contentMode") or "playlist",
+        "webHost": _web_host(web.get("url")),
+        "webUrlHint": _web_url_hint(web.get("url")),
+        "webReloadEveryMin": web.get("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN) if web else None,
+        "webPageWidth": web.get("pageWidth", WEB_PAGE_WIDTH_DEFAULT) if web else None,
+        "webKeepAwake": web.get("keepAwake", WEB_KEEP_AWAKE_DEFAULT) if web else None,
+        "webAwakeFrom": web.get("awakeFrom", WEB_AWAKE_FROM_DEFAULT) if web else None,
+        "webAwakeTo": web.get("awakeTo", WEB_AWAKE_TO_DEFAULT) if web else None,
+    }
 
 
 # ── Sync groups ──────────────────────────────────────────────────────
@@ -2952,6 +4386,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path.split("?", 1)[0] == "/api/library/upload":
             self._serve_api_library_upload()
             return
+        m_chunk = re.match(r"^/api/library/upload-chunks/([0-9a-f]{16})(/complete)?$", self.path.split("?", 1)[0])
+        if m_chunk:
+            self._serve_api_library_upload_chunk(m_chunk.group(1), bool(m_chunk.group(2)))
+            return
         if self.path.split("?", 1)[0] == "/api/splashes/upload":
             self._serve_api_splash_upload()
             return
@@ -3065,6 +4503,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             message = safe
         super().send_error(code, message, explain)
 
+    def _client_ip(self) -> str:
+        """The caller's address. Behind Cloud Run the socket peer is Google's
+        front end, so take the first X-Forwarded-For hop."""
+        fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        return fwd or (self.client_address[0] if self.client_address else "")
+
     def _send_json(
         self,
         payload: dict,
@@ -3129,7 +4573,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length)
         try:
-            return json.loads(raw.decode("utf-8"))
+            # strict=False accepts raw newlines/tabs inside strings. The
+            # player hand-builds its /api/logs + /api/crashes JSON and only
+            # escapes \ and ", so a warning carrying a stack trace arrives
+            # with literal newlines. Strict parsing 400'd it, and the tablet
+            # retried that same batch forever, shipping nothing after it.
+            return json.loads(raw.decode("utf-8"), strict=False)
         except Exception:
             return {}
 
@@ -3322,27 +4771,45 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         for p in parts if p["name"] == "product"), "")
         duration_raw = next((p["data"].decode("utf-8", "replace").strip()
                              for p in parts if p["name"] == "durationSec"), "")
+        # v0.2.20: opt-in compression (the Events splash uploader sets it).
+        # Off by default so big library uploads don't tie up the instance.
+        want_compress = next((p["data"].decode("utf-8", "replace").strip()
+                              for p in parts if p["name"] == "compress"), "") in ("1", "true")
 
         if file_part is None:
             self.send_error(400, "Missing 'file' field"); return
         if not brand:
             self.send_error(400, "Missing 'brand' field"); return
-        # Light video-mime sniff — Content-Type from the form is taken
-        # as best-effort. If absent or wrong, fall back to extension.
         part_ctype = (file_part.get("content_type") or "").lower()
         orig_name = file_part.get("filename") or "upload.mp4"
+        file_bytes = file_part["data"]
+        # The raw body and the parsed parts are each a full copy of the
+        # video. Drop them before the encode so it isn't three copies deep.
+        del raw, parts, file_part
+        self._library_upload_finish(file_bytes, orig_name, part_ctype, brand, title,
+                                    product, duration_raw, want_compress)
+
+    def _library_upload_finish(self, file_bytes: bytes, orig_name: str, part_ctype: str,
+                               brand: str, title: str, product: str,
+                               duration_raw: str, want_compress: bool) -> None:
+        """Validate one uploaded file and store it (or queue its compress job).
+        Shared by the one-request multipart upload and the chunked one."""
+        # Light mime sniff — Content-Type from the form is taken as
+        # best-effort. If absent or wrong, fall back to extension.
+        # v0.2.20: stills (jpg/png/webp) are accepted too.
         ext = os.path.splitext(orig_name)[1].lower().lstrip(".") or "mp4"
-        if ext not in {"mp4", "mov", "m4v", "webm", "mkv"}:
+        is_image = ext in _UPLOAD_IMAGE_EXTS
+        if ext not in {"mp4", "mov", "m4v", "webm", "mkv"} and not is_image:
             self.send_error(415, f"Unsupported file extension: .{ext}"); return
         # Don't let a stray text/* or application/* through — they
         # won't play on the tablet and only waste storage.
         if part_ctype and not (
-            part_ctype.startswith("video/")
+            part_ctype.startswith("image/" if is_image else "video/")
             or part_ctype == "application/octet-stream"
         ):
             self.send_error(415, f"Unsupported content type: {part_ctype}"); return
 
-        duration_sec = 15
+        duration_sec = _UPLOAD_IMAGE_DWELL_SEC if is_image else 15
         if duration_raw:
             try:
                 duration_sec = max(1, min(600, int(float(duration_raw))))
@@ -3356,61 +4823,109 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # spaces. The library `id` is just `upload-<timestamp>` so
         # IDs never collide with Drive-synced or seeded entries.
         ts_ms = int(time.time() * 1000)
-        slug = _slug(title) or "video"
-        video_id = f"upload-{ts_ms}"
-        safe_filename = f"{video_id}-{slug}.{ext}"
-
-        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-        target = UPLOADS_DIR / safe_filename
-        with open(target, "wb") as fh:
-            fh.write(file_part["data"])
-        size_bytes = target.stat().st_size
-
-        # Append to library.json. We re-read fresh from disk rather
-        # than trust the in-memory cache so a concurrent Drive sync
-        # doesn't get clobbered.
-        if LIBRARY_JSON.is_file():
-            with open(LIBRARY_JSON, "r", encoding="utf-8") as f:
-                lib = json.load(f)
-        else:
-            lib = {"brands": [], "videos": []}
-        videos = lib.setdefault("videos", [])
-        brands = lib.setdefault("brands", [])
-
-        # Auto-register a brand record if this is the first video for
-        # an unknown brand. Keeps the brand picker self-healing — the
-        # CMS doesn't need a "create brand" flow for casual uploads.
-        if brand and not any((b.get("id") or "").lower() == brand.lower() for b in brands):
-            brands.append({"id": brand, "name": brand.replace("-", " ").title(), "videos": 0})
-
-        entry = {
-            "id":            video_id,
-            "title":         title,
-            "brand":         brand,
-            "product":       product or None,
-            "durationSec":   duration_sec,
-            "duration":      _fmt_duration(duration_sec),
-            "sizeMb":        round(size_bytes / 1_000_000.0, 1),
-            "filename":      safe_filename,
-            "mediaUrl":      f"/uploaded/{safe_filename}",
-            "uploadedAt":    int(time.time() * 1000),
-            "screens":       0,
-            "defaultUnmute": False,
+        meta = {
+            "video_id":       f"upload-{ts_ms}",
+            "slug":           _slug(title) or ("image" if is_image else "video"),
+            "title":          title,
+            "brand":          brand,
+            "product":        product,
+            "duration_sec":   duration_sec,
+            "duration_given": bool(duration_raw),
+            "is_image":       is_image,
         }
-        videos.append(entry)
 
-        LIBRARY_JSON.parent.mkdir(parents=True, exist_ok=True)
-        tmp = LIBRARY_JSON.with_suffix(LIBRARY_JSON.suffix + ".tmp")
-        tmp.write_text(json.dumps(lib, indent=2), encoding="utf-8")
-        tmp.replace(LIBRARY_JSON)
-        _LIBRARY_CACHE["mtime"] = 0.0   # force re-read on next GET
+        if want_compress:
+            # v0.2.20: compress in the background and hand back a job id the
+            # page polls for progress (GET /api/library/upload-jobs/<id>).
+            job_id = _start_upload_job(file_bytes, ext, meta)
+            self._send_json({"ok": True, "jobId": job_id}, status=202)
+            return
+        entry = _store_library_upload(file_bytes, ext, meta)
+        self._send_json({"ok": True, "video": entry, "compression": None})
 
-        _log_activity(
-            kind="upload",
-            text=f"Uploaded \"{title}\" to {brand}",
-            icon="upload",
-        )
-        self._send_json({"ok": True, "video": entry})
+    def _serve_api_library_upload_chunk(self, sid: str, complete: bool) -> None:
+        """v0.2.20: chunked upload, for files over Cloud Run's 32 MiB request
+        cap (its front end answers 413 before the request reaches us).
+          POST /api/library/upload-chunks/<sid>?index=N   raw bytes of chunk N
+          POST /api/library/upload-chunks/<sid>/complete  JSON {size, filename,
+               contentType, brand, title?, product?, durationSec?, compress?}
+        The client picks <sid> (16 hex). Chunks must arrive in order; resending
+        the last one is a no-op, so a retried chunk is safe. Complete hands
+        the file to the same finish step as a one-request upload."""
+        import tempfile
+        user = self._require_perm("library.edit")
+        if user is None:
+            return
+        owner = user.get("id") or user.get("email")
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.send_error(411, "Content-Length required"); return
+        if length < 0 or length > _CHUNK_MAX_BYTES:
+            self.send_error(413, f"Chunk too large (cap {_CHUNK_MAX_BYTES} bytes)"); return
+        body = self.rfile.read(length) if length else b""
+
+        if complete:
+            try:
+                fields = json.loads(body or b"{}")
+            except ValueError:
+                self.send_error(400, "Expected JSON"); return
+            with _CHUNK_LOCK:
+                sess = _CHUNK_SESSIONS.get(sid)
+                if sess is not None and sess["owner"] == owner:
+                    _CHUNK_SESSIONS.pop(sid, None)
+            if sess is None or sess["owner"] != owner:
+                self._send_json({"error": "not_found", "detail": "That upload expired. Try again."}, status=404); return
+            try:
+                if int(fields.get("size") or -1) != sess["size"]:
+                    self._send_json({"error": "incomplete", "detail": "Part of the file didn't arrive. Try again."}, status=400); return
+                data = sess["path"].read_bytes()
+            finally:
+                sess["path"].unlink(missing_ok=True)
+            brand = str(fields.get("brand") or "").strip()
+            if not brand:
+                self.send_error(400, "Missing 'brand' field"); return
+            self._library_upload_finish(
+                data, str(fields.get("filename") or "upload.mp4"),
+                str(fields.get("contentType") or "").lower(), brand,
+                str(fields.get("title") or "").strip(), str(fields.get("product") or "").strip(),
+                str(fields.get("durationSec") or "").strip(), bool(fields.get("compress")),
+            )
+            return
+
+        try:
+            index = int((urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("index") or ["-1"])[0])
+        except ValueError:
+            index = -1
+        with _CHUNK_LOCK:
+            now = time.time()
+            sess = _CHUNK_SESSIONS.get(sid)
+            if sess is None:
+                if index != 0:
+                    self._send_json({"error": "not_found", "detail": "That upload expired. Try again."}, status=404); return
+                for stale_id in [k for k, v in _CHUNK_SESSIONS.items() if now - v["touched"] > _CHUNK_SESSION_TTL_SEC]:
+                    _CHUNK_SESSIONS.pop(stale_id)["path"].unlink(missing_ok=True)
+                sess = {"owner": owner, "next": 0, "size": 0, "touched": now,
+                        "path": Path(tempfile.gettempdir()) / f"chunked-{sid}.part"}
+                sess["path"].write_bytes(b"")
+                _CHUNK_SESSIONS[sid] = sess
+            if sess["owner"] != owner:
+                self._send_json({"error": "forbidden"}, status=403); return
+            if index == sess["next"] - 1:
+                self._send_json({"ok": True, "received": sess["size"]}); return   # a retry
+            if index != sess["next"]:
+                self._send_json({"error": "out_of_order", "expected": sess["next"]}, status=409); return
+            if sess["size"] + len(body) > _CHUNKED_UPLOAD_MAX_BYTES:
+                _CHUNK_SESSIONS.pop(sid)["path"].unlink(missing_ok=True)
+                self._send_json({"error": "too_large",
+                                 "detail": f"That file is over {_CHUNKED_UPLOAD_MAX_BYTES // (1024 * 1024)} MB."}, status=413); return
+            with open(sess["path"], "ab") as fh:
+                fh.write(body)
+            sess["next"] += 1
+            sess["size"] += len(body)
+            sess["touched"] = now
+            received = sess["size"]
+        self._send_json({"ok": True, "received": received})
 
     def _serve_api_splash_upload(self) -> None:
         """POST /api/splashes/upload — multipart/form-data with fields:
@@ -3490,6 +5005,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         ):
             self.send_error(415, f"Unsupported content type: {part_ctype}"); return
 
+        file_bytes = file_part["data"]
+        del raw, parts, file_part  # see _serve_api_library_upload
+        file_bytes, ext, compress_info = _compress_video_for_fleet(file_bytes, ext)
+
         key_slug = re.sub(r"[^a-zA-Z0-9]+", "_", f"{kind}-{name}").strip("_").lower() or "splash"
         dest_dir = SPLASH_UPLOADS_DIR / key_slug
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -3503,7 +5022,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         target = dest_dir / f"{orientation}.{ext}"
         tmp = target.with_suffix(target.suffix + ".part")
         with open(tmp, "wb") as fh:
-            fh.write(file_part["data"])
+            fh.write(file_bytes)
         tmp.replace(target)
         (dest_dir / "meta.json").write_text(
             json.dumps({"kind": kind, "name": name}), encoding="utf-8"
@@ -3517,7 +5036,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             text=f"Uploaded {orientation} splash for {name}",
             icon="upload",
         )
-        self._send_json({"ok": True, "splash": meta})
+        self._send_json({"ok": True, "splash": meta, "compression": compress_info})
 
     def _serve_api_get(self) -> None:
         url = urllib.parse.urlparse(self.path)
@@ -3563,6 +5082,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             info = _release_info() or {"error": "release_lookup_failed"}
             # Strip the internal-only keys (asset IDs) before responding.
             public_info = {k: v for k, v in info.items() if not k.startswith("_")}
+            # v0.2.22: automatic-update gate. A held-back player sees
+            # versionCode 0, which every player version reads as "up to date".
+            hold = _release_hold_reason(params, self.headers.get("User-Agent") or "", self._client_ip())
+            if hold and "versionCode" in public_info:
+                who = (params.get("deviceId") or ["a pre-0.2.22 player"])[0]
+                print(f"[release] held back v{public_info.get('versionName')} from {who}: {hold}", file=sys.stderr)
+                public_info = {
+                    "heldBack":          True,
+                    "heldBackReason":    hold,
+                    "versionCode":       0,
+                    "latestVersionName": public_info.get("versionName"),
+                }
             self._send_json(public_info)
             return
 
@@ -3607,9 +5138,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     s = _ensure_screen_state(screen_id)
                     # Drain pending commands as part of the response so the
                     # tablet sees them in one round-trip.
-                    commands = list(s["pendingCommands"])
-                    s["pendingCommands"] = []
+                    # v0.2.19: a command with `notBefore` (epoch s) waits in
+                    # the queue until then — used to send a store's screens an
+                    # update after closing time without anyone awake to press it.
+                    _now = time.time()
+                    _queued = s["pendingCommands"]
+                    commands = [
+                        {k: v for k, v in c.items() if k != "notBefore"}
+                        for c in _queued if (c.get("notBefore") or 0) <= _now
+                    ]
                     if commands:
+                        s["pendingCommands"] = [c for c in _queued if (c.get("notBefore") or 0) > _now]
+                        # v0.2.22: a pre-0.2.22 player asks for the release
+                        # anonymously right after this, so let its address
+                        # through the automatic-update gate for a while.
+                        if any(c.get("command") == "update" for c in commands):
+                            _open_manual_update_window(self._client_ip())
                         # Drained queue is a state change worth persisting —
                         # otherwise a redeploy after a command was emitted
                         # but before it was drained could re-fire it.
@@ -3620,7 +5164,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     splash = resolve_splash_for(
                         location.get("city"),
                         location.get("concept"),
-                        screen_meta.get("orientation"),
+                        _effective_orientation(screen_id),
                     )
                     # Enrich each pushed item with library-side flags
                     # (defaultUnmute) so the player can apply per-video
@@ -3628,11 +5172,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # per screen (a handful at most) so the lookup is
                     # cheap.
                     enriched_items = []
+                    skipped_ids = []
                     want_card = bool(s.get("productCard"))
                     for it in s["items"]:
+                        # An item with no video file would make the player
+                        # throw away the whole state (see _playable_item).
+                        if not _playable_item(it):
+                            skipped_ids.append((it or {}).get("id") if isinstance(it, dict) else None)
+                            continue
                         lib = _library_lookup_by_id(it.get("id") or "")
                         merged = dict(it)
                         merged["defaultUnmute"] = bool((lib or {}).get("defaultUnmute"))
+                        # v0.2.14: carry the content type + dwell from the
+                        # library so the tablet can tell a still from a video
+                        # even when the item was pushed before image support (or
+                        # by a client that didn't send them). A still needs a
+                        # positive durationSec for the player's setImageDurationMs
+                        # and the group-sync loop math.
+                        if lib:
+                            if lib.get("type"):
+                                merged["type"] = lib["type"]
+                            if not merged.get("durationSec") and lib.get("durationSec"):
+                                merged["durationSec"] = lib["durationSec"]
                         # v0.1.86: only screens with the product-card toggle on
                         # get the description / per-currency prices / packshot +
                         # brand logo for the on-screen card. Keeps the payload
@@ -3643,6 +5204,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             if card:
                                 merged.update(card)
                         enriched_items.append(merged)
+                    if skipped_ids and _UNPLAYABLE_LOGGED.get(screen_id) != s["revision"]:
+                        _UNPLAYABLE_LOGGED[screen_id] = s["revision"]
+                        print(f"[state] {screen_id}: skipped {len(skipped_ids)} playlist item(s) "
+                              f"with no video file: {', '.join(str(i) for i in skipped_ids)}",
+                              file=sys.stderr)
                     # Sync-group playback hint. When the screen has a
                     # syncGroup set, compute "what every screen in this
                     # group should be playing right now" from the loop's
@@ -3712,8 +5278,34 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         available_groups.values(), key=lambda g: g["id"],
                     )
                     poll_mode = s.get("pollMode", DEFAULT_POLL_MODE)
+                    # v0.2.16: web page mode. /api/state is readable by
+                    # anyone who knows a deviceId (CMS viewers can list
+                    # them), so the token-bearing URL is only included when
+                    # the caller is the screen itself — i.e. it presents the
+                    # deviceSecret issued at /register. Everyone else gets
+                    # the mode + host, never the URL.
+                    web_cfg = s.get("web") or None
+                    web_payload = None
+                    if web_cfg:
+                        provided = self.headers.get("X-Device-Secret") or ""
+                        expected = screen_meta.get("deviceSecret") or ""
+                        is_device = bool(expected) and hmac.compare_digest(
+                            provided.encode(), expected.encode(),
+                        )
+                        web_payload = {
+                            "url":            web_cfg.get("url") if is_device else None,
+                            "host":           _web_host(web_cfg.get("url")),
+                            "reloadEveryMin": int(web_cfg.get("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN)),
+                            "pageWidth":      int(web_cfg.get("pageWidth", WEB_PAGE_WIDTH_DEFAULT)),   # v0.2.17
+                            # v0.2.23: hold the box awake + over the lock screen.
+                            "keepAwake":      web_cfg.get("keepAwake", WEB_KEEP_AWAKE_DEFAULT),
+                            "awakeFrom":      web_cfg.get("awakeFrom", WEB_AWAKE_FROM_DEFAULT),
+                            "awakeTo":        web_cfg.get("awakeTo", WEB_AWAKE_TO_DEFAULT),
+                        }
                     payload = {
                         "screenId":    screen_id,
+                        "contentMode": s.get("contentMode") or "playlist",   # v0.2.16: "playlist" | "web"
+                        "web":         web_payload,                          # v0.2.16: see above
                         "revision":    s["revision"],
                         "items":       enriched_items,
                         "pushedAt":    s["pushedAt"],
@@ -3757,6 +5349,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # tablets can render a Join picker without typing.
                         "availableSyncGroups": available_sync_groups,
                         "playback":    playback,
+                        # v0.2.15: preload — a cache hint, not a playlist.
+                        # Items from signed-off events this screen will be
+                        # in during the next 24h; tablet downloads them
+                        # off the hot path so when the event activates
+                        # there's no download gap. Empty list is the
+                        # common case (no signed-off events relevant to
+                        # this screen); older tablets ignore the field.
+                        "preload":     _preload_items_for_screen(
+                            screen_id,
+                            (location or {}).get("storeId"),
+                        ),
                         "serverNowMs": int(time.time() * 1000),
                         # Display mode override (v0.1.14). null means
                         # "leave it alone." Non-null is a modeId the
@@ -3819,17 +5422,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # green") so old consumers keep working.
                     pm = state.get("pollMode", DEFAULT_POLL_MODE)
                     live_flag, online_flag = _presence(last, pm, now)
+                    # While a content test runs, the live items are the test
+                    # clip. Report the screen's real playlist as currentItems
+                    # (what the CMS shows and edits) and the test separately.
+                    preview_snap = state.get("_previewSnapshot")
+                    preview_exp_ms = state.get("_previewExpiresAtMs")
+                    # v0.2.18: same idea for an event. The screen's own
+                    # playlist (where CMS edits land during the event) lives
+                    # in the event's snapshot; the live items are the event.
+                    held_ev = _event_holding(device_id)
+                    event_snap = (held_ev.get("snapshots") or {}).get(device_id) if held_ev else None
+                    real_state = event_snap or preview_snap or state
                     record = {
                         **s,
                         "online":                online_flag,
                         "live":                  live_flag,
                         "pollIntervalSec":       _poll_interval_sec(pm),
+                        # v0.2.22: whether this screen gets automatic updates
+                        # ("on"), has the accessibility setting off ("off"),
+                        # or runs a player too old to finish one unattended
+                        # ("old"). The CMS flags anything but "on".
+                        "autoUpdate":            ("old" if _version_tuple(s.get("appVersion") or "0")
+                                                  < _version_tuple(AUTO_UPDATE_MIN_APP)
+                                                  else "on" if s.get("autoConfirmEnabled") else "off"),
+                        "autoUpdateMinApp":      AUTO_UPDATE_MIN_APP,
                         "onlineThresholdSec":    int(_online_threshold_sec(pm)),
                         "liveThresholdSec":      int(_live_threshold_sec(pm)),
                         "secondsSinceHeartbeat": round(now - last, 1) if last else None,
                         "currentRevision":       state.get("revision", 0),
-                        "currentItems":          state.get("items", []),
-                        "mixSplash":             state.get("mixSplash", True),
+                        "currentItems":          real_state.get("items") or [],
+                        "previewItems":          (state.get("items") or []) if preview_snap else None,
+                        "previewRemainingSec":   (max(0, int(round(preview_exp_ms / 1000 - now)))
+                                                  if preview_exp_ms else None),
+                        "event":                 ({"id": held_ev.get("id"), "name": held_ev.get("name"),
+                                                   "endAt": held_ev.get("endAt"),
+                                                   "items": (preview_snap or state).get("items") or []}
+                                                  if held_ev else None),
+                        "mixSplash":             real_state.get("mixSplash", True),
                         "productCard":           bool(state.get("productCard")),   # v0.1.86
                         "rotation":              int(state.get("rotation") or 0),  # v0.2.8
                         "experienceUrl":         state.get("experienceUrl"),       # v0.1.92
@@ -3851,6 +5480,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # effect yet because the tablet hasn't seen
                         # the new /api/state poll.
                         "displayMode":           state.get("displayMode"),
+                        # v0.2.16: content mode + masked web settings. The
+                        # URL itself carries a display token and is never
+                        # sent to the CMS — host + tail hint only. The screen's
+                        # own mode, not a test's or an event's temporary one.
+                        **_web_public(real_state),
                     }
                     # v0.1.84: never expose the per-device secret to CMS
                     # clients (the **s spread above would otherwise include it).
@@ -3955,6 +5589,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"crashes": out, "total": len(out)})
             return
 
+        # v0.2.20: progress of a compressed upload (see _start_upload_job).
+        m_job = re.match(r"^/api/library/upload-jobs/([0-9a-f]{16})$", path)
+        if m_job:
+            if self._require_perm("library.edit") is None:
+                return
+            with _UPLOAD_JOBS_LOCK:
+                job = dict(_UPLOAD_JOBS.get(m_job.group(1)) or {})
+            if not job:
+                self._send_json({"error": "not_found", "detail": "That upload isn't running any more."}, status=404)
+                return
+            job.pop("createdAt", None)
+            self._send_json(job)
+            return
+
         if path == "/api/library":
             # Library responses are ~450 kB on a typical fleet
             # (1,300+ videos). The CMS polls this every 30 s; without
@@ -3983,6 +5631,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # section, and the HTML itself is already served publicly at
             # /interactive/. Uploading/deleting IS gated (experiences.edit).
             self._send_json({"experiences": _list_experiences()})
+            return
+
+        if path == "/api/events":
+            # v0.2.15: list events, newest first. Permission-gated: events
+            # viewing is admin+manager only because it reveals pending
+            # takeovers (the window-display pop-up on the 14th) that a
+            # regular user shouldn't be privy to.
+            if self._require_perm("events.view") is None:
+                return
+            with _STATE_LOCK:
+                items = [_public_event(e) for e in _events]
+            items.sort(key=lambda e: e.get("createdAt", ""), reverse=True)
+            self._send_json({"events": items})
             return
 
         if path == "/api/library/info":
@@ -4225,7 +5886,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/push":
             if self._require_perm("screens.push") is None:
                 return
-            items = body.get("items") or []
+            items, skipped = _split_playable(body.get("items") or [])
+            if skipped and not items:
+                self._send_json({"error": "no_playable_items",
+                                 "detail": "None of these videos has a video file yet (still syncing from tm:rw).",
+                                 "skipped": [x.get("id") if isinstance(x, dict) else None for x in skipped]},
+                                status=400)
+                return
             mode = body.get("mode") or "replace"
             requested = body.get("deviceIds") or []
             # Same fan-out semantics as /api/screens/<id>/playlist —
@@ -4250,31 +5917,46 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 else:
                     targets = base_targets
                 pushed = 0
+                held = 0
                 for device_id in targets:
                     s = _ensure_screen_state(device_id)
+                    # A real push ends any content test on this screen first,
+                    # so it lands on the real playlist (and appends to it,
+                    # not to the test clip) instead of being undone at expiry.
+                    _cancel_preview_on(s)
+                    # During an event the push goes to the screen's own
+                    # (post-event) playlist; the event keeps playing.
+                    dest, ev = _edit_target(device_id, ("items",))
                     if mode == "append":
                         # Dedupe by id when appending so the same clip can't
                         # show up twice in a row.
-                        existing_ids = {x.get("id") for x in s["items"]}
+                        existing_ids = {x.get("id") for x in dest["items"]}
                         for v in items:
                             if v.get("id") not in existing_ids:
-                                s["items"].append(v)
+                                dest["items"].append(v)
                     else:
-                        s["items"] = list(items)
+                        dest["items"] = list(items)
+                    if ev is not None:
+                        held += 1
                     s["revision"] += 1
                     s["pushedAt"] = time.time()
                     pushed += 1
                 top_rev = max((s["revision"] for s in _per_screen.values()), default=0)
                 if pushed:
                     _save_per_screen()
-            print(f"[push] mode={mode} items={len(items)} -> {pushed} screens", file=sys.stderr)
+                if held:
+                    _save_events()
+            print(f"[push] mode={mode} items={len(items)} -> {pushed} screens ({held} held by an event)", file=sys.stderr)
             verb = "Replaced playlist on" if mode == "replace" else "Added to"
+            held_note = f" ({held} in an event, applies when it ends)" if held else ""
             _log_activity(
                 kind="push",
-                text=f"{verb} {pushed} screen{'' if pushed == 1 else 's'} · {len(items)} video{'' if len(items) == 1 else 's'}",
+                text=f"{verb} {pushed} screen{'' if pushed == 1 else 's'} · {len(items)} video{'' if len(items) == 1 else 's'}{held_note}",
                 icon="upload",
             )
-            self._send_json({"ok": True, "screensTargeted": pushed, "revision": top_rev, "items": len(items)})
+            self._send_json({"ok": True, "screensTargeted": pushed, "screensInEvent": held,
+                             "revision": top_rev, "items": len(items),
+                             "skipped": [x.get("id") if isinstance(x, dict) else None for x in skipped]})
             return
 
         if path == "/api/screens/register":
@@ -4460,10 +6142,38 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # operator pushes them. The tablet itself enforces
                     # the cap; reporting it is just so the CMS can warn.
                     "decoderTier", "safeBitrateMbps",
+                    # v0.2.16: OS + WebView versions (the office-board ask:
+                    # we couldn't tell remotely which WebView a box had),
+                    # and web page mode health. playerContentMode is what
+                    # the player is ACTUALLY showing, vs contentMode which
+                    # is what the CMS asked for. Host only — never the URL.
+                    "androidVersion", "androidSdk", "webViewPackage", "webViewVersion",
+                    "playerContentMode", "webStatus", "webLoadedHost", "webLastLoadAt",
+                    "webLastError", "webLastErrorAt",
+                    # v0.2.17: the size the page actually sees ("1920x1080"),
+                    # after the player's page-width scaling.
+                    "webViewport",
+                    # v0.2.22: is the auto-confirm accessibility service on?
+                    # Off (or not reported, pre-0.2.22) = no automatic
+                    # updates, and the CMS flags the screen.
+                    "autoConfirmEnabled",
+                    # v0.2.23: is the screen on, is Android's lock screen up,
+                    # and is the player holding the box awake right now.
+                    "screenOn", "keyguardLocked", "awakeHeld",
                 ):
                     val = body.get(key)
                     if val is None:
                         continue
+                    if key in ("screenOn", "keyguardLocked", "awakeHeld"):
+                        val = bool(val)
+                    # Belt and braces: the player already reports errors
+                    # without the page URL, but strip any URL that slips
+                    # into the error text so a display token can't end up
+                    # in the CMS.
+                    if key == "webLastError" and isinstance(val, str):
+                        val = re.sub(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+", "<url>", val)[:300]
+                    if key == "webViewport":
+                        val = str(val)[:32]
                     # v0.1.81: a CMS rename sets nameSetByOperator. The tablet
                     # keeps reporting its *local* name on every heartbeat, so
                     # skip the name merge once an operator has overridden it —
@@ -4660,10 +6370,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         # ── Custom stores (v0.1.38) ──────────────────────────────
-        # POST /api/stores  { id, name, address, city }
+        # POST /api/stores  { id, name, address, city, kind? }
         # Adds a store to the dynamic taxonomy used by both clients.
         # Built-ins live in app/components/data.jsx + LocationTaxonomy.kt
         # and can't be edited from here — the form just appends.
+        # v0.2.15: kind "office" marks a non-retail location; the tablet
+        # skips the concept question for it at setup.
         if path == "/api/stores":
             if self._require_perm("settings.edit") is None:
                 return
@@ -4671,6 +6383,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             name = (body.get("name") or "").strip()
             address = (body.get("address") or "").strip()
             city = (body.get("city") or "").strip()
+            kind = (body.get("kind") or "retail").strip().lower()
+            if kind not in _STORE_KINDS:
+                self._send_json({"error": "bad_kind", "detail": "kind must be 'retail' or 'office'"}, status=400); return
             # Slug: only kebab-case lowercase alnum + hyphens. Anything
             # else would clash with existing built-in ids that this
             # shape expects ("smartech-selfridges", "tmrw-rinascente").
@@ -4694,15 +6409,349 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self._send_json({"error": "reserved_id"}, status=409); return
                 if raw_id in _custom_stores:
                     self._send_json({"error": "duplicate_id"}, status=409); return
-                store = {"id": raw_id, "name": name, "address": address, "city": city}
+                store = {"id": raw_id, "name": name, "address": address, "city": city, "kind": kind}
                 _custom_stores[raw_id] = store
                 _save_custom_stores()
             _log_activity(
                 kind="settings",
-                text=f"Added store '{name}' ({raw_id})",
+                text=f"Added {'office' if kind == 'office' else 'store'} '{name}' ({raw_id})",
                 icon="plus",
             )
             self._send_json({"ok": True, "store": store})
+            return
+
+        # v0.2.15: create an event. Admin-scoped (events.edit); starts in
+        # state="draft" and does nothing to the fleet until POST
+        # /api/events/<id>/start fires. targetMode defaults to "stores"
+        # with an empty list — the operator fills in details via PATCH
+        # before activating. Deliberately permissive on create to support
+        # multi-step wizards in the CMS; the real validation happens at
+        # start-time (empty playlist / empty targets refused there).
+        if path == "/api/events":
+            if self._require_perm("events.edit") is None:
+                return
+            patch, err = _validate_event_payload(body, require_name=True)
+            if err:
+                self._send_json({"error": "invalid", "detail": err}, status=400); return
+            patch.setdefault("targetMode", "stores")
+            patch.setdefault("stores", [])
+            patch.setdefault("screens", [])
+            patch.setdefault("splashes", {})
+            patch.setdefault("splashOn", True)
+            patch.setdefault("screenAssignments", {})
+            patch.setdefault("overrides", {})
+            patch.setdefault("startAt", None)
+            patch.setdefault("endAt", None)
+            base_slug = _slug(patch["name"]) or "event"
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                existing_ids = {e.get("id") for e in _events}
+                ev_id = base_slug
+                suffix = 2
+                while ev_id in existing_ids:
+                    ev_id = f"{base_slug}-{suffix}"
+                    suffix += 1
+                now_iso = _now_utc().isoformat()
+                record = {
+                    "id":                ev_id,
+                    "name":              patch["name"],
+                    "startAt":           patch["startAt"],
+                    "endAt":             patch["endAt"],
+                    "targetMode":        patch["targetMode"],
+                    "stores":            patch["stores"],
+                    "screens":           patch["screens"],
+                    "splashes":          patch["splashes"],
+                    "splashOn":          patch["splashOn"],
+                    "screenAssignments": patch["screenAssignments"],
+                    "overrides":         patch["overrides"],
+                    "state":             "draft",
+                    "snapshots":         {},
+                    "createdBy":         actor.get("email") or actor.get("display_name"),
+                    "createdAt":         now_iso,
+                    "updatedAt":         now_iso,
+                    "startedAt":         None,
+                    "endedAt":           None,
+                }
+                _events.append(record)
+                _save_events()
+            _log_activity(
+                kind="event",
+                text=f"Created event '{record['name']}'",
+                icon="plus",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(record)})
+            return
+
+        # v0.2.15 E2.5: Preview content on one screen. Snapshots the
+        # screen's current state, overrides with the supplied items,
+        # sets an expiry timestamp that the event-scheduler daemon
+        # watches — on expiry the snapshot is restored automatically.
+        # Lets operators verify a new clip plays correctly on real
+        # hardware before pushing it to the fleet.
+        #
+        # Body: { items: [{id, url, durationSec, type?, ...}, ...],
+        #         durationSec: int (how long to run the preview; capped
+        #                           at 1800 so a forgotten preview can't
+        #                           hold a screen hostage) }
+        # Refuses if the screen is currently in an active event
+        # (preview over a takeover would double-snapshot).
+        m_screen_preview = re.match(r"^/api/screens/([^/]+)/preview$", path)
+        if m_screen_preview:
+            if self._require_perm("screens.push") is None:
+                return
+            device_id = m_screen_preview.group(1)
+            raw_items = body.get("items") or []
+            if not isinstance(raw_items, list) or not raw_items:
+                self._send_json({"error": "no_items",
+                                 "detail": "items[] is required (at least one)"},
+                                status=400); return
+            try:
+                run_sec = int(body.get("durationSec") or 60)
+            except (TypeError, ValueError):
+                run_sec = 60
+            run_sec = max(10, min(1800, run_sec))
+            # Validate the items.
+            cleaned_items = []
+            for i, raw in enumerate(raw_items):
+                if not isinstance(raw, dict) or not raw.get("url"):
+                    self._send_json({"error": "invalid_item",
+                                     "detail": f"items[{i}] needs a url"},
+                                    status=400); return
+                cleaned_items.append({
+                    "id":          raw.get("id") or f"preview-{int(time.time()*1000)}-{i}",
+                    "title":       raw.get("title") or "Preview",
+                    "brand":       raw.get("brand"),
+                    "product":     raw.get("product"),
+                    "durationSec": raw.get("durationSec") or 15,
+                    "url":         raw.get("url"),
+                    "sizeMb":      raw.get("sizeMb"),
+                    "width":       raw.get("width"),
+                    "height":      raw.get("height"),
+                    "type":        raw.get("type") or "video",
+                })
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                if device_id not in _screens:
+                    self._send_json({"error": "unknown_screen"}, status=404); return
+                # Refuse while a real event is active for this screen —
+                # preview overriding an event would corrupt the event's
+                # snapshot. Operator must stop the event first.
+                active = _active_event_for_screen(
+                    device_id,
+                    (_screens.get(device_id, {}).get("location") or {}).get("storeId"),
+                )
+                if active:
+                    self._send_json({"error": "event_active",
+                                     "detail": f"'{active.get('name')}' is live on this screen; stop it first."},
+                                    status=409); return
+                s = _ensure_screen_state(device_id)
+                # If a preview is ALREADY in progress on this screen,
+                # keep the ORIGINAL snapshot (so restore still works)
+                # and just swap the live items — the operator is
+                # iterating on the test, not nesting.
+                if not s.get("_previewSnapshot"):
+                    s["_previewSnapshot"] = {k: s.get(k) for k in _EVENT_SNAPSHOT_FIELDS}
+                s["items"] = cleaned_items
+                s["mixSplash"] = False  # test content alone, no splash interleave
+                s["contentMode"] = "playlist"  # a web page screen shows the clip too; restore flips it back
+                s["revision"] = int(s.get("revision") or 0) + 1
+                now_s = time.time()
+                s["pushedAt"] = now_s
+                expires_at_ms = int(now_s * 1000) + run_sec * 1000
+                s["_previewExpiresAtMs"] = expires_at_ms
+                _save_per_screen_soon()
+                screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+            _log_activity(
+                kind="preview",
+                text=f"Testing {len(cleaned_items)} clip{'' if len(cleaned_items) == 1 else 's'} on {screen_name} for {run_sec}s",
+                icon="check",
+                who=actor.get("display_name"),
+                target=device_id,
+            )
+            self._send_json({
+                "ok": True,
+                "deviceId": device_id,
+                "expiresAtMs": expires_at_ms,
+                "durationSec": run_sec,
+            })
+            return
+
+        # v0.2.15: sign off an event. Flips state draft -> signed-off,
+        # locks the record as ready-to-run, and starts advertising its
+        # content as a preload hint to targeted screens in their
+        # /api/state response (see _preload_items_for_screen). Caches
+        # ahead of startAt so there's no download gap when the event
+        # auto-activates. Validation mirrors /start: splashes required,
+        # at least one target, no overlap with another already-live
+        # event.
+        m_ev_signoff = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)/sign-off$", path)
+        if m_ev_signoff:
+            if self._require_perm("events.edit") is None:
+                return
+            ev_id = m_ev_signoff.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") == "active":
+                    self._send_json({"error": "already_active"}, status=409); return
+                if ev.get("state") == "signed-off":
+                    self._send_json({"error": "already_signed_off"}, status=409); return
+                sp = ev.get("splashes") or {}
+                if not sp.get("portrait") or not sp.get("landscape"):
+                    self._send_json({"error": "missing_splashes",
+                                     "detail": "Both portrait and landscape splashes must be set before sign-off."},
+                                    status=400); return
+                targets = _target_screen_ids_for_event(ev)
+                if not targets:
+                    self._send_json({"error": "no_targets",
+                                     "detail": "No screens match this event's target"},
+                                    status=400); return
+                ev["state"] = "signed-off"
+                ev["signedOffAt"] = _now_utc().isoformat()
+                ev["signedOffBy"] = actor.get("email") or actor.get("display_name")
+                ev["updatedAt"] = ev["signedOffAt"]
+                _save_events()
+            _log_activity(
+                kind="event",
+                text=f"Signed off event '{ev['name']}' — content will preload to {len(targets)} screen(s)",
+                icon="check",
+                tone="ok",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(ev)})
+            return
+
+        # v0.2.15: un-sign-off an event. Flips signed-off -> draft so
+        # the operator can edit targets/dates again. Refuses if already
+        # active (operator should /stop + edit + sign-off again).
+        m_ev_unsign = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)/un-sign-off$", path)
+        if m_ev_unsign:
+            if self._require_perm("events.edit") is None:
+                return
+            ev_id = m_ev_unsign.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") != "signed-off":
+                    self._send_json({"error": "not_signed_off"}, status=409); return
+                ev["state"] = "draft"
+                ev["updatedAt"] = _now_utc().isoformat()
+                ev.pop("signedOffAt", None)
+                ev.pop("signedOffBy", None)
+                _save_events()
+            _log_activity(
+                kind="event",
+                text=f"Un-signed-off event '{ev['name']}'",
+                icon="check",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(ev)})
+            return
+
+        # v0.2.15: start an event. Takes a snapshot of every targeted
+        # screen's state, overrides each with the event's playlist +
+        # settings, flips the event to state="active". Operator-friendly
+        # permission (events.activate) so a store manager can trigger a
+        # pre-staged event without having edit rights on the record.
+        # Accepts events in state="draft" (manual) OR "signed-off"
+        # (operator chose to start early, before the scheduler would).
+        m_ev_start = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)/start$", path)
+        if m_ev_start:
+            if self._require_perm("events.activate") is None:
+                return
+            ev_id = m_ev_start.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") == "active":
+                    self._send_json({"error": "already_active"}, status=409); return
+                # v0.2.15: splashes are the universal fallback; both
+                # orientations must be set before an event can go live
+                # so NO screen in the target set can end up with an
+                # empty loop. Per-screen assignments are optional.
+                sp = ev.get("splashes") or {}
+                if not sp.get("portrait") or not sp.get("landscape"):
+                    self._send_json({
+                        "error": "missing_splashes",
+                        "detail": "Both portrait and landscape splashes must be set before starting an event.",
+                    }, status=400); return
+                targets = _target_screen_ids_for_event(ev)
+                if not targets:
+                    self._send_json({"error": "no_targets",
+                                     "detail": "No screens match this event's target"},
+                                    status=400); return
+                # Reject if any target screen is already in another live
+                # event — events can't nest. Operator gets a readable
+                # error naming the conflict so they can resolve it.
+                for other in _events:
+                    if other.get("id") == ev_id or other.get("state") != "active":
+                        continue
+                    other_targets = set(_target_screen_ids_for_event(other))
+                    overlap = other_targets.intersection(targets)
+                    if overlap:
+                        self._send_json({
+                            "error": "target_conflict",
+                            "detail": f"{len(overlap)} screen(s) already in event '{other.get('name') or other.get('id')}'",
+                            "conflictingEventId": other.get("id"),
+                        }, status=409); return
+                # Snapshot + apply override, per target.
+                for device_id in targets:
+                    _snapshot_screen_for_event(ev, device_id)
+                    _apply_event_override_to_screen(ev, device_id)
+                ev["state"] = "active"
+                ev["startedAt"] = _now_utc().isoformat()
+                ev["updatedAt"] = ev["startedAt"]
+                _save_events()
+                _save_per_screen_soon()
+            _log_activity(
+                kind="event",
+                text=f"Started event '{ev['name']}' on {len(targets)} screen(s)",
+                icon="check",
+                tone="ok",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(ev)})
+            return
+
+        # v0.2.15: stop an event. Restores every targeted screen's
+        # pre-event state from the snapshots stored on the event
+        # record, flips the event to state="ended". Idempotent on
+        # already-ended events (no-op + 409 so the operator knows).
+        m_ev_stop = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)/stop$", path)
+        if m_ev_stop:
+            if self._require_perm("events.activate") is None:
+                return
+            ev_id = m_ev_stop.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") != "active":
+                    self._send_json({"error": "not_active"}, status=409); return
+                snaps = dict(ev.get("snapshots") or {})
+                for device_id in snaps.keys():
+                    _restore_screen_from_event(ev, device_id)
+                ev["state"] = "ended"
+                ev["endedAt"] = _now_utc().isoformat()
+                ev["updatedAt"] = ev["endedAt"]
+                ev["snapshots"] = {}
+                _save_events()
+                _save_per_screen_soon()
+            _log_activity(
+                kind="event",
+                text=f"Ended event '{ev['name']}' — {len(snaps)} screen(s) restored",
+                icon="check",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(ev)})
             return
 
         # ── Splash mapping update ────────────────────────────────
@@ -4747,7 +6796,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/rotation        { rotation: 0|90|180|270 }
         # POST /api/screens/<deviceId>/name            { name: string }
         # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|display-mode|rotation|name|location)$", path)
+        # POST /api/screens/<deviceId>/content-mode    { mode: "playlist"|"web", url?, reloadEveryMin?, pageWidth?,
+        #                                                keepAwake?: "always"|"hours"|"off", awakeFrom?, awakeTo? }
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|display-mode|rotation|content-mode|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -4770,7 +6821,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             #    is allowed + logged; a *wrong* secret is always rejected;
             #    ENFORCE_DEVICE_SECRET flips grace→required once the fleet ships
             #    the header.
-            need = "screens.command" if action in ("command", "mix-splash") else "screens.push"
+            # content-mode replaces everything on the screen with a live web
+            # page, so it sits with the privileged actions (and, like
+            # `command`, is never a tablet self-edit).
+            need = "screens.command" if action in ("command", "mix-splash", "content-mode") else "screens.push"
             user = self._current_user()
             if user is not None:
                 if self._require_perm(need) is None:
@@ -4791,6 +6845,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if self._require_perm(need) is None:
                     return
             with _STATE_LOCK:
+                # Any edit to what the screen plays or how (playlist, toggles,
+                # rotation, sync group...) ends a running content test first.
+                # Otherwise the timed restore would overwrite the edit. Commands,
+                # renames and location changes don't touch playback state.
+                if action not in ("command", "name", "location"):
+                    _ps = _per_screen.get(device_id)
+                    if _ps is not None and _cancel_preview_on(_ps):
+                        _ps["revision"] = int(_ps.get("revision") or 0) + 1
+                        _save_per_screen_soon()
+                        print(f"[preview] {device_id}: test ended early by a {action} edit", file=sys.stderr)
                 if action == "command":
                     cmd = body.get("command")
                     if cmd not in ("reboot", "restartPlayer", "clearCache", "unregister", "update", "refresh", "sendLogs"):
@@ -4823,10 +6887,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         self._send_json({"ok": True, "deleted": True})
                         return
 
+                    # v0.2.19: optional `notBefore` (epoch seconds) holds the
+                    # command on the server until then, up to 48 h ahead.
+                    not_before = body.get("notBefore")
+                    if not_before is not None:
+                        if (not isinstance(not_before, (int, float)) or isinstance(not_before, bool)
+                                or not (time.time() < not_before <= time.time() + 48 * 3600)):
+                            self.send_error(400, "notBefore must be a time within the next 48 hours"); return
                     state = _ensure_screen_state(device_id)
-                    state["pendingCommands"].append({"command": cmd, "at": time.time()})
+                    entry = {"command": cmd, "at": time.time()}
+                    if not_before is not None:
+                        entry["notBefore"] = float(not_before)
+                    state["pendingCommands"].append(entry)
                     _save_per_screen_soon()
-                    print(f"[command] {device_id} -> {cmd}", file=sys.stderr)
+                    print(f"[command] {device_id} -> {cmd}"
+                          + (f" (not before {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(not_before))})" if not_before else ""),
+                          file=sys.stderr)
                     label = {
                         "reboot":        "Rebooted",
                         "restartPlayer": "Restarted player on",
@@ -4837,7 +6913,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     }[cmd]
                     _log_activity(
                         kind="command",
-                        text=f"{label} {screen_name}",
+                        text=f"{label} {screen_name}"
+                             + (f" (scheduled for {time.strftime('%H:%M UTC', time.gmtime(not_before))})" if not_before else ""),
                         icon={
                             "reboot":        "schedule",
                             "restartPlayer": "play",
@@ -4851,8 +6928,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self._send_json({"ok": True, "queued": cmd})
                     return
                 if action == "playlist":
-                    items = body.get("items") or []
                     mode = body.get("mode") or "replace"
+                    # Strip items with no video file (see _playable_item).
+                    # A replace still applies the rest, even if that's
+                    # nothing: removing a good clip from a list whose other
+                    # items are unsynced must still work. An append of only
+                    # unsynced videos is refused rather than a silent no-op.
+                    items, skipped = _split_playable(body.get("items") or [])
+                    skipped_ids = [x.get("id") if isinstance(x, dict) else None for x in skipped]
+                    if mode == "append" and skipped and not items:
+                        self._send_json({"error": "no_playable_items",
+                                         "detail": "None of these videos has a video file yet (still syncing from tm:rw).",
+                                         "skipped": skipped_ids},
+                                        status=400)
+                        return
                     # If the target screen belongs to a sync group, fan
                     # out the push to every member. Sync only works when
                     # every member is on the same playlist + revision —
@@ -4874,17 +6963,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             targets.append(device_id)
                     else:
                         targets = [device_id]
+                    held_by_event = 0
                     for tid in targets:
                         st = _ensure_screen_state(tid)
+                        _cancel_preview_on(st)  # sync-group fan-out: same rule as above
+                        # During an event this edits the screen's own
+                        # (post-event) playlist; the event keeps playing.
+                        dest, ev = _edit_target(tid, ("items",))
+                        if ev is not None:
+                            held_by_event += 1
                         if mode == "append":
-                            existing = {x.get("id") for x in st["items"]}
+                            existing = {x.get("id") for x in dest["items"]}
                             for v in items:
                                 if v.get("id") not in existing:
-                                    st["items"].append(v)
+                                    dest["items"].append(v)
                         else:
-                            st["items"] = list(items)
+                            dest["items"] = list(items)
                         st["revision"] += 1
                         st["pushedAt"] = time.time()
+                    if held_by_event:
+                        _save_events()
                     # v0.1.16: when this push hits a sync group, anchor
                     # the loop epoch at now + COORDINATED_START_DELAY_SEC
                     # so every member's tablet does the coordinated-
@@ -4919,15 +7017,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "ok": True,
                         "revision": base_state["revision"],
                         "screensTargeted": len(targets),
+                        "screensInEvent": held_by_event,
                         "syncGroup": group_id,
+                        "skipped": skipped_ids,
                     })
                     return
                 if action == "mix-splash":
-                    state = _ensure_screen_state(device_id)
+                    live = _ensure_screen_state(device_id)
+                    state, ev = _edit_target(device_id, ("mixSplash",))
                     state["mixSplash"] = bool(body.get("mixSplash", True))
-                    state["revision"] += 1                  # bump so player picks up flag change
+                    live["revision"] += 1                   # bump so player picks up flag change
                     _save_per_screen_soon()
-                    self._send_json({"ok": True, "mixSplash": state["mixSplash"]})
+                    if ev is not None:
+                        _save_events()
+                    self._send_json({"ok": True, "mixSplash": state["mixSplash"], "heldByEvent": ev is not None})
                     return
                 if action == "product-card":
                     # v0.1.86: toggle the shopper-facing product info card for
@@ -4957,9 +7060,135 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         )
                         return
                     state["rotation"] = rot
+                    # Turning a screen on its side mid-event swaps which
+                    # event splash fits it.
+                    ev = _event_holding(device_id)
+                    if ev is not None:
+                        state["items"] = _resolve_event_items_for_screen(ev, device_id)
                     state["revision"] += 1
                     _save_per_screen_soon()
                     self._send_json({"ok": True, "rotation": state["rotation"]})
+                    return
+                if action == "content-mode":
+                    # v0.2.16: playlist vs web page. Partial update like
+                    # `experience`: `url` / `reloadEveryMin` are only
+                    # touched when present, so the CMS can flip the mode
+                    # (or change the reload interval) without re-sending the
+                    # token-bearing URL, which it never holds after save.
+                    # The URL is never echoed back, printed or logged.
+                    # During an event the change is saved for after it, like
+                    # a playlist push; the event keeps the screen.
+                    live = _ensure_screen_state(device_id)
+                    state, held_ev = _edit_target(device_id, ("contentMode", "web"))
+                    mode = (body.get("mode") or "").strip().lower()
+                    if mode not in ("playlist", "web"):
+                        self._send_json({"ok": False, "error": "mode must be 'playlist' or 'web'"}, status=400)
+                        return
+                    if mode == "web" and (_screens.get(device_id) or {}).get("appFlavor") == "legacy":
+                        self._send_json(
+                            {"ok": False, "error": "Web page mode needs the modern player — this screen runs the legacy build"},
+                            status=400,
+                        )
+                        return
+                    web = dict(state.get("web") or {})
+                    if "url" in body:
+                        url = (body.get("url") or "").strip()
+                        if url:
+                            try:
+                                parsed = urllib.parse.urlparse(url)
+                            except ValueError:
+                                parsed = None
+                            # https only (the token would otherwise cross store
+                            # wifi in the clear); no user:pass@ — credentials
+                            # belong in the display token, not the authority.
+                            if (parsed is None or parsed.scheme != "https" or not parsed.hostname
+                                    or parsed.username or parsed.password or len(url) > 2048):
+                                self._send_json(
+                                    {"ok": False, "error": "url must be an absolute https:// URL (no user:password@, max 2048 chars)"},
+                                    status=400,
+                                )
+                                return
+                            web["url"] = url
+                        else:
+                            web.pop("url", None)
+                    if "reloadEveryMin" in body:
+                        try:
+                            reload_min = int(body.get("reloadEveryMin"))
+                        except (TypeError, ValueError):
+                            reload_min = -1
+                        # 0 = never do a scheduled full reload (the watchdog
+                        # still reloads on errors / network return).
+                        if not 0 <= reload_min <= WEB_RELOAD_MAX_MIN:
+                            self._send_json(
+                                {"ok": False, "error": f"reloadEveryMin must be 0–{WEB_RELOAD_MAX_MIN}"},
+                                status=400,
+                            )
+                            return
+                        web["reloadEveryMin"] = reload_min
+                    if "pageWidth" in body:
+                        try:
+                            page_width = int(body.get("pageWidth"))
+                        except (TypeError, ValueError):
+                            page_width = -1
+                        if page_width != 0 and not WEB_PAGE_WIDTH_MIN <= page_width <= WEB_PAGE_WIDTH_MAX:
+                            self._send_json(
+                                {"ok": False, "error": f"pageWidth must be 0 or {WEB_PAGE_WIDTH_MIN}–{WEB_PAGE_WIDTH_MAX}"},
+                                status=400,
+                            )
+                            return
+                        web["pageWidth"] = page_width
+                    if "keepAwake" in body:
+                        keep_awake = str(body.get("keepAwake") or "").strip().lower()
+                        if keep_awake not in WEB_KEEP_AWAKE_MODES:
+                            self._send_json(
+                                {"ok": False, "error": "keepAwake must be 'always', 'hours' or 'off'"},
+                                status=400,
+                            )
+                            return
+                        web["keepAwake"] = keep_awake
+                    for key in ("awakeFrom", "awakeTo"):
+                        if key in body:
+                            hhmm = str(body.get(key) or "").strip()
+                            if not _HHMM_RE.match(hhmm):
+                                self._send_json({"ok": False, "error": f"{key} must be HH:MM (24-hour)"}, status=400)
+                                return
+                            web[key] = hhmm
+                    if (web.get("keepAwake") == "hours"
+                            and web.get("awakeFrom", WEB_AWAKE_FROM_DEFAULT) == web.get("awakeTo", WEB_AWAKE_TO_DEFAULT)):
+                        self._send_json(
+                            {"ok": False, "error": "The awake hours need a different start and end time"},
+                            status=400,
+                        )
+                        return
+                    if mode == "web" and not web.get("url"):
+                        self._send_json({"ok": False, "error": "Paste the page URL to switch this screen to web page mode"}, status=400)
+                        return
+                    web.setdefault("reloadEveryMin", WEB_RELOAD_DEFAULT_MIN)
+                    web.setdefault("pageWidth", WEB_PAGE_WIDTH_DEFAULT)
+                    web.setdefault("keepAwake", WEB_KEEP_AWAKE_DEFAULT)
+                    web.setdefault("awakeFrom", WEB_AWAKE_FROM_DEFAULT)
+                    web.setdefault("awakeTo", WEB_AWAKE_TO_DEFAULT)
+                    prev_mode = state.get("contentMode") or "playlist"
+                    state["web"] = web if web.get("url") else None
+                    state["contentMode"] = mode
+                    live["revision"] += 1       # bump so the tablet re-polls promptly
+                    _save_per_screen_soon()
+                    if held_ev is not None:
+                        _save_events()
+                    screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+                    actor = (user or {}).get("display_name")
+                    if mode == "web" and prev_mode != "web":
+                        text = f"{screen_name} switched to web page ({_web_host(web.get('url'))})"
+                    elif mode == "web":
+                        text = f"Web page settings updated on {screen_name} ({_web_host(web.get('url'))})"
+                    elif prev_mode == "web":
+                        text = f"{screen_name} switched back to its playlist"
+                    else:
+                        text = f"Web page settings saved on {screen_name}"
+                    if held_ev is not None:
+                        text += f" · applies when '{held_ev.get('name') or 'the event'}' ends"
+                    _log_activity(kind="settings", text=text, who=actor, icon="settings", target=device_id)
+                    self._send_json({"ok": True, **_web_public(state), "heldByEvent": held_ev is not None})
                     return
                 if action == "experience":
                     # v0.1.92: point this screen at a guided brand experience
@@ -5253,6 +7482,69 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         body = self._read_json()
 
+        # v0.2.15: PATCH /api/events/<id> — partial update. Only fields
+        # in the body are touched. `state` isn't editable here — use
+        # /start and /stop. If the event is currently ACTIVE, we accept
+        # most edits (operator may want to swap in new content mid-event)
+        # but refuse structural ones that would break the restore guarantee.
+        m_ev = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)$", path)
+        if m_ev:
+            if self._require_perm("events.edit") is None:
+                return
+            ev_id = m_ev.group(1)
+            patch, err = _validate_event_payload(body, require_name=False)
+            if err:
+                self._send_json({"error": "invalid", "detail": err}, status=400); return
+            if not patch:
+                self._send_json({"error": "nothing_to_update"}, status=400); return
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                # v0.2.20: a splashes PATCH carrying one orientation merges
+                # into the other instead of wiping it. The Events page sets
+                # landscape and portrait separately (two uploads can be in
+                # flight at once). `splashes: null` still clears both.
+                if patch.get("splashes"):
+                    patch["splashes"] = {**(ev.get("splashes") or {}), **patch["splashes"]}
+                if ev.get("state") == "active":
+                    # While live, targetMode (stores vs screens) is fixed.
+                    # v0.2.20: the stores / screens themselves can change:
+                    # _sync_live_event_targets takes over screens that now
+                    # match and gives the dropped ones their playlists back,
+                    # so no snapshot is orphaned.
+                    if "targetMode" in patch and patch["targetMode"] != ev.get("targetMode"):
+                        self._send_json({
+                            "error": "forbidden_while_active",
+                            "detail": "Can't switch between stores and screens while the event is live. End it first.",
+                        }, status=409); return
+                    ev.update(patch)
+                    ev["updatedAt"] = _now_utc().isoformat()
+                    if "stores" in patch or "screens" in patch:
+                        _sync_live_event_targets(ev)
+                        _save_per_screen_soon()
+                    # splashes / splashOn / screenAssignments / overrides
+                    # CAN change mid-event — push the new values onto
+                    # every currently-overridden screen so the fleet
+                    # picks them up on the next poll.
+                    if any(k in patch for k in ("splashes", "splashOn", "screenAssignments", "overrides")):
+                        for device_id in list((ev.get("snapshots") or {}).keys()):
+                            _apply_event_override_to_screen(ev, device_id)
+                        _save_per_screen_soon()
+                else:
+                    ev.update(patch)
+                    ev["updatedAt"] = _now_utc().isoformat()
+                _save_events()
+            _log_activity(
+                kind="event",
+                text=f"Updated event '{ev['name']}'",
+                icon="check",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"event": _public_event(ev)})
+            return
+
         # v0.1.58: PATCH /api/integrations/<name> { value: "<key>" }.
         # Owner-only — checked here, not via PERMISSIONS, because it's
         # a deliberate single-role gate. Empty string clears the secret.
@@ -5325,6 +7617,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 who=actor.get("display_name"),
             )
             self._send_json({"video": updated})
+            return
+
+        # v0.2.15: PATCH /api/stores/<id> { kind?, name?, address?, city? }
+        # edits a custom store — mainly to flip one between store and
+        # office. Built-ins aren't in _custom_stores, so they 404 here.
+        m_store = re.match(r"^/api/stores/([A-Za-z0-9_-]+)$", path)
+        if m_store:
+            if self._require_perm("settings.edit") is None:
+                return
+            store_id = m_store.group(1)
+            patch = {}
+            if "kind" in body:
+                kind = str(body.get("kind") or "").strip().lower()
+                if kind not in _STORE_KINDS:
+                    self._send_json({"error": "bad_kind", "detail": "kind must be 'retail' or 'office'"}, status=400); return
+                patch["kind"] = kind
+            for key in ("name", "address", "city"):
+                if key in body:
+                    val = str(body.get(key) or "").strip()
+                    if key != "address" and not val:
+                        self._send_json({"error": f"bad_{key}"}, status=400); return
+                    patch[key] = val
+            if not patch:
+                self._send_json({"error": "empty_patch"}, status=400); return
+            with _STATE_LOCK:
+                if store_id not in _custom_stores:
+                    self._send_json({"error": "not_found"}, status=404); return
+                store = {**_custom_stores[store_id], **patch}
+                _custom_stores[store_id] = store
+                _save_custom_stores()
+            what = ", ".join(f"{k} → {v}" for k, v in patch.items())
+            _log_activity(
+                kind="settings",
+                text=f"Updated '{store.get('name') or store_id}': {what}",
+                icon="edit",
+            )
+            self._send_json({"ok": True, "store": store})
             return
 
         m = re.match(r"^/api/users/([A-Za-z0-9_-]+)$", path)
@@ -5400,6 +7729,65 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _serve_api_delete(self) -> None:
         path = self.path.split("?", 1)[0]
+        # v0.2.15: DELETE /api/screens/<id>/preview ends a content test now
+        # instead of waiting for it to time out. 404 no_preview when nothing
+        # is running (already expired, or ended by an edit).
+        m_prev_end = re.match(r"^/api/screens/([^/]+)/preview$", path)
+        if m_prev_end:
+            if self._require_perm("screens.push") is None:
+                return
+            device_id = m_prev_end.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                s = _per_screen.get(device_id)
+                if s is None or not _cancel_preview_on(s):
+                    self._send_json({"error": "no_preview",
+                                     "detail": "No test is running on this screen."},
+                                    status=404); return
+                s["revision"] = int(s.get("revision") or 0) + 1
+                s["pushedAt"] = time.time()
+                _save_per_screen_soon()
+                screen_name = (_screens.get(device_id) or {}).get("name") or device_id
+            _log_activity(
+                kind="preview",
+                text=f"Ended test on {screen_name} early — back to its playlist",
+                icon="check",
+                who=actor.get("display_name"),
+                target=device_id,
+            )
+            self._send_json({"ok": True, "deviceId": device_id})
+            return
+
+        # v0.2.15: DELETE /api/events/<id>. Refuses while active — the
+        # operator must /stop first (which restores screens) so a
+        # delete can never silently leave screens in override state.
+        ev_m = re.match(r"^/api/events/([a-z0-9][a-z0-9-]*)$", path)
+        if ev_m:
+            if self._require_perm("events.edit") is None:
+                return
+            ev_id = ev_m.group(1)
+            actor = self._current_user() or {}
+            with _STATE_LOCK:
+                ev = next((e for e in _events if e.get("id") == ev_id), None)
+                if ev is None:
+                    self._send_json({"error": "not_found"}, status=404); return
+                if ev.get("state") == "active":
+                    self._send_json({
+                        "error": "active",
+                        "detail": "Stop the event before deleting it so overridden screens are restored.",
+                    }, status=409); return
+                _events.remove(ev)
+                _save_events()
+            _log_activity(
+                kind="event",
+                text=f"Deleted event '{ev.get('name') or ev_id}'",
+                icon="offline",
+                tone="warn",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"ok": True, "id": ev_id})
+            return
+
         # v0.1.96: DELETE /api/experiences/<id> removes an UPLOADED experience.
         # Vendored interactive/*.html aren't in _experiences, so this 404s for
         # them — they're part of the repo, not something the CMS can delete.
@@ -5760,15 +8148,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not asset_id and not tag:
             self.send_error(404, f"No {flavor} APK in latest release"); return
 
-        def _open_upstream(range_val):
+        def _open_upstream(range_val, public=False):
             """Open the upstream APK byte stream, optionally with a Range.
               • asset_id set → authed/asset API (private repos + exact bytes).
               • else tag → the PUBLIC release-download URL (works with a
                 dead/absent token — avoids the rate-limited asset API).
             Both 302 to a CDN that honours Range; urllib carries the header
             across the redirect. _github_urlopen retries anonymously if a
-            stale token is rejected (repo is public)."""
-            if asset_id:
+            stale token is rejected (repo is public). `public` forces the
+            public URL (rate-limit fallback, see below)."""
+            if asset_id and not public:
                 api_url = f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/assets/{asset_id}"
                 return _github_urlopen(
                     api_url, accept="application/octet-stream", timeout=30,
@@ -5800,6 +8189,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     print("[release-download] upstream 416 (stale client range); refetching full file", file=sys.stderr)
                     client_range = None
                     upstream = _open_upstream(None)
+                # v0.2.19: the asset API is rate-limited (403/429 "rate limit
+                # exceeded") when a whole store updates at once — 42 NYC
+                # downloads 502'd on 2026-11-03. The public release-download
+                # URL isn't API-metered, so fall back to it.
+                elif e.code in (403, 429) and asset_id and tag:
+                    print(f"[release-download] asset API {e.code} (rate limit); using public download URL", file=sys.stderr)
+                    upstream = _open_upstream(client_range, public=True)
                 else:
                     raise
         except urllib.error.HTTPError as e:
@@ -6178,6 +8574,12 @@ def main() -> None:
     threading.Thread(target=daily_sync_loop, daemon=True).start()
     # v0.1.85: watch for screens dropping offline and alert (webhook + activity).
     threading.Thread(target=_offline_monitor_loop, daemon=True).start()
+    # v0.2.15: event scheduler — auto-starts signed-off events when their
+    # startAt arrives, auto-stops active events when their endAt passes.
+    # Also drives the preview auto-restore (E2.5). One loop, 5s tick:
+    # cheap because the work per tick is only "iterate _events + a few
+    # per-screen checks," no I/O unless a transition actually fires.
+    threading.Thread(target=_event_scheduler_loop, daemon=True).start()
     # Initial scan if the library is missing or empty. Triggers
     # automatically on fresh deploys so the CMS doesn't show "no
     # content" for up to 24 hours while waiting for the daily timer.

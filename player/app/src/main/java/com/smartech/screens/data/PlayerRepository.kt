@@ -6,12 +6,15 @@ import com.smartech.screens.util.DeviceInfo
 import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
@@ -155,7 +158,7 @@ class PlayerRepository(
             }
 
             val cap = store.cacheCapBytes.first()
-            cache.reconcile(keep = playlist.items.map { it.id }.toSet(), capBytes = cap)
+            cache.reconcile(keep = keepIds(playlist.items), capBytes = cap)
 
             publish(playlist)
         } catch (t: Throwable) {
@@ -444,7 +447,7 @@ class PlayerRepository(
                     appVersion = appVersion,
                     cachedVideos = cache.cachedIds(),
                     cacheBytes = cache.totalBytes(),
-                    freeStorageBytes = appContext.filesDir.usableSpace,
+                    freeStorageBytes = cache.usableSpace(),   // v0.2.20: the volume the videos are on
                 )
             )
         }.onFailure { Log.w(TAG, "ping failed: ${it.message}") }
@@ -539,6 +542,43 @@ class PlayerRepository(
          *  read-only decoration and group members share a position, so their
          *  bars agree rather than fight. */
         val progressBar: Boolean = false,
+        /** v0.2.16: "playlist" (default — and what an older server implies by
+         *  omitting it) or "web". Web = show [web]'s URL full screen instead
+         *  of the playlist. Modern flavor only. */
+        val contentMode: String = "playlist",
+        val web: LiveWeb? = null,
+        /** v0.2.18: content for signed-off events this screen is in that
+         *  start soon. A cache hint, not a playlist — see [updatePreload].
+         *  An older server omits it → nothing to preload. */
+        val preload: List<LivePreloadItem> = emptyList(),
+    )
+
+    /** v0.2.18: one upcoming-event item to cache ahead of time. Every field is
+     *  optional on purpose, so one malformed entry can't fail the whole
+     *  /api/state decode and take the playlist down with it. */
+    @Serializable
+    private data class LivePreloadItem(
+        val id: String? = null,
+        val title: String? = null,
+        val type: String = "video",
+        val url: String? = null,
+        val sizeMb: Double? = null,
+    )
+
+    /** v0.2.16: web page mode settings. [url] carries a display token and
+     *  is only sent when this poll presented the device secret; null means
+     *  "keep the URL you already have". */
+    @Serializable
+    private data class LiveWeb(
+        val url: String? = null,
+        val host: String? = null,
+        val reloadEveryMin: Int = WebPageConfig.DEFAULT_RELOAD_MIN,
+        /** v0.2.17. An older server omits it → the 1920 default. */
+        val pageWidth: Int = WebPageConfig.DEFAULT_PAGE_WIDTH,
+        /** v0.2.23: "always" | "hours" | "off" — see [KeepAwakeConfig]. */
+        val keepAwake: String = KeepAwakeConfig.MODE_ALWAYS,
+        val awakeFrom: String = KeepAwakeConfig.DEFAULT_FROM,
+        val awakeTo: String = KeepAwakeConfig.DEFAULT_TO,
     )
 
     /** v0.1.35: a sibling in this screen's sync group. The Device
@@ -594,6 +634,8 @@ class PlayerRepository(
     private data class LiveItem(
         val id: String,
         val title: String,
+        /** v0.2.14: "video" (default) or "image" — see [VideoItem.type]. */
+        val type: String = "video",
         val brand: String? = null,
         val product: String? = null,
         val url: String,
@@ -658,6 +700,100 @@ class PlayerRepository(
      *  neither. */
     private val _progressBar = MutableStateFlow(false)
     val progressBarFlow: StateFlow<Boolean> = _progressBar.asStateFlow()
+
+    // ── v0.2.16: web page mode ───────────────────────────────────────────
+    // One live URL full screen instead of the playlist (first use: the London
+    // office board). The config is persisted in DeviceStore and rendered from
+    // there, so a reboot comes straight back to the page even offline. Modern
+    // build only: on legacy the flow is always null and the playlist plays.
+
+    /** What MainActivity renders: non-null = show this page, null = playlist. */
+    val webPageFlow: Flow<WebPageConfig?> =
+        if (WEB_MODE_SUPPORTED) store.webPage else flowOf(null)
+
+    /** v0.2.23: when to hold a web page screen awake and over the lock screen.
+     *  Only acted on while [webPageFlow] is non-null — playlist screens keep
+     *  their plain keep-screen-on behaviour. */
+    val keepAwakeFlow: Flow<KeepAwakeConfig> = store.keepAwake
+
+    /** v0.2.23: true while ScreenAwake is holding the box awake. Heartbeat only. */
+    @Volatile var awakeHeld: Boolean = false
+
+    /** Signature of the last content mode we persisted, so the 3s poll only
+     *  writes DataStore on a real change (same idea as _rotationApplied). */
+    private var _contentModeApplied: String? = null
+
+    private fun applyContentMode(mode: String, web: LiveWeb?) {
+        val m = if (mode == "web") "web" else "playlist"
+        val sig = "$m|${web?.url?.hashCode()}|${web?.reloadEveryMin}|${web?.pageWidth}|" +
+            "${web?.keepAwake}|${web?.awakeFrom}|${web?.awakeTo}|${web == null}"
+        if (sig == _contentModeApplied) return
+        _contentModeApplied = sig
+        liveScope.launch {
+            store.setContentMode(
+                mode = m,
+                url = web?.url,
+                reloadEveryMin = web?.reloadEveryMin ?: WebPageConfig.DEFAULT_RELOAD_MIN,
+                pageWidth = web?.pageWidth ?: WebPageConfig.DEFAULT_PAGE_WIDTH,
+                keepAwake = web?.let { KeepAwakeConfig(it.keepAwake, it.awakeFrom, it.awakeTo) }
+                    ?: KeepAwakeConfig(),
+                // No web block at all = the server holds no URL for us.
+                // A block with url=null = it couldn't verify our secret;
+                // keep what we have rather than blanking the board.
+                clearUrl = web == null,
+            )
+        }
+        // Host only — the URL carries a display token.
+        LogBuffer.i(TAG, "Content mode → $m${web?.host?.let { " ($it)" } ?: ""}")
+        if (m == "web" && web?.url == null) {
+            LogBuffer.w(TAG, "Web page mode without a URL in the state response — using the stored one, if any")
+        }
+    }
+
+    /** Health of the web page, written by WebPageScreen, read by the heartbeat. */
+    data class WebHealth(
+        val showing: Boolean = false,
+        /** "loading" | "showing" | "offline" | "reconnecting"; null when not showing. */
+        val status: String? = null,
+        val loadedHost: String? = null,
+        val lastLoadAtMs: Long? = null,
+        val lastError: String? = null,
+        val lastErrorAtMs: Long? = null,
+        /** v0.2.17: what the page sees after page-width scaling, "1920x1080". */
+        val viewport: String? = null,
+    )
+    private val _webHealth = MutableStateFlow(WebHealth())
+    val webHealthFlow: StateFlow<WebHealth> = _webHealth.asStateFlow()
+
+    fun reportWebShowing(showing: Boolean) {
+        _webHealth.value = _webHealth.value.copy(showing = showing)
+    }
+
+    fun reportWebStatus(status: String?) {
+        _webHealth.value = _webHealth.value.copy(status = status)
+    }
+
+    fun reportWebLoaded(host: String) {
+        _webHealth.value = _webHealth.value.copy(loadedHost = host, lastLoadAtMs = System.currentTimeMillis())
+    }
+
+    fun reportWebViewport(viewport: String) {
+        if (_webHealth.value.viewport != viewport) _webHealth.value = _webHealth.value.copy(viewport = viewport)
+    }
+
+    /** [message] must not contain the page URL (it carries a token) — the
+     *  caller passes error codes/descriptions only. */
+    fun reportWebError(message: String) {
+        _webHealth.value = _webHealth.value.copy(lastError = message, lastErrorAtMs = System.currentTimeMillis())
+    }
+
+    /** Bumped by the CMS "Refresh" command (reload the page) and "Restart
+     *  player" (tear the WebView down and build a fresh one). WebPageScreen
+     *  watches these; they're inert in playlist mode. */
+    private val _webReloadRequests = MutableStateFlow(0)
+    val webReloadRequests: StateFlow<Int> = _webReloadRequests.asStateFlow()
+    private val _webRebuildRequests = MutableStateFlow(0)
+    val webRebuildRequests: StateFlow<Int> = _webRebuildRequests.asStateFlow()
 
     /** Poll cadence the server has assigned to this screen. The polling
      *  loop reads this on every tick. SLOW also skips the per-location
@@ -934,7 +1070,12 @@ class PlayerRepository(
         // caller's context. (Mirrors pushPlaylistToServer.)
         val resp = runCatching {
             kotlinx.coroutines.withContext(Dispatchers.IO) {
-                val req = Request.Builder().url("$base/api/state?screenId=$deviceId").build()
+                // v0.2.16: the modern build presents its device secret on the
+                // state poll — the server only includes a web page mode URL
+                // (which carries a display token) for the screen itself.
+                val req = Request.Builder().url("$base/api/state?screenId=$deviceId")
+                    .apply { if (WEB_MODE_SUPPORTED) withDeviceSecret() }
+                    .build()
                 t1Local = System.currentTimeMillis()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) throw IllegalStateException("HTTP ${r.code}")
@@ -1018,6 +1159,10 @@ class PlayerRepository(
             _experiencePromptPos.value = pos
             LogBuffer.i(TAG, "Experience prompt position → $pos")
         }
+
+        // v0.2.16: content mode (playlist | web page). Modern build only —
+        // the legacy build ignores it and keeps playing its playlist.
+        if (WEB_MODE_SUPPORTED) applyContentMode(state.contentMode, state.web)
 
         // v0.1.98: customer-facing tap-to-skip control. The server already
         // forces this false for a screen in a sync group, so no extra check
@@ -1140,6 +1285,11 @@ class PlayerRepository(
         // drained them in the GET response so we won't see them twice.
         for (cmd in state.commands) executeCommand(cmd.command)
 
+        // v0.2.18: cache upcoming-event content in the background. Runs every
+        // poll (the list changes without a playlist revision bump).
+        runCatching { updatePreload(state.preload, base) }
+            .onFailure { LogBuffer.w(TAG, "Preload update failed: ${it.message}") }
+
         // No change to playlist? Bail — heartbeats are handled by the
         // dedicated [startHeartbeatLoop] coroutine, no need to fire one
         // from here.
@@ -1164,6 +1314,15 @@ class PlayerRepository(
         val safeRaw = mutableListOf<LiveItem>()
         val skipped = mutableListOf<Pair<LiveItem, Double>>()
         for (li in rawItems) {
+            // v0.2.14: stills aren't decoded like H.264, so the Mbps ceiling
+            // (sizeMb × 8 / durationSec) is meaningless for them — a 20 MB
+            // image on a 10 s dwell would read as "16 Mbps" and get wrongly
+            // skipped. Images always pass the bitrate gate; an oversized one
+            // is flagged "hires" server-side for the CMS warning instead.
+            if (li.type == "image") {
+                safeRaw += li
+                continue
+            }
             val sizeMb = li.sizeMb
             val durSec = li.durationSec?.toDouble()
             if (sizeMb == null || durSec == null || durSec <= 0.0) {
@@ -1302,7 +1461,7 @@ class PlayerRepository(
             }
         }
         val cap = store.cacheCapBytes.first()
-        cache.reconcile(keep = items.map { it.id }.toSet(), capBytes = cap)
+        cache.reconcile(keep = keepIds(items), capBytes = cap)
 
         val playlist = PlaylistResponse(
             screenId = store.locScreenCode.first() ?: "live",
@@ -1600,10 +1759,15 @@ class PlayerRepository(
                             name = name,
                             address = s.address.orEmpty(),
                             cityCode = city,
+                            kind = if (s.kind.equals(LocationTaxonomy.KIND_OFFICE, ignoreCase = true))
+                                LocationTaxonomy.KIND_OFFICE else LocationTaxonomy.KIND_RETAIL,
                         )
                     }
-                    LocationTaxonomy.setCustomStores(mapped)
-                    LogBuffer.i(TAG, "Loaded ${mapped.size} custom stores from server")
+                    // Only log a change — the setup screen re-polls this.
+                    if (LocationTaxonomy.setCustomStores(mapped)) {
+                        LogBuffer.i(TAG, "Loaded ${mapped.size} custom stores from server " +
+                            "(${mapped.count { it.isOffice }} offices)")
+                    }
                 }
             }.onFailure {
                 LogBuffer.w(TAG, "refreshStoresFromServer failed: ${it.message}")
@@ -1620,7 +1784,17 @@ class PlayerRepository(
         val name: String? = null,
         val address: String? = null,
         val city: String? = null,
+        val kind: String? = null,
     )
+
+    /** v0.2.15: re-pull the store/office list on demand. The setup screen
+     *  calls this while it's open, so a location added in the CMS shows up
+     *  without restarting the tablet. */
+    suspend fun refreshStores() {
+        val base = store.liveServerUrl.first()?.takeIf { it.isNotBlank() }
+            ?: com.smartech.screens.BuildConfig.API_BASE.removeSuffix("/api")
+        refreshStoresFromServer(base.trimEnd('/'))
+    }
 
     /** v0.1.29: tablet-driven calibration trigger for the on-device
      *  command palette. Hits the server's own
@@ -1862,9 +2036,11 @@ class PlayerRepository(
 
     /**
      * Attach the server-issued device secret as `X-Device-Secret` to a
-     * self-edit request when we have one. Only the tablet's own no-login
+     * self-edit request when we have one. The tablet's own no-login
      * self-edit POSTs (playlist/audio/poll-mode/sync-group/display-mode/
-     * mix-splash) should carry this — NOT heartbeat/register/state. If the
+     * mix-splash) carry this, and since v0.2.16 so does the modern build's
+     * /api/state poll (the server gates the web page mode URL on it) —
+     * NOT heartbeat/register. If the
      * secret is null/blank the header is omitted (the server currently
      * grace-allows a missing header). Reads the stored secret via a suspend
      * flow, so call from inside the existing IO coroutine of each sender.
@@ -2066,6 +2242,8 @@ class PlayerRepository(
                 // missed gets re-applied on the very next tick.
                 LogBuffer.i(TAG, "Refresh command — kicking next poll")
                 refreshNow()
+                // v0.2.16: in web page mode "Refresh" also reloads the page.
+                if (_webHealth.value.showing) _webReloadRequests.value += 1
             }
             "restartPlayer" -> {
                 // CMS "Restart player" — the light recovery for a screen
@@ -2074,6 +2252,8 @@ class PlayerRepository(
                 // stuck, the watchdog escalates to a full reboot.
                 LogBuffer.i(TAG, "Restart-player command — re-applying the player")
                 restartPlayer()
+                // v0.2.16: in web page mode, rebuild the WebView from scratch.
+                if (_webHealth.value.showing) _webRebuildRequests.value += 1
             }
             "sendLogs" -> {
                 // CMS "Request logs" — upload the full current log buffer
@@ -2129,6 +2309,14 @@ class PlayerRepository(
             """{"id":${m.id},"w":${m.width},"h":${m.height},"hz":${m.refreshHz}}"""
         }
         val activeModeId = com.smartech.screens.util.DisplayModes.active(appContext)
+        // v0.2.16: OS + WebView versions (reported by every screen — it's how
+        // we check a box can run web page mode) and web page health.
+        val webView = com.smartech.screens.util.WebViewInfo.current(appContext)
+        val web = _webHealth.value
+        // v0.2.23: is the screen on and is the lock screen up — how the CMS
+        // tells whether a dashboard box is awake and unlocked.
+        val power = appContext.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+        val keyguard = appContext.getSystemService(android.content.Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
         val body = """
             {
               "deviceId": "$deviceId",
@@ -2147,10 +2335,25 @@ class PlayerRepository(
               "appVersion": ${q(com.smartech.screens.BuildConfig.VERSION_NAME)},
               "appFlavor": ${q(com.smartech.screens.BuildConfig.FLAVOR)},
               "cacheBytes": ${cache.totalBytes()},
-              "freeStorageBytes": ${appContext.filesDir.usableSpace},
+              "freeStorageBytes": ${cache.usableSpace()},
               "cachedVideoIds": [${cachedIds}],
               "supportedModes": [${supportedModesJson}],
-              "activeDisplayMode": ${activeModeId}
+              "activeDisplayMode": ${activeModeId},
+              "androidVersion": ${q(android.os.Build.VERSION.RELEASE ?: "")},
+              "androidSdk": ${android.os.Build.VERSION.SDK_INT},
+              "webViewPackage": ${qOrNull(webView?.packageName)},
+              "webViewVersion": ${qOrNull(webView?.versionName)},
+              "playerContentMode": ${q(if (web.showing) "web" else "playlist")},
+              "webStatus": ${qOrNull(web.status)},
+              "webLoadedHost": ${qOrNull(web.loadedHost)},
+              "webLastLoadAt": ${web.lastLoadAtMs?.let { it / 1000.0 } ?: "null"},
+              "webLastError": ${qOrNull(web.lastError)},
+              "webLastErrorAt": ${web.lastErrorAtMs?.let { it / 1000.0 } ?: "null"},
+              "webViewport": ${qOrNull(web.viewport)},
+              "autoConfirmEnabled": ${com.smartech.screens.update.InstallAutoConfirm.isServiceEnabled(appContext)},
+              "screenOn": ${power?.isInteractive ?: "null"},
+              "keyguardLocked": ${keyguard?.isKeyguardLocked ?: "null"},
+              "awakeHeld": $awakeHeld
             }
         """.trimIndent()
         runCatching {
@@ -2327,12 +2530,100 @@ class PlayerRepository(
 
     private val liveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // ── v0.2.18: upcoming-event preload ──────────────────────────────────
+
+    /** Ids on the server's current preload list. Unioned into every cache
+     *  reconcile (except an explicit Clear cache) so upcoming-event files
+     *  aren't evicted before the event starts. Empty for almost every
+     *  screen almost all the time. */
+    @Volatile private var preloadKeepIds: Set<String> = emptySet()
+    private var preloadJob: Job? = null
+    private var lastPreloadLogSig: String? = null
+    /** id → wall-clock ms of the last failed preload, so a dead URL isn't
+     *  retried every poll. */
+    private val preloadFailedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun keepIds(items: List<VideoItem>): Set<String> =
+        items.map { it.id }.toSet() + preloadKeepIds
+
+    /** Pin the preload list and start a background download of anything not
+     *  cached yet. Cheap when there's nothing to do; at most one preload job
+     *  runs at a time. */
+    private fun updatePreload(raw: List<LivePreloadItem>, base: String) {
+        val wanted = raw.mapNotNull { p ->
+            val id = p.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val url = p.url?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            LiveItem(id = id, title = p.title ?: id, type = p.type, url = url, sizeMb = p.sizeMb)
+                .toVideoItem(base) to p.sizeMb
+        }.distinctBy { it.first.id }
+        preloadKeepIds = wanted.map { it.first.id }.toSet()
+        if (wanted.isEmpty()) {
+            lastPreloadLogSig = null
+            return
+        }
+        val missing = wanted.filter { !cache.has(it.first.id) }
+        val sig = "${wanted.size - missing.size}/${wanted.size}"
+        if (sig != lastPreloadLogSig) {
+            lastPreloadLogSig = sig
+            LogBuffer.i(TAG, "Preload: $sig cached for upcoming event")
+        }
+        if (missing.isEmpty() || preloadJob?.isActive == true) return
+        val now = System.currentTimeMillis()
+        val due = missing.filter { (v, _) ->
+            val failed = preloadFailedAt[v.id] ?: 0L
+            now - failed >= PRELOAD_RETRY_AFTER_MS
+        }
+        if (due.isEmpty()) return
+        preloadJob = liveScope.launch { runPreload(due) }
+    }
+
+    /** One file at a time, lowest priority: waits while the current playlist
+     *  is downloading, and skips anything that wouldn't fit under the cache
+     *  cap (so preload can never squeeze out what's playing now). */
+    private suspend fun runPreload(queue: List<Pair<VideoItem, Double?>>) {
+        for ((v, sizeMb) in queue) {
+            if (v.id !in preloadKeepIds || cache.has(v.id)) continue
+            // Current-playlist downloads always win.
+            while (_downloads.value.isNotEmpty()) delay(PRELOAD_YIELD_MS)
+            if (v.id !in preloadKeepIds || cache.has(v.id)) continue
+            val cap = store.cacheCapBytes.first()
+            val needBytes = ((sizeMb ?: PRELOAD_UNKNOWN_SIZE_MB) * 1_000_000).toLong()
+            if (cache.totalBytes() + needBytes > cap ||
+                cache.usableSpace() - needBytes <= VideoCache.MIN_FREE_BYTES
+            ) {
+                LogBuffer.w(TAG, "Preload: skipping ${v.id} — no room under the cache cap without squeezing the current playlist")
+                preloadFailedAt[v.id] = System.currentTimeMillis()
+                continue
+            }
+            LogBuffer.i(TAG, "Preload: downloading ${v.id}")
+            runCatching { cache.ensure(v) }
+                .onSuccess {
+                    if (cache.has(v.id)) {
+                        preloadFailedAt.remove(v.id)
+                        LogBuffer.i(TAG, "Preload: cached ${v.id}")
+                    } else {
+                        preloadFailedAt[v.id] = System.currentTimeMillis()
+                    }
+                }
+                .onFailure {
+                    preloadFailedAt[v.id] = System.currentTimeMillis()
+                    LogBuffer.w(TAG, "Preload: ${v.id} failed (${it.message}); retrying later")
+                }
+        }
+        val pinned = preloadKeepIds
+        if (pinned.isNotEmpty()) {
+            val have = pinned.count { cache.has(it) }
+            lastPreloadLogSig = "$have/${pinned.size}"
+            LogBuffer.i(TAG, "Preload: $have/${pinned.size} cached for upcoming event")
+        }
+    }
+
     private fun LiveItem.toVideoItem(base: String): VideoItem {
         val absoluteUrl = if (url.startsWith("http://") || url.startsWith("https://")) url
         else if (url.startsWith("/")) base + url
         else "$base/$url"
         return VideoItem(
-            id = id, title = title, brand = brand, product = product,
+            id = id, title = title, type = type, brand = brand, product = product,
             url = absoluteUrl, durationSec = durationSec,
             defaultUnmute = defaultUnmute,
             description = description,
@@ -2345,6 +2636,12 @@ class PlayerRepository(
 
     /** Cheap JSON-string quoter — avoids pulling kotlinx.serialization for trivial bodies. */
     private fun q(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+    /** [q] for an optional, free-text value: null → JSON null, and control
+     *  characters (newlines in a WebView error description) flattened so the
+     *  hand-built heartbeat JSON stays valid. */
+    private fun qOrNull(s: String?) =
+        if (s == null) "null" else q(s.replace(Regex("[\\u0000-\\u001f]"), " "))
 
     // ── Demo mode (Cloudflare sample clips) ──────────────────────────────
 
@@ -2379,6 +2676,13 @@ class PlayerRepository(
     companion object {
         private const val TAG = "PlayerRepository"
 
+        /** v0.2.18 preload tuning: how long to wait between checks while a
+         *  playlist download is running, how long before a failed preload is
+         *  retried, and the size assumed when the server didn't send one. */
+        private const val PRELOAD_YIELD_MS = 5_000L
+        private const val PRELOAD_RETRY_AFTER_MS = 10 * 60_000L
+        private const val PRELOAD_UNKNOWN_SIZE_MB = 150.0
+
         /** Heartbeat fires on its own coroutine independent of the
          *  playlist-refresh loop, so the CMS can see the screen as
          *  online even mid-download. 10 s is well under the server's
@@ -2392,6 +2696,9 @@ class PlayerRepository(
         private const val SPLASH_BASE_BACKOFF_MS = 30_000L
         private const val SPLASH_MAX_BACKOFF_MS = 1_800_000L   // 30 min
         private const val MAX_SPLASH_ATTEMPTS = 6
+
+        /** v0.2.16: web page mode ships on the modern build only. */
+        val WEB_MODE_SUPPORTED = com.smartech.screens.BuildConfig.FLAVOR != "legacy"
     }
 }
 

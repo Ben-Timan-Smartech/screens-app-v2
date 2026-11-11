@@ -36,8 +36,8 @@ import com.smartech.screens.util.LogBuffer
  *      before it launches the installer, and only for a few minutes — so a
  *      stray install dialog from any other source is never auto-confirmed; and
  *   2. the foreground window belongs to a package installer.
- * It clicks only positive buttons (Install / Update / OK / Continue), never
- * Cancel, and the text fallback ignores anything longer than a button label so
+ * It clicks only positive buttons (Install / Update / OK / Continue / Open, and
+ * Play Protect's Scan app), never Cancel or "Install anyway", and the text fallback ignores anything longer than a button label so
  * the dialog's body copy ("Do you want to install…") can't be mistaken for a
  * button. Everything runs inside a try/catch: a crashing accessibility service
  * gets disabled by the OS, which would silently break auto-update.
@@ -55,9 +55,26 @@ class InstallAutoConfirmService : AccessibilityService() {
 
     private var lastClickAtMs = 0L
 
+    /**
+     * v0.2.21: the install kills our process, and Android rebinds this service
+     * in the freshly installed version. A bound accessibility service is one of
+     * the few things allowed to start an activity from the background, so this
+     * is the reliable moment to bring the player back on Android 10+.
+     */
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        try {
+            InstallAutoConfirm.relaunchIfPending(this, "auto-confirm service reconnected")
+        } catch (t: Throwable) {
+            LogBuffer.w(TAG, "relaunch on connect failed: ${t.message}")
+        }
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         try {
-            if (!InstallAutoConfirm.isExpecting()) return
+            // The update receiver may mark a relaunch after we've connected.
+            InstallAutoConfirm.relaunchIfPending(this, "auto-confirm service")
+            if (!InstallAutoConfirm.isExpecting(this)) return
             event ?: return
 
             // Cheap pre-filter on the event's package; the definitive check is
@@ -77,7 +94,14 @@ class InstallAutoConfirmService : AccessibilityService() {
             val button = findConfirmButton(root) ?: return
             if (clickNode(button)) {
                 lastClickAtMs = now
-                LogBuffer.i(TAG, "Auto-confirmed install dialog (${root.packageName})")
+                if (isOpenText(nodeText(button))) {
+                    // "App installed — Open": the update is done, so stop
+                    // auto-confirming anything else.
+                    InstallAutoConfirm.disarm(this)
+                    LogBuffer.i(TAG, "Auto-pressed Open after update (${root.packageName})")
+                } else {
+                    LogBuffer.i(TAG, "Auto-confirmed install dialog (${root.packageName})")
+                }
             }
         } catch (t: Throwable) {
             // Never crash — a dead accessibility service is worse than a
@@ -88,8 +112,12 @@ class InstallAutoConfirmService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
+    // v0.2.22: Google Play Protect can stop a sideloaded install with "App
+    // scan recommended — Scan app / Don't install app". Its dialog comes from
+    // Play services or the Play Store, so those count as part of the install.
     private fun looksLikeInstaller(pkg: String): Boolean =
-        pkg.contains("packageinstaller", ignoreCase = true)
+        pkg.contains("packageinstaller", ignoreCase = true) ||
+            pkg == "com.google.android.gms" || pkg == "com.android.vending"
 
     /**
      * Locate the positive confirm button, preferring stable view-ids and
@@ -130,9 +158,12 @@ class InstallAutoConfirmService : AccessibilityService() {
         // Button labels are short; the dialog body ("Do you want to install an
         // update…") is long — the length gate keeps body copy out.
         if (s.isEmpty() || s.length > 16) return false
-        if (s == "ok") return true
+        if (s == "ok" || s == "scan app" || isOpenText(s)) return true
         return s.startsWith("install") || s.startsWith("update") || s == "continue"
     }
+
+    /** The installer's success screen offers "Open" (relaunch) and "Done". */
+    private fun isOpenText(raw: String): Boolean = raw.trim().lowercase() == "open"
 
     private fun isNegativeText(raw: String): Boolean {
         val s = raw.lowercase()
@@ -174,9 +205,15 @@ class InstallAutoConfirmService : AccessibilityService() {
         private val BUTTON_IDS = listOf(
             "com.android.packageinstaller:id/ok_button",
             "com.google.android.packageinstaller:id/ok_button",
+            // Pre-Android 10 success screen's "Open".
+            "com.android.packageinstaller:id/launch_button",
+            "com.google.android.packageinstaller:id/launch_button",
+            // Positive dialog button: INSTALL, and "Open" on 10+'s success dialog.
             "android:id/button1",
         )
-        private val NEGATIVE_WORDS = listOf("cancel", "don't", "dont", "deny", "back", "close")
+        // "anyway" keeps "Install anyway" (overriding a Play Protect warning)
+        // a person's decision.
+        private val NEGATIVE_WORDS = listOf("cancel", "don't", "don’t", "dont", "deny", "back", "close", "anyway")
     }
 }
 
@@ -193,14 +230,71 @@ object InstallAutoConfirm {
     // later isn't auto-tapped.
     private const val EXPECT_WINDOW_MS = 5 * 60 * 1000L
 
-    @Volatile private var expectingUntilMs: Long = 0L
+    // How long after the update lands we'll still bring the player back.
+    private const val RELAUNCH_WINDOW_MS = 3 * 60 * 1000L
+    private const val PREFS = "install_auto_confirm"
+    private const val KEY_EXPECTING_UNTIL = "expecting_until_ms"
 
-    /** Called right before the system installer is launched. */
-    fun arm() { expectingUntilMs = System.currentTimeMillis() + EXPECT_WINDOW_MS }
+    @Volatile private var expectingUntilMs: Long = -1L // -1 = not loaded yet
+    @Volatile private var relaunchPendingUntilMs: Long = 0L
 
-    fun disarm() { expectingUntilMs = 0L }
+    /**
+     * Called right before the system installer is launched. v0.2.21: also
+     * persisted, because installing kills this process and the freshly
+     * installed one needs to know to press "Open" on the success screen.
+     */
+    fun arm(ctx: Context) = setExpectingUntil(ctx, System.currentTimeMillis() + EXPECT_WINDOW_MS)
 
-    fun isExpecting(): Boolean = System.currentTimeMillis() < expectingUntilMs
+    fun disarm(ctx: Context) = setExpectingUntil(ctx, 0L)
+
+    fun isExpecting(ctx: Context): Boolean {
+        if (expectingUntilMs < 0L) {
+            expectingUntilMs = prefs(ctx).getLong(KEY_EXPECTING_UNTIL, 0L)
+        }
+        return System.currentTimeMillis() < expectingUntilMs
+    }
+
+    private fun setExpectingUntil(ctx: Context, untilMs: Long) {
+        expectingUntilMs = untilMs
+        prefs(ctx).edit().putLong(KEY_EXPECTING_UNTIL, untilMs).apply()
+    }
+
+    private fun prefs(ctx: Context) =
+        ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /** Called by [UpdateRelaunchReceiver] when our own package was just replaced. */
+    fun markRelaunchPending() {
+        relaunchPendingUntilMs = System.currentTimeMillis() + RELAUNCH_WINDOW_MS
+    }
+
+    /** MainActivity is up, so there's nothing left to bring back. */
+    fun clearRelaunchPending() { relaunchPendingUntilMs = 0L }
+
+    @Volatile private var lastRelaunchAttemptMs: Long = 0L
+
+    /**
+     * Start the player if an update just landed and it isn't up yet. Android
+     * 10+ silently drops a background start (no exception), so the pending
+     * flag is only cleared once MainActivity actually runs; until then the
+     * accessibility service retries, throttled. MainActivity is singleTask, so
+     * a doubled start just resumes it.
+     */
+    fun relaunchIfPending(ctx: Context, why: String) {
+        val now = System.currentTimeMillis()
+        if (now >= relaunchPendingUntilMs) return
+        if (now - lastRelaunchAttemptMs < RELAUNCH_RETRY_MS) return
+        lastRelaunchAttemptMs = now
+        val intent = Intent(ctx, com.smartech.screens.MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            ctx.startActivity(intent)
+            LogBuffer.i("AutoUpdate", "Reopening the player after update ($why)")
+        } catch (t: Throwable) {
+            LogBuffer.w("AutoUpdate", "Couldn't reopen after update ($why): ${t.message}")
+        }
+    }
+
+    private const val RELAUNCH_RETRY_MS = 5_000L
 
     /** True when the operator has enabled our accessibility service. */
     fun isServiceEnabled(ctx: Context): Boolean {

@@ -211,7 +211,11 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     // Media3 ExoPlayer (the modern ExoPlayer)
-    val media3 = "1.3.1"
+    // v0.2.14: bumped 1.3.1 → 1.4.1 for native still-image playback in
+    // PlayerView (image MediaItems with setImageDurationMs). 1.3.x could
+    // decode images but only to a hand-wired ImageOutput; 1.4.0 added
+    // PlayerView image rendering, so stills ride the same queue as videos.
+    val media3 = "1.4.1"
     implementation("androidx.media3:media3-exoplayer:$media3")
     implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.media3:media3-datasource:$media3")

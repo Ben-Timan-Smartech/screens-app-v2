@@ -263,6 +263,20 @@ class PlayerController(context: Context) {
     }
 
     /**
+     * v0.2.16: web page mode took over the screen. Stop decoding (a hidden
+     * video loop would burn the box's CPU/GPU under the WebView) and drop the
+     * queue. Resetting [currentSource] means the next [apply] / [playSplash]
+     * — PlayerScreen re-runs one as soon as it's composed again — rebuilds the
+     * queue from scratch, so switching back restores the playlist.
+     */
+    fun suspendForWebPage() {
+        if (currentSource == Source.NONE && player.mediaItemCount == 0) return
+        player.stop()
+        player.clearMediaItems()
+        currentSource = Source.NONE
+    }
+
+    /**
      * Replace the queue if the playlist revision changed. When [mixSplash] is
      * true, the bundled splash is prepended so it plays first before the
      * pushed content; the loop then cycles splash → item 1 → item 2 → … →
@@ -288,10 +302,21 @@ class PlayerController(context: Context) {
             items += MediaItem.Builder().setMediaId(Source.SPLASH).setUri(splashUri).build()
         }
         items += playlist.map { lv ->
-            MediaItem.Builder()
+            val builder = MediaItem.Builder()
                 .setMediaId(lv.item.id)
                 .setUri(Uri.fromFile(lv.file))
-                .build()
+            // v0.2.14: a still has no intrinsic duration, so ExoPlayer needs
+            // setImageDurationMs to know how long to show it before advancing.
+            // Setting it is also what routes the item through Media3's image
+            // pipeline (decode → PlayerView) instead of the media extractors.
+            // We use the same dwell the server put in durationSec, so the
+            // group-sync loop math (which reads durationSec) lines up across an
+            // image exactly as it does for a video.
+            if (lv.item.type == "image") {
+                val dwellMs = (lv.item.durationSec ?: 10).coerceAtLeast(1).toLong() * 1000L
+                builder.setImageDurationMs(dwellMs)
+            }
+            builder.build()
         }
         // Refresh the per-item defaultUnmute map for volume decisions.
         defaultUnmuteById.clear()

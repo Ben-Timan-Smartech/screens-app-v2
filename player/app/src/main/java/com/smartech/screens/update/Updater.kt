@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
 import com.smartech.screens.BuildConfig
+import com.smartech.screens.data.LocationTaxonomy
 import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -57,6 +59,12 @@ class Updater(
     private val appContext: Context,
     private val http: OkHttpClient,
     private val backendBaseUrlProvider: suspend () -> String?,
+    // v0.2.19: the screen's city code ("NYC", "LDN", …) so the overnight
+    // window runs on the store's clock, not the box's factory time zone.
+    private val cityCodeProvider: suspend () -> String? = { null },
+    // v0.2.22: sent with each release check so the server can hold back
+    // automatic updates from a screen that couldn't finish one unattended.
+    private val deviceIdProvider: suspend () -> String? = { null },
 ) {
     // v0.1.51: dedicated client for the APK download. Same pattern as
     // VideoCache (v0.1.39): the shared API client's 60 s callTimeout
@@ -119,6 +127,10 @@ class Updater(
         val versionCode: Int = 0,
         val modernUrl: String? = null,
         val legacyUrl: String? = null,
+        // v0.2.22: set when the server holds back an automatic update.
+        val heldBack: Boolean = false,
+        val heldBackReason: String? = null,
+        val latestVersionName: String? = null,
     )
 
     /** Launch + periodic check on a tighter cadence than the original
@@ -150,7 +162,7 @@ class Updater(
                     // so chatty it spams the JSONL log.
                     LogBuffer.i(
                         TAG,
-                        "Skipping auto-update — outside ${AUTO_UPDATE_START_HOUR}:00–${AUTO_UPDATE_END_HOUR}:00 window",
+                        "Skipping auto-update — outside ${AUTO_UPDATE_START_HOUR}:00–${AUTO_UPDATE_END_HOUR}:00 window (${updateTimeZone().id})",
                     )
                 }
                 delay(intervalMs)
@@ -158,12 +170,35 @@ class Updater(
         }
     }
 
-    /** True when the local clock falls inside the configured evening
+    /** v0.2.19: the zone the window is judged in — the store's city zone
+     *  when the screen has a known city, else the device's own zone. The
+     *  NYC boxes were left on a UTC+8 factory zone, so their "22:00–06:00"
+     *  was 09:00–17:00 in New York and they updated mid-shift. */
+    private suspend fun updateTimeZone(): java.util.TimeZone {
+        val id = runCatching { LocationTaxonomy.timeZoneOfCity(cityCodeProvider()) }.getOrNull()
+            ?: return java.util.TimeZone.getDefault()
+        // getTimeZone() silently returns GMT for an unknown id; only trust
+        // it when the id round-trips.
+        val zone = java.util.TimeZone.getTimeZone(id)
+        if (zone.id != id) return java.util.TimeZone.getDefault()
+        if (!zoneMismatchLogged && zone.rawOffset != java.util.TimeZone.getDefault().rawOffset) {
+            zoneMismatchLogged = true
+            LogBuffer.w(
+                TAG,
+                "Device clock zone ${java.util.TimeZone.getDefault().id} differs from store zone $id — using the store zone for the update window",
+            )
+        }
+        return zone
+    }
+
+    @Volatile private var zoneMismatchLogged = false
+
+    /** True when the store's clock falls inside the configured evening
      *  window. Wraps midnight: with start=22, end=6 the window covers
      *  22:00–23:59 + 00:00–05:59. Uses [Calendar] so it works on the
      *  legacy minSdk-23 boxes (java.time needs API 26 / desugaring). */
-    private fun inAutoUpdateWindow(): Boolean {
-        val cal = java.util.Calendar.getInstance()
+    private suspend fun inAutoUpdateWindow(): Boolean {
+        val cal = java.util.Calendar.getInstance(updateTimeZone())
         val hour = cal.get(java.util.Calendar.HOUR_OF_DAY)
         val s = AUTO_UPDATE_START_HOUR
         val e = AUTO_UPDATE_END_HOUR
@@ -201,10 +236,21 @@ class Updater(
                 _state.value = State.Idle
                 return
             }
-            val latest = fetchLatest(base.trimEnd('/'))
+            val latest = fetchLatest(base.trimEnd('/'), manual = surfaceFailures)
             if (latest == null) {
                 if (surfaceFailures) _state.value = State.Failed("Couldn't reach the update server")
                 else _state.value = State.Idle
+                return
+            }
+            if (latest.heldBack) {
+                // v0.2.22: only reached by a background tick (manual checks
+                // are never held back). Warn once per run so the reason is
+                // in /api/logs without repeating every two hours.
+                if (!heldBackLogged) {
+                    heldBackLogged = true
+                    LogBuffer.w(TAG, "Automatic update to v${latest.latestVersionName} held back: ${latest.heldBackReason}")
+                }
+                _state.value = State.Idle
                 return
             }
             val currentCode = BuildConfig.VERSION_CODE
@@ -277,9 +323,22 @@ class Updater(
         _state.value = State.Idle
     }
 
-    private suspend fun fetchLatest(base: String): LatestReleaseDto? = withContext(Dispatchers.IO) {
+    @Volatile private var heldBackLogged = false
+
+    private suspend fun fetchLatest(base: String, manual: Boolean): LatestReleaseDto? = withContext(Dispatchers.IO) {
         runCatching {
-            val req = Request.Builder().url("$base/api/release/latest").build()
+            // v0.2.22: tell the server who's asking, whether a person started
+            // this check, and whether the auto-confirm service is on. It
+            // decides whether an automatic update goes ahead.
+            val url = "$base/api/release/latest".toHttpUrl().newBuilder().apply {
+                runCatching { deviceIdProvider() }.getOrNull()?.takeIf { it.isNotBlank() }?.let {
+                    addQueryParameter("deviceId", it)
+                }
+                addQueryParameter("appVersion", BuildConfig.VERSION_NAME)
+                addQueryParameter("trigger", if (manual) "manual" else "auto")
+                addQueryParameter("autoConfirm", if (InstallAutoConfirm.isServiceEnabled(appContext)) "1" else "0")
+            }.build()
+            val req = Request.Builder().url(url).build()
             http.newCall(req).execute().use { r ->
                 if (!r.isSuccessful) {
                     LogBuffer.w(TAG, "release/latest HTTP ${r.code}")
@@ -511,7 +570,7 @@ class Updater(
         // isn't enabled — the dialog just waits for a human, as before. Armed
         // for both the overnight background path and manual CMS/staff triggers,
         // since either can reach here.
-        InstallAutoConfirm.arm()
+        InstallAutoConfirm.arm(appContext)
 
         // v0.1.48/v0.1.54: fallback chain. Stock Android binds the
         // system PackageInstaller to ACTION_VIEW + content URI from

@@ -18,6 +18,168 @@ Rules:
 
 ---
 
+## v0.2.23
+
+- **Dashboard screens stay awake and unlocked.** The office Elo box dropped to
+  Android's lock screen after a while and the board disappeared. A screen
+  showing a web page now holds the box awake, wakes it if something turned the
+  screen off, and shows the page over the lock screen. A swipe lock is cleared
+  outright; a PIN lock stays underneath with the page drawn over it.
+- **Choose when it's allowed to lock.** In the CMS, the screen's Content card
+  has a new "Keep awake and unlocked" setting: Always (the default), During set
+  hours (it sleeps and locks outside them and wakes with the page up when they
+  start, in store time), or Off (the box's own sleep and lock settings). Only
+  web page screens have it; playlist screens are unchanged.
+- **See whether a dashboard box is awake.** The Content card shows whether the
+  screen is on, and whether the page is showing over the lock screen.
+
+## v0.2.22
+
+- **Automatic updates only go to screens that can finish them alone.** The
+  overnight update now skips any screen whose auto-update accessibility
+  setting is off, and any screen on a player older than this one, so no
+  screen is left stuck on an install dialog overnight. The CMS Update button
+  still updates any screen straight away.
+- **Screens without automatic updates are flagged in the CMS.** An
+  "Auto-update off" tag appears next to the screen in the store list, and the
+  screen page's Status card says why: the setting is off (turn it on in
+  Device admin), or the player needs updating first.
+- **Google Play Protect's "Scan app" prompt is pressed automatically** during
+  an update, so it no longer stops the install. "Don't install app" and
+  "Install anyway" are never pressed; those stay with a person.
+
+## v0.2.21
+
+- **Screens reopen by themselves after an automatic update.** With auto-update
+  switched on, the screen pressed INSTALL but then stopped on Android's "App
+  installed" screen, because nobody was there to tap Open. The new version now
+  reopens the player as soon as it's installed, and also presses Open if that
+  screen is showing.
+
+## v0.2.20
+
+- **Screens on tablets with split storage can download videos again.** Some
+  tablets keep apps on a small storage area and everything else on a big one.
+  MEZ.A.4 showed about 19 GB free in Android's Settings, but the app's own
+  area had under 1 GB, so it refused to download new videos and Clear cache
+  didn't help. Videos now go on the big storage whenever it has far more room.
+  Ordinary tablets have just one storage area, so nothing changes for them.
+  On a tablet that does move, the current playlist downloads once more.
+- **Small videos aren't blocked when space is tight but not gone.** A screen
+  used to stop downloading altogether once it had less than 1 GB free, even
+  for a 5 MB clip. It now keeps 300 MB spare instead.
+- **The CMS shows the free space that actually matters.** A screen's Free
+  figure (and the tablet's own Device admin page) now reports the storage its
+  videos are on.
+- **Concept is optional when setting up a screen.** New York and London screens
+  no longer have to pick a concept before they can continue. A screen without
+  one plays its city's default splash, and the concept can be set later on the
+  screen's page in the CMS.
+
+## v0.2.19
+
+- **Screens update overnight in their own store's time, not during opening
+  hours.** The NYC screens' clocks were set to an Asian time zone, so their
+  "10pm to 6am" update window was actually 9am to 5pm in New York. They were
+  updating, and restarting, in front of customers. A screen now works out its
+  update window from its store's city (New York, London, Berlin or Rome),
+  whatever time zone the box itself is set to. London screens already used
+  the right time, so nothing changes for them.
+- **A screen stuck on one video now clears it and downloads it again.**
+  When a downloaded video couldn't be read back from the screen's storage,
+  the screen kept retrying the same broken file every 30 seconds. It now
+  deletes the file and downloads a fresh copy, the same way it already
+  handled other damaged downloads.
+
+## v0.2.18
+
+- **Screens download event content before the event starts.** Once an event
+  is signed off with a start time, every screen in it starts caching that
+  event's videos and splashes in the background, up to 24 hours ahead. So when
+  the event starts, the content plays straight away instead of downloading
+  on the spot.
+- What's playing now always comes first: preloading waits while the current
+  playlist is downloading, and skips anything that wouldn't fit under the
+  screen's cache limit. Preloaded files are kept until the event has started.
+- Screens without an upcoming event behave exactly as before.
+
+## v0.2.17
+
+- **Web pages now fit the screen.** A page built for a 1920 × 1080 TV, like
+  the London office board, came out too big on some boxes: Android showed it
+  as if the screen were only about 960 pixels wide, so the right and bottom
+  edges were cut off. The screen now lays the page out at 1920 pixels wide
+  and scales it to fit. A new **Page width** setting in the screen's
+  **Content** card changes that width if a page was built for a different
+  size.
+- **The CMS shows the size the page sees**, for example "1920 × 1080", under
+  the screen's on-screen status, so you can check the layout without
+  walking over to the screen.
+- **Android's navigation buttons stay hidden.** If another window took over
+  the screen briefly, such as an install prompt, the back/home buttons
+  could stay on top of the content afterwards. They now hide again as soon
+  as the player is back.
+
+## v0.2.16
+
+- **Screens can now show a web page instead of a playlist.** In a screen's new
+  **Content** card, pick **Web page**, paste the page's link and press **Show
+  web page**: the screen switches within a minute and shows that one page full
+  screen, kept live. Switch back to **Playlist** and the playlist returns
+  exactly as it was. First use is the London office board.
+- **The link stays private.** Board links carry a display token, so the CMS
+  hides it as you paste it and never shows it again, only the site name and
+  the last four characters. Only the screen itself receives the full link, and
+  it's never written to the logs.
+- **It looks after itself.** If the page fails to load, comes up blank or the
+  network drops, the screen shows a quiet "Reconnecting…" (never a white page)
+  and keeps retrying until the page is back. If the network drops while the
+  page is up, the page stays on screen with a small "Reconnecting…" badge and
+  reloads itself when the network returns. It comes straight back to the page
+  after a reboot, even with no network. It also does a clean reload on a timer
+  (every 4 hours by default, adjustable).
+- **Refresh** and **Restart player** work on web page screens too: Refresh
+  reloads the page, Restart player rebuilds it from scratch.
+- The Content card shows what the screen is doing: whether the page is up, when
+  it last loaded, and the last problem it hit.
+- Every screen now reports its **Android and WebView versions** in the Status
+  card, so you can check whether a box can run web pages without walking up to
+  it.
+- Web pages need the modern player (this APK or later). Legacy-build screens
+  keep their playlist, and the CMS won't switch them.
+
+## v0.2.15
+
+- **Office locations.** In Settings → Locations, "Add location" now asks
+  whether it's a Store or an Office. When you set up a tablet at an office, it
+  doesn't ask for a concept (or a floor). Stores in New York and London still
+  ask for a concept, as before. An existing location can be switched with
+  "Make office" / "Make store".
+- **Fixed: some screens got stuck on the setup screen.** At any location
+  without a concept (Berlin, Rome, Events, Test and now offices), pressing
+  "Register screen" registered the tablet but left the setup screen showing.
+  It now goes straight to playback. Clearing a screen's concept from Device
+  admin no longer re-opens setup either.
+- **New locations reach the setup screen without a restart.** A tablet sitting
+  on the setup screen re-checks for new stores and offices every 30 seconds,
+  so one you've just added in the CMS shows up in the dropdown.
+- Screen detail's Location card hides Concept for screens at an office, and
+  the Stores list labels offices.
+- Needs the new APK on the tablet for the setup changes; the CMS side works as
+  soon as it deploys.
+
+## v0.2.14
+
+- **Brand images now sync and play on screens, just like videos.** Drop a still
+  (JPG, PNG or WEBP) into a brand's folder in Brand Content and it shows up in
+  the Content Library alongside the videos, ready to add to any screen. On a
+  screen, an image shows full-screen for 10 seconds and then the playlist moves
+  on to the next item — it loops in with your videos, works in sync groups, and
+  shows the progress bar, all the same way. The library thumbnail is the image
+  itself. (Animated GIFs aren't supported — use a short MP4 for motion.)
+- Needs the new APK for screens to *play* images; the Content Library picks them
+  up as soon as the CMS updates.
+
 ## v0.2.13
 
 - **Offline: the staff brand & video picker now shows your real catalogue, not

@@ -59,6 +59,8 @@ class ScreensApp : Application() {
             appContext = this,
             http = client.http,
             backendBaseUrlProvider = { store.liveServerUrl.first() },
+            cityCodeProvider = { store.locCity.first() },
+            deviceIdProvider = { store.deviceId.first() },
         )
         repository.updater = updater
         updater.start()
