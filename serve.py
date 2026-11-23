@@ -2261,6 +2261,9 @@ _PRICE_FIELDS = {
     "eur":       ("priceEur",),
     "berlinEur": ("rrpBerlinEur",),
     "romeEur":   ("rrpRomeEur",),
+    # v0.2.24: Toronto. Named to match the index's priceXxx / rrpXxx pattern;
+    # a row without either simply shows no price on a Toronto screen.
+    "cad":       ("priceCad", "rrpCad"),
 }
 
 
@@ -3670,7 +3673,7 @@ def _update_video_in_library(video_id: str, patch: dict) -> dict | None:
 # Folders on Drive named `Splash - <Brand>` or `Splash - <Concept>`. The
 # server scans for the first MP4 in each on startup and exposes them via
 # `/api/splashes`. Resolution: concept overrides brand; brand picked by
-# city (NYC/ROM → tm:rw, LDN/BER → Smartech).
+# city (NYC/ROM/TOR → tm:rw, LDN/BER → Smartech).
 SPLASH_FOLDERS = [
     # (kind, name, folder_name)
     ("brand",   "tmrw",       "Splash - tmrw"),
@@ -3707,6 +3710,7 @@ DEFAULT_CITY_BRAND: dict = {
     "ROM": "tmrw",
     "LDN": "smartech",
     "BER": "smartech",
+    "TOR": "tmrw",    # v0.2.24: Holt Renfrew Yorkdale
 }
 
 _splash_registry: dict = {}     # key "brand:tmrw" / "concept:7EVN" -> meta
@@ -6428,6 +6432,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             builtin_ids = {
                 "tmrw-times-square", "smartech-selfridges",
                 "smartech-kadewe", "tmrw-rinascente",
+                "tmrw-holt-yorkdale",
                 "events", "test",
             }
             with _STATE_LOCK:
