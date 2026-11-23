@@ -29,15 +29,18 @@
   var FLAVOR = 'web';
 
   // ── Config from the address ─────────────────────────────────────────
-  var params = new URLSearchParams(location.search);
-  var STORE = (params.get('store') || params.get('s') || '').trim();
-  var CODE = (params.get('code') || params.get('c') || '').trim();
-  var debugOn = params.get('debug') === '1';
-
   // Built-in stores (mirrors LocationTaxonomy). A store missing here still
   // works; its city and region just stay blank until set in the CMS.
+  // `alias` is the short name used in the address (/tv/<alias>/<code>), and
+  // `shortCode` expands a short position (L1) to the full screen code.
   var STORES = {
-    'tmrw-holt-yorkdale': { city: 'TOR', region: 'CANADA' },
+    'tmrw-holt-yorkdale': {
+      city: 'TOR', region: 'CANADA', alias: 'holt',
+      shortCode: function (c) {
+        var m = /^(?:COL\.?)?([LR])-?(\d{1,2})$/i.exec(c);
+        return m ? 'COL.' + m[1].toUpperCase() + '-' + parseInt(m[2], 10) : null;
+      }
+    },
     'tmrw-times-square': { city: 'NYC', region: 'USA' },
     'smartech-selfridges': { city: 'LDN', region: 'UK' },
     'smartech-kadewe': { city: 'BER', region: 'EU' },
@@ -45,6 +48,30 @@
     'events': { city: 'GLB', region: 'GLOBAL' },
     'test': { city: 'GLB', region: 'GLOBAL' }
   };
+
+  function resolveStore(s) {
+    if (!s) return '';
+    var low = s.toLowerCase();
+    if (STORES[low]) return low;
+    for (var id in STORES) {
+      if (STORES[id].alias === low) return id;
+    }
+    return s;
+  }
+
+  // Two ways to address a screen:
+  //   short:  /tv/holt/L1          (easy to type on a TV remote)
+  //   long:   /tv/?store=tmrw-holt-yorkdale&code=COL.L-1   (or ?s=…&c=…)
+  // Both give the same screen id, so either can be used on the same panel.
+  var params = new URLSearchParams(location.search);
+  var pathParts = location.pathname.replace(/^\/tv\/?/, '').split('/')
+    .filter(Boolean).map(function (p) { return decodeURIComponent(p); });
+  var STORE = resolveStore((params.get('store') || params.get('s') || pathParts[0] || '').trim());
+  var CODE = (params.get('code') || params.get('c') || pathParts[1] || '').trim();
+  if (CODE && STORES[STORE] && STORES[STORE].shortCode) {
+    CODE = STORES[STORE].shortCode(CODE) || CODE;
+  }
+  var debugOn = params.get('debug') === '1';
 
   function slug(s) {
     return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
@@ -354,7 +381,7 @@
 
   function registerServiceWorker() {
     if (!('serviceWorker' in navigator)) return;
-    navigator.serviceWorker.register('sw.js').then(function () {
+    navigator.serviceWorker.register('/tv/sw.js', { scope: '/tv/' }).then(function () {
       swState = 'registered';
       return navigator.serviceWorker.ready;
     }).then(function () {

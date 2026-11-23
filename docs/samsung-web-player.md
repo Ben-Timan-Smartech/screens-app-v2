@@ -6,17 +6,30 @@ from our server through its built-in **Custom App** setting.
 
 ## Each screen's address
 
+The short form is easiest to type on a remote:
+
+```
+https://screens.smartechworld.com/tv/holt/L1
+```
+
+At Holt Renfrew Yorkdale, `L1` to `L6` are the left column (top to bottom)
+and `R1` to `R6` the right. Each becomes the screen's name in the CMS
+(`COL.L-1` to `COL.R-6`) and keeps the screen's identity, so use a different
+one on every screen. Capitals don't matter.
+
+The long form does the same and works for any store:
+
 ```
 https://screens.smartechworld.com/tv/?store=tmrw-holt-yorkdale&code=COL.L-1
 ```
 
 - `store` is the location's id. Holt Renfrew Yorkdale is `tmrw-holt-yorkdale`.
-- `code` is the screen's position, for example `COL.L-1` to `COL.L-6` and
-  `COL.R-1` to `COL.R-6`. It becomes the screen's name in the CMS and keeps
-  the screen's identity, so use a different code on every screen.
-- Add `&debug=1` to show the readout, or press **OK / Enter** on the remote to
-  toggle it. It shows the screen id, clock offset, drift, what's playing and
-  how many videos are stored on the screen.
+- `code` is the screen's position. The short and long forms give the same
+  screen, so either can be used.
+- Press **OK / Enter** on the remote to show or hide the readout, or add
+  `?debug=1` to the address (`&debug=1` on the long form). It shows the screen
+  id, clock offset, drift, what's playing and how many videos are stored on
+  the screen.
 
 ## On the screen
 
