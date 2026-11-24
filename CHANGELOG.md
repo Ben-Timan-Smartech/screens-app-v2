@@ -40,6 +40,9 @@ Rules:
   the group's videos instead of its own. The tablet asks first, lists only
   groups at its location, and says so if joining fails.
 - **The tablet's clock test covers the whole group**, not just that tablet.
+- **Toronto screens get the tm:rw splash.** The server's saved list of city
+  splashes was older than Toronto and hid it. "(no splash)" for a city now also
+  survives a restart.
 
 ## v0.2.24
 
