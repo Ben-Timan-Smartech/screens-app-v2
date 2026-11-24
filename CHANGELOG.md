@@ -40,6 +40,12 @@ Rules:
   the group's videos instead of its own. The tablet asks first, lists only
   groups at its location, and says so if joining fails.
 - **The tablet's clock test covers the whole group**, not just that tablet.
+- **"Check for updates" finds the newest player again.** On players before
+  v0.2.22 the button always said "up to date". Press it twice and it installs.
+  Where several old players share a network it says where to get the update.
+- **Automatic updates wait for approval.** A new release is on the download
+  page and behind the buttons straight away, but no screen installs it by
+  itself until it's approved.
 
 ## v0.2.24
 
