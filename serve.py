@@ -4293,6 +4293,11 @@ def lan_ip() -> str:
         s.close()
 
 
+# Paths under /tv/ that are files, so a missing one 404s instead of getting
+# the player page (see Handler.translate_path).
+_TV_ASSET_RE = re.compile(r"\.(?:js|css|map|png|jpe?g|gif|svg|ico|json|txt|html?|webmanifest|mp4|webm)$", re.I)
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     """Routes / under app/ and /media/ under the Drive's Brand Content folder."""
 
@@ -4359,6 +4364,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             full.relative_to(APP_DIR)
         except ValueError:
             return str(APP_DIR / "index.html")
+        # Samsung web player short addresses: /tv/holt/L1 is the player page,
+        # which reads the store and screen from the path. Typed on a TV
+        # remote, so no ?, & or = to hunt for. Real files under /tv/ (and
+        # any missing asset like a .js) are served or 404 as normal.
+        if (path.startswith("tv/") and not full.exists()
+                and not _TV_ASSET_RE.search(path)):
+            return str(APP_DIR / "tv" / "index.html")
         return str(full)
 
     # ── /media/ gets range support; /api/ goes to JSON handlers ──
