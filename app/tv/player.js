@@ -25,7 +25,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'web-1.0.0';
+  var VERSION = 'web-1.0.1';
   var FLAVOR = 'web';
 
   // ── Config from the address ─────────────────────────────────────────
@@ -457,7 +457,7 @@
       return navigator.serviceWorker.ready;
     }).then(function () {
       swState = navigator.serviceWorker.controller ? 'active' : 'active (from next load)';
-      if (state.items.length) precache(state.items);
+      if (state.items.length || state.splashUrl) precache(state.items);
     }).catch(function (e) {
       swState = 'failed: ' + e.message;
       log('Service worker failed: ' + e.message);
@@ -512,7 +512,8 @@
   var rateCheck = null;       // {since, abs} while a speed nudge runs
   var currentRate = 1;
   var lastDriftMs = null;
-  var stall = { lastPos: -1, since: 0, recoveries: [] };
+  var stall = { lastPos: -1, lastFrames: -1, framesSeen: 0, since: 0, recoveries: [] };
+  var splashPlayAt = 0;       // local time of the last play() on the splash
   var startTimer = null;
   var pageStart = localNow();
   var seekTimes = [];         // local times of corrective seeks (sync report)
@@ -809,6 +810,83 @@
     }
   }
 
+  function startSplash(el) {
+    el.loop = true;
+    el.muted = !state.audioOn;
+    el.src = state.splashUrl;
+    showVideo(el);
+    playVideo(el);
+    restartStallWatch(localNow());
+  }
+
+  /** The splash has no clock to follow, so just keep it moving: a panel can
+   *  pause a video, stop at the end of a loop or freeze by itself. */
+  function watchSplash(el) {
+    var now = localNow();
+    if (document.hidden) { restartStallWatch(now); return; }
+    if (pictureMoved(el, now)) return;
+    if (el.ended) { try { el.currentTime = 0; } catch (e) { /* ignore */ } }
+    if ((el.paused || el.ended) && el.readyState >= 2 && now - splashPlayAt > 2000) {
+      splashPlayAt = now;
+      playVideo(el);
+    }
+    // Give a slow download longer than a picture that has stopped.
+    if (now - stall.since <= (el.readyState < 3 && !el.error ? 30000 : 10000)) return;
+    var stuckMs = now - stall.since;
+    noteStall(now);
+    log('Splash stopped at ' + el.currentTime.toFixed(1) + ' s for ' + Math.round(stuckMs / 1000) +
+      ' s (' + videoState(el) + '), reloading it');
+    if (stall.recoveries.length >= 3 && mayReloadPage()) { location.reload(); return; }
+    clearVideo(el);           // the next tick opens it again
+    restartStallWatch(now);
+  }
+
+  function restartStallWatch(now) {
+    stall.lastPos = -1;
+    stall.lastFrames = -1;
+    stall.framesSeen = 0;
+    stall.since = now;
+  }
+
+  function noteStall(now) {
+    stall.recoveries.push(now);
+    stall.recoveries = stall.recoveries.filter(function (t) { return now - t < 300000; });
+  }
+
+  /** True if the picture has changed since the last tick. The frame counter
+   *  only counts once it has been seen to work: some panels don't fill it in. */
+  function pictureMoved(el, now) {
+    var pos = el.currentTime;
+    var frames = framesShown(el);
+    var posMoved = pos !== stall.lastPos;
+    var framesMoved = frames !== null && frames !== stall.lastFrames;
+    if (framesMoved && stall.lastFrames >= 0) stall.framesSeen++;
+    stall.lastPos = pos;
+    stall.lastFrames = frames === null ? -1 : frames;
+    if (!posMoved || (frames !== null && stall.framesSeen >= 10 && !framesMoved)) return false;
+    stall.since = now;
+    return true;
+  }
+
+  function framesShown(el) {
+    try { return el.getVideoPlaybackQuality().totalVideoFrames || null; } catch (e) { return null; }
+  }
+
+  /** At most one page reload every 10 minutes for a splash that won't play,
+   *  and none while offline. */
+  function mayReloadPage() {
+    if (!state.online) return false;
+    var last = parseFloat(store('screens.splashReloadAt') || '0') || 0;
+    if (Math.abs(Date.now() - last) < 600000) return false;
+    store('screens.splashReloadAt', String(Date.now()));
+    return store('screens.splashReloadAt') !== null;   // no storage: can't count, so don't
+  }
+
+  function videoState(el) {
+    return (el.error ? 'error ' + el.error.code : el.ended ? 'ended' : el.paused ? 'paused' : 'playing') +
+      ', ready ' + el.readyState + ', network ' + el.networkState;
+  }
+
   function tick() {
     var e = expected();
     var el = activeEl();
@@ -817,12 +895,8 @@
       current = { idx: -1, id: null, since: 0 };
       if (cue) forgetCue();
       if (state.splashUrl) {
-        if (!sameUrl(el, state.splashUrl)) {
-          el.loop = true;
-          el.src = state.splashUrl;
-          showVideo(el);
-          playVideo(el);
-        }
+        if (!sameUrl(el, state.splashUrl)) startSplash(el);
+        else watchSplash(el);
         hideIdle();
       } else {
         showIdle(state.online ? 'No content assigned to this screen yet.' : 'Connecting…');
@@ -938,7 +1012,12 @@
         '  ·  speed ' + currentRate.toFixed(2) + '  ·  fine speed control ' +
         (rateWorks === null ? 'untested' : rateWorks ? 'yes' : 'no') + '  ·  seek lead ' + Math.round(seekLeadMs) + ' ms',
       'Playing  ' + (item ? (e.idx + 1) + '/' + state.items.length + ' ' + (item.title || item.id) +
-        ' @ ' + (e.posMs / 1000).toFixed(2) + ' s' : '—'),
+        ' @ ' + (e.posMs / 1000).toFixed(2) + ' s' : state.splashUrl ? 'splash' : '—'),
+      'Video    ' + (function () {
+        var el = activeEl(), n = framesShown(el);
+        return el.currentTime.toFixed(1) + '/' + (el.duration || 0).toFixed(1) + ' s  ·  ' + videoState(el) +
+          '  ·  ' + (n === null ? 'no frame count' : n + ' frames') + '  ·  ' + el.videoWidth + '×' + el.videoHeight;
+      })(),
       'Next     ' + (!gapless ? 'seamless changes ' + gaplessNote
         : cue ? (cue.idx + 1) + '/' + state.items.length + (cue.ready ? ' ready' : ' opening…')
         : 'opens 5 s before the change'),
