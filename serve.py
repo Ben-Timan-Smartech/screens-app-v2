@@ -3598,8 +3598,9 @@ def _starts_in_sec(starts_ms) -> float | None:
 
 
 _SYNC_REPORT_INTS = ("anchorMs", "itemIndex", "positionMs", "driftMs", "offsetMs",
-                     "rttMs", "samples", "seeks", "missing", "items")
-_SYNC_REPORT_STRS = ("group", "itemId", "state")
+                     "rttMs", "samples", "seeks", "missing", "items",
+                     "trimMs", "startLeadMs", "startErrMs")
+_SYNC_REPORT_STRS = ("group", "itemId", "state", "measure")
 
 
 def _clean_sync_report(raw) -> dict | None:
@@ -5194,6 +5195,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # Returns the current user (if a valid session cookie is present)
         # or {user: null}. Used by the frontend AuthGate on first paint
         # and after every login/logout to decide what to render.
+        # v0.2.25: just the time, for a synced screen setting its clock.
+        # Nothing else happens here, so the round trip is as short as it gets.
+        if path == "/api/time":
+            self._send_json({"nowMs": round(time.time() * 1000, 1)},
+                            extra_headers=[("Cache-Control", "no-store")])
+            return
+
         if path == "/api/auth/me":
             user = self._current_user()
             self._send_json({
@@ -5483,6 +5491,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "mixSplash":   False if sync_group_id else s["mixSplash"],
                         "productCard": bool(s.get("productCard")),   # v0.1.86: on-screen product info card
                         "rotation":    int(s.get("rotation") or 0),  # v0.2.8: physical-mount display rotation (deg)
+                        "syncTrimMs":  int(s.get("syncTrimMs") or 0),  # v0.2.25: web player only
                         "experienceUrl": s.get("experienceUrl"),     # v0.1.92: guided brand experience (kiosk WebView), null = off
                         "experiencePromptPos": s.get("experiencePromptPos") or "top",   # v0.1.95: "top" | "bottom"
                         # v0.1.98: tap-to-skip. Forced OFF for a screen in a
@@ -5634,6 +5643,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "mixSplash":             real_state.get("mixSplash", True),
                         "productCard":           bool(state.get("productCard")),   # v0.1.86
                         "rotation":              int(state.get("rotation") or 0),  # v0.2.8
+                        "syncTrimMs":            int(state.get("syncTrimMs") or 0),
                         "experienceUrl":         state.get("experienceUrl"),       # v0.1.92
                         "experiencePromptPos":   state.get("experiencePromptPos") or "top",   # v0.1.95
                         # Raw stored value (NOT the sync-group-forced one) so the
@@ -7105,13 +7115,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/poll-mode       { pollMode: "fast"|"normal"|"slow" }
         # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }   (legacy — writes pollMode)
         # POST /api/screens/<deviceId>/sync-group      { syncGroup: string | null }
+        # POST /api/screens/<deviceId>/sync-trim       { trimMs: -500..500 }   (web player)
         # POST /api/screens/<deviceId>/display-mode    { displayMode: int | null }
         # POST /api/screens/<deviceId>/rotation        { rotation: 0|90|180|270 }
         # POST /api/screens/<deviceId>/name            { name: string }
         # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
         # POST /api/screens/<deviceId>/content-mode    { mode: "playlist"|"web", url?, reloadEveryMin?, pageWidth?,
         #                                                keepAwake?: "always"|"hours"|"off", awakeFrom?, awakeTo? }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|display-mode|rotation|content-mode|name|location)$", path)
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|sync-trim|display-mode|rotation|content-mode|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -7684,6 +7695,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     )
                     self._send_json({"ok": True, "syncGroup": new_group,
                                      "adoptedItems": adopted})
+                    return
+                if action == "sync-trim":
+                    # v0.2.25: line this screen up with its group by eye. + =
+                    # runs earlier. A delay in the panel itself doesn't show
+                    # in anything the player can measure.
+                    raw_trim = body.get("trimMs")
+                    if isinstance(raw_trim, bool) or not isinstance(raw_trim, (int, float)) or not abs(raw_trim) <= 500:
+                        self._send_json({"ok": False, "error": "trimMs must be between -500 and 500"}, status=400)
+                        return
+                    state = _ensure_screen_state(device_id)
+                    state["syncTrimMs"] = int(raw_trim)
+                    _save_per_screen_soon()
+                    self._send_json({"ok": True, "trimMs": state["syncTrimMs"]})
                     return
                 if action == "display-mode":
                     # Pick an HDMI mode for this screen. null = auto
