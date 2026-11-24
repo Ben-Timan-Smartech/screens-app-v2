@@ -239,6 +239,9 @@ dependencies {
     // DataStore for device token / preferences
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
+    // Unit tests for the sync maths (player/app/src/test)
+    testImplementation("junit:junit:4.13.2")
+
     // WorkManager for heartbeat
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 

@@ -2,6 +2,8 @@ package com.smartech.screens.player
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
@@ -16,7 +18,6 @@ import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlin.math.abs
 
 /**
  * Thin wrapper around [ExoPlayer] that plays a list of locally-cached files on
@@ -78,6 +79,10 @@ class PlayerController(context: Context) {
      *  is never in this map and therefore always plays at the audioOn
      *  volume (muted by default). */
     private val defaultUnmuteById = mutableMapOf<String, Boolean>()
+    /** Ids of still images in the queue (no drift to measure on those). */
+    private val imageIds = mutableSetOf<String>()
+    /** Last "#r<n>" rebuild request seen in a revision; see [apply]. */
+    private var lastForceNonce = 0
 
     /** v0.1.12 client-side sync state. When non-null, the player snaps to
      *  the group-correct item on every queue transition; the math runs
@@ -85,7 +90,10 @@ class PlayerController(context: Context) {
      *  be?". See [applyGroupSync]. */
     private data class GroupSyncState(
         val loopStartedAtMs: Long,
-        val serverOffsetMs: Long,
+        /** Server clock minus SystemClock.elapsedRealtime(). Monotonic on
+         *  purpose: the wall clock can be stepped by seconds when Android
+         *  corrects it, which would throw a screen out of step. */
+        val serverOffsetRtMs: Long,
         /** Item ids in order, matching the current queue (skipping splash
          *  if mix-splash is on — but mix-splash is forced off in sync
          *  groups, see serve.py). */
@@ -95,7 +103,10 @@ class PlayerController(context: Context) {
         /** Sum of durations. Cached to avoid recomputing on every
          *  transition. */
         val totalDurationMs: Long,
-    )
+    ) {
+        fun serverNowMs(): Long = SystemClock.elapsedRealtime() + serverOffsetRtMs
+        fun elapsedMs(): Long = serverNowMs() - loopStartedAtMs
+    }
 
     @Volatile
     private var groupSync: GroupSyncState? = null
@@ -115,34 +126,46 @@ class PlayerController(context: Context) {
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var pendingCoordinatedStart: Runnable? = null
 
+    @Volatile private var lastSyncReport: SyncReport? = null
+    fun syncReport(): SyncReport? = lastSyncReport
+
+    /** When the last corrective jump happened, newest last. */
+    private val seekTimesMs = ArrayDeque<Long>()
+    private fun noteSeek() {
+        seekTimesMs.addLast(SystemClock.elapsedRealtime())
+        while (seekTimesMs.size > 120) seekTimesMs.removeFirst()
+    }
+
+    /** How far ahead to aim a jump; learned from how late each one lands, so
+     *  a slow box doesn't keep landing behind and jumping again. */
+    private var seekLeadMs: Long = SEEK_LEAD_MS
+    private var lastJumpAtMs: Long = 0L
+    private var checkLandingAtMs: Long = 0L
+
+    /** Elapsed-realtime of the last item change; drift isn't read for a
+     *  moment after one because the position takes time to settle. */
+    private var lastTransitionAtMs: Long = 0L
+    /** A pause the sync code made itself: wait for the group clock. */
+    private var holdRunnable: Runnable? = null
+    private var waitingForSlot = false
+    private val boundaryRunnable = Runnable { onBoundary() }
+    private var speedCorrecting = false
+
     /**
-     * v0.1.17: in-flight playback-rate adjustment for sync drift.
+     * v0.1.17 (rewritten v0.2.25): keep this screen on the group's clock.
      *
-     * Even with the v0.1.13 NTP clock-sync working perfectly (clocks
-     * agree to within ~10 ms — confirmed by the calibration overlay),
-     * two TX3-class boxes playing the same H.264 file drift past each
-     * other at ~0.5-1% over real-time because their hardware decoders
-     * pace differently. Over a 15-second video that's 75-150 ms of
-     * drift — easily visible side-by-side, and accumulating across
-     * loop iterations.
+     * Two TX3-class boxes playing the same H.264 file drift past each other at
+     * ~0.5–1 % even with clocks that agree to ~10 ms, because their decoders
+     * pace differently. So: measure how far the player is from the group
+     * clock every 500 ms, the short way round the loop ([SyncMath.gapMs]), and
+     * close small gaps with a speed change no one can see (1–4 %, scaled to
+     * the gap). Bigger gaps are closed by a jump (behind) or a short wait on
+     * the last frame (ahead), never by replaying a tail.
      *
-     * The v0.1.12 snap-at-transition model can't catch this: snaps
-     * only fire at item boundaries, and between boundaries drift
-     * runs free. By the time the next transition arrives, the two
-     * tablets may have crossed an item boundary at different moments
-     * and end up on different items entirely.
-     *
-     * Fix: sample the actual-vs-expected position every 500 ms while
-     * in group sync. Tiny drifts (< 50 ms) we leave alone. Mid-range
-     * drifts (50 ms – 2 s) we nudge with `setPlaybackParameters(speed)`
-     * — invisible to the eye, no buffer flash, no audio pitch
-     * artefact for the muted-by-default case. Anything > 2 s falls
-     * back to a real seek (rare — happens when transition timing
-     * diverges by more than an item's worth of jitter).
-     *
-     * The seek-then-flash path that v0.1.11 used at a 3 s threshold
-     * is preserved only as a last resort because rate-control alone
-     * can't close a multi-second gap fast enough to be useful.
+     * Changes between items are driven by the group's clock, not by where a
+     * file happens to end ([onBoundary]): a file shorter than its slot holds
+     * its last frame, and one longer is cut at the slot. Files whose length
+     * matches their slot still change over naturally.
      */
     private var driftCorrectionTickScheduled: Boolean = false
     private var currentPlaybackSpeed: Float = 1.0f
@@ -150,7 +173,7 @@ class PlayerController(context: Context) {
         override fun run() {
             driftCorrectionTickScheduled = false
             try {
-                correctDriftInCurrentItem()
+                syncTick()
             } finally {
                 // Re-arm only while we're in group sync. The
                 // applyGroupSync path schedules the first tick on
@@ -166,6 +189,13 @@ class PlayerController(context: Context) {
         }
     }
 
+    private fun stopSyncTimers() {
+        mainHandler.removeCallbacks(boundaryRunnable)
+        holdRunnable?.let { mainHandler.removeCallbacks(it) }
+        holdRunnable = null
+        waitingForSlot = false
+    }
+
     private fun scheduleDriftTickIfNeeded() {
         if (driftCorrectionTickScheduled) return
         if (groupSync == null) return
@@ -176,23 +206,19 @@ class PlayerController(context: Context) {
     init {
         // Re-apply volume whenever the player moves to the next item in the
         // queue. Without this listener, the first MediaItem's volume sticks
-        // for the whole loop. The same listener also handles sync snap —
-        // see [snapToGroupExpectedItem] — so group corrections only happen
-        // at natural item boundaries where ExoPlayer is already changing
-        // items (i.e. visible jumps become invisible).
+        // for the whole loop. In a sync group, what plays when is decided by
+        // the group clock ([syncTick], [onBoundary]), not here.
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 _currentMediaId.value = player.currentMediaItem?.mediaId
                 applyVolumeForCurrentItem()
-                snapToGroupExpectedItem()
+                lastTransitionAtMs = SystemClock.elapsedRealtime()
                 // Reset the playback rate at every transition. Drift
                 // accumulated on the previous item could have left the
-                // speed at 1.03/0.97 from a recent nudge; without this
-                // reset the new item would start mid-correction.
-                if (currentPlaybackSpeed != 1.0f) {
-                    currentPlaybackSpeed = 1.0f
-                    player.playbackParameters = PlaybackParameters(1.0f)
-                }
+                // speed off from a recent nudge; without this reset the
+                // new item would start mid-correction.
+                speedCorrecting = false
+                setPlaybackSpeed(1f)
             }
         })
     }
@@ -291,8 +317,16 @@ class PlayerController(context: Context) {
             playSplash()
             return
         }
-        // Encode mixSplash into the source key so toggling triggers a re-apply.
-        val sourceKey = "$revision|splash=$mixSplash"
+        // Rebuild only when what would play changes. Not on the revision: the
+        // server bumps it for settings that don't touch the videos (product
+        // card, rotation...), and each rebuild restarts this screen at item 0.
+        // "Restart player" and the watchdog ask for a rebuild by tagging the
+        // revision with "#r<n>" (PlayerRepository.forceReapply), so that still
+        // counts. Encode mixSplash too so toggling triggers a re-apply.
+        revision.substringAfter("#r", "").toIntOrNull()?.let { lastForceNonce = it }
+        val sourceKey = playlist.joinToString("|") {
+            "${it.item.id}:${it.file.path}:${it.file.length()}:${it.item.durationSec}"
+        } + "|splash=$mixSplash|force=$lastForceNonce"
         val expectedCount = playlist.size + (if (mixSplash) 1 else 0)
         if (sourceKey == currentSource && player.mediaItemCount == expectedCount) return
         currentSource = sourceKey
@@ -319,13 +353,37 @@ class PlayerController(context: Context) {
             builder.build()
         }
         // Refresh the per-item defaultUnmute map for volume decisions.
+        imageIds.clear()
+        playlist.filter { it.item.type == "image" }.forEach { imageIds += it.item.id }
         defaultUnmuteById.clear()
         for (lv in playlist) {
             if (lv.item.defaultUnmute) defaultUnmuteById[lv.item.id] = true
         }
-        player.setMediaItems(items, /* resetPosition = */ true)
+        val waiting = pendingCoordinatedStart != null
+        val group = groupSync
+        val spot = if (group != null && !mixSplash && !waiting) {
+            // In a group, start where the group is, not at item 0. Otherwise
+            // every rebuild would show the wrong video until the next sync
+            // tick corrected it.
+            SyncMath.locate(
+                group.elapsedMs() + seekLeadMs,
+                playlist.map { (it.item.durationSec ?: 15).coerceAtLeast(1).toLong() * 1000L },
+            )?.takeIf { group.elapsedMs() >= 0L }
+        } else null
+        if (spot != null) {
+            player.setMediaItems(items, spot.index, spot.positionMs)
+        } else {
+            player.setMediaItems(items, /* resetPosition = */ true)
+        }
         player.prepare()
-        player.play()
+        if (waiting) {
+            // The group starts together in a moment: be ready on the first
+            // frame rather than playing on ahead of everyone.
+            player.seekTo(0, 0L)
+            player.playWhenReady = false
+        } else {
+            player.play()
+        }
         // onMediaItemTransition fires asynchronously; apply now so the very
         // first item doesn't briefly play at the previous loop's volume.
         applyVolumeForCurrentItem()
@@ -337,37 +395,30 @@ class PlayerController(context: Context) {
     /**
      * Apply (or clear) a group-sync anchor.
      *
-     * New in v0.1.12: the tablet now does ALL "which item should I be
-     * on?" math locally using just `loopStartedAtMs` + the item
-     * durations it already has. Sync correction happens in
-     * [snapToGroupExpectedItem], which is only called at media-item
-     * transitions — so the corrective seek is invisible (ExoPlayer is
-     * already changing items at exactly that moment).
+     * The tablet does all "where should I be?" maths locally, from
+     * `loopStartedAtMs` and the item durations it already has (see
+     * [SyncMath]); [syncTick] keeps it there.
      *
      * Pass `null` to clear: the screen is no longer in a sync group
      * and should play through its queue without correction.
      */
     fun applyGroupSync(
         loopStartedAtMs: Long?,
-        serverOffsetMs: Long,
+        serverOffsetRtMs: Long,
         itemIds: List<String>,
         itemDurationsMs: List<Long>,
     ) {
         if (loopStartedAtMs == null || itemIds.isEmpty()) {
-            if (groupSync != null) LogBuffer.i("PlayerController", "Group sync cleared")
-            groupSync = null
-            // Restore normal playback speed; the drift loop dies on
-            // its next tick (it checks groupSync != null to re-arm).
-            if (currentPlaybackSpeed != 1.0f) {
-                currentPlaybackSpeed = 1.0f
-                player.playbackParameters = PlaybackParameters(1.0f)
+            if (groupSync != null) {
+                LogBuffer.i("PlayerController", "Group sync cleared")
+                leaveGroupSync()
             }
             return
         }
         val total = itemDurationsMs.sum().coerceAtLeast(1L)
         val next = GroupSyncState(
             loopStartedAtMs = loopStartedAtMs,
-            serverOffsetMs = serverOffsetMs,
+            serverOffsetRtMs = serverOffsetRtMs,
             itemIds = itemIds,
             itemDurationsMs = itemDurationsMs,
             totalDurationMs = total,
@@ -375,353 +426,287 @@ class PlayerController(context: Context) {
         val prev = groupSync
         groupSync = next
         // First time we got an anchor, or the loop epoch changed (new
-        // playlist push, group reset) — snap immediately rather than
-        // waiting for the next natural transition. This is the only
-        // time we issue a mid-item seek; from here on, snapping
-        // happens at queue boundaries only.
+        // playlist push, group restart).
         if (prev == null || prev.loopStartedAtMs != next.loopStartedAtMs) {
             LogBuffer.i(
                 "PlayerController",
                 "Group sync acquired — loopStartedAtMs=$loopStartedAtMs, " +
                     "${itemIds.size} items, total=${total}ms",
             )
-            // Cancel any pending coordinated-start runnable from a prior
-            // anchor — a new epoch supersedes the old wait.
             pendingCoordinatedStart?.let { mainHandler.removeCallbacks(it) }
             pendingCoordinatedStart = null
+            stopSyncTimers()
 
-            // Is the epoch in the (near) future? If so, this is a
-            // coordinated-start signal from the server: seek to item 0
-            // position 0, pause, and resume at the exact wall-clock
-            // instant. Every tablet in the group does the same thing,
-            // so when wall-clock catches up to loopStartedAtMs they all
-            // resume from frame 0 simultaneously — no staircase based
-            // on who polled first.
-            val serverNowMs = System.currentTimeMillis() + serverOffsetMs
-            val msUntilStart = loopStartedAtMs - serverNowMs
-            // Guard band: 60 s. Anything further out is almost certainly
-            // a clock-skew anomaly rather than an intentional coordinated
-            // start; fall through to the normal snap path, which clamps
-            // elapsed to 0 and lands on item 0 anyway.
+            val msUntilStart = -next.elapsedMs()
+            // Is the epoch in the (near) future? Then this is a coordinated
+            // start: sit on the first frame of the first video and start on
+            // the exact moment, so every screen in the group starts together.
+            // Guard band: anything further out than 60 s is a clock anomaly.
             if (msUntilStart in 1L..60_000L) {
-                LogBuffer.i(
-                    "PlayerController",
-                    "Coordinated start in ${msUntilStart}ms — pausing on item 0",
-                )
-                // Seek to (item 0, position 0). The first item in the
-                // queue may be splash (mix-splash off in groups, but
-                // defensive) — skip past it to the first real item.
+                LogBuffer.i("PlayerController", "Coordinated start in ${msUntilStart}ms")
                 val target = (0 until player.mediaItemCount).firstOrNull { i ->
                     player.getMediaItemAt(i).mediaId != Source.SPLASH
                 } ?: 0
                 player.seekTo(target, 0L)
                 player.playWhenReady = false
-                val resume = Runnable {
-                    LogBuffer.i("PlayerController", "Coordinated start firing")
-                    player.playWhenReady = true
-                    pendingCoordinatedStart = null
-                    scheduleDriftTickIfNeeded()
-                }
-                pendingCoordinatedStart = resume
-                mainHandler.postDelayed(resume, msUntilStart)
+                armCoordinatedStart(next)
             } else {
-                snapToGroupExpectedItem(force = true)
+                placeOnGroupClock(next)
             }
         }
         // Every time we receive an anchor — coordinated-start or
-        // already-running — make sure the drift correction loop is
-        // ticking. Idempotent; the scheduler is a no-op when a tick
-        // is already in flight.
+        // already-running — make sure the sync loop is ticking.
         scheduleDriftTickIfNeeded()
     }
 
-    /**
-     * Pulled from [driftTick]. Compares the player's actual position
-     * within the current item against the math-expected position
-     * (same formula as [snapToGroupExpectedItem]) and decides how to
-     * close the gap:
-     *   • drift < 50 ms        → leave the speed alone (or restore 1.0×)
-     *   • drift 50 ms – 2 s    → nudge speed to 1.03× / 0.97×
-     *   • drift > 2 s          → real seek (last-resort path)
-     */
-    private fun correctDriftInCurrentItem() {
-        // v0.1.21: wrap the whole body in a guard. The "delete a video
-        // crash" path was here: when staff remove an item via the
-        // tablet's playlist editor, `state.itemIds` and
-        // `state.itemDurationsMs` can briefly fall out of sync with
-        // ExoPlayer's queue while the new playlist propagates. Any
-        // unchecked array access threw IndexOutOfBoundsException and
-        // killed the activity. We'd rather skip a single drift tick
-        // than die — the next anchor refresh fixes the state.
+    /** Wait for the start moment: re-checked once close to it, so a clock
+     *  offset that improved in the meantime is used. */
+    private fun armCoordinatedStart(target: GroupSyncState) {
+        val wait = -target.elapsedMs()
+        val fire: Runnable = if (wait > 400L) {
+            Runnable { pendingCoordinatedStart = null; armCoordinatedStart(target) }
+        } else {
+            Runnable {
+                pendingCoordinatedStart = null
+                LogBuffer.i("PlayerController", "Coordinated start firing")
+                lastTransitionAtMs = SystemClock.elapsedRealtime()
+                player.playWhenReady = true
+                scheduleDriftTickIfNeeded()
+            }
+        }
+        pendingCoordinatedStart = fire
+        mainHandler.postDelayed(fire, if (wait > 400L) wait - 300L else wait.coerceAtLeast(0L))
+    }
+
+    private fun leaveGroupSync() {
+        groupSync = null
+        lastSyncReport = null
+        pendingCoordinatedStart?.let { mainHandler.removeCallbacks(it) }
+        pendingCoordinatedStart = null
+        stopSyncTimers()
+        speedCorrecting = false
+        setPlaybackSpeed(1f)
+        player.pauseAtEndOfMediaItems = false
+        // The group may have left us paused (waiting for a slot); a screen on
+        // its own must be playing.
+        if (!player.playWhenReady && player.mediaItemCount > 0) player.playWhenReady = true
+    }
+
+    /** Jump to where the group is now and play. */
+    private fun placeOnGroupClock(state: GroupSyncState) {
+        val ahead = state.elapsedMs() + seekLeadMs
+        val spot = SyncMath.locate(ahead, state.itemDurationsMs) ?: return
+        val q = SyncMath.queueIndexOf(state.itemIds, spot.index, queueIds())
+        if (q == null) {
+            holdForMissing()
+            return
+        }
+        noteSeek()
+        waitingForSlot = false
+        setPlaybackSpeed(1f)
+        player.seekTo(q, spot.positionMs)
+        player.playWhenReady = true
+        val now = SystemClock.elapsedRealtime()
+        lastTransitionAtMs = now
+        lastJumpAtMs = now
+        checkLandingAtMs = now
+    }
+
+    /** Ids of the queue's items, in order, matching [GroupSyncState.itemIds]
+     *  (splash excluded — mix-splash is forced off in groups, but defend). */
+    private fun queueIds(): List<String> =
+        (0 until player.mediaItemCount).map { player.getMediaItemAt(it).mediaId }
+
+    /** The group is on a video this screen doesn't have: hold the last frame
+     *  until the group moves on, rather than playing something else. */
+    private fun holdForMissing() {
+        waitingForSlot = true
+        setPlaybackSpeed(1f)
+        player.playWhenReady = false
+    }
+
+    private fun setPlaybackSpeed(speed: Float) {
+        if (currentPlaybackSpeed == speed) return
+        currentPlaybackSpeed = speed
+        player.playbackParameters = PlaybackParameters(speed)
+    }
+
+    /** Keep this screen on the group's clock; runs every 500 ms. Any exception
+     *  is caught: skipping a tick beats crashing the activity when the queue
+     *  changes underneath (a playlist edit, a purge). */
+    private fun syncTick() {
         try {
-            correctDriftInCurrentItemImpl()
+            syncTickImpl()
         } catch (t: Throwable) {
-            LogBuffer.w("PlayerController", "Drift tick skipped: ${t.javaClass.simpleName}: ${t.message ?: ""}", t)
+            LogBuffer.w("PlayerController", "Sync tick skipped: ${t.javaClass.simpleName}: ${t.message ?: ""}", t)
         }
     }
 
-    private fun correctDriftInCurrentItemImpl() {
-        val state = groupSync ?: return
-        // Don't mid-item correct while a coordinated-start pause is
-        // armed — that branch is doing its own scheduled work.
-        if (pendingCoordinatedStart != null) return
-        val currentId = player.currentMediaItem?.mediaId ?: return
-        if (currentId == Source.SPLASH) return
-        // Player must be in a position we can actually compare. STATE_READY
-        // is the only state where `currentPosition` is trustworthy.
-        if (player.playbackState != Player.STATE_READY) return
-        if (!player.playWhenReady) return
-        // v0.1.21: itemIds and itemDurationsMs are parallel lists, both
-        // sourced from the same place. If they're not the same length
-        // the anchor is mid-update — bail rather than risk indexing
-        // into the shorter one with an index from the longer.
-        if (state.itemIds.size != state.itemDurationsMs.size) return
-        if (state.itemIds.isEmpty()) return
-
-        val currentIndex = player.currentMediaItemIndex
-        if (currentIndex < 0 || currentIndex >= state.itemIds.size) return
-        // Defensive: queue may include splash at index 0 if mix-splash
-        // is somehow on; the math operates on the splash-less itemIds
-        // list. Find this item's position in itemIds by id.
-        val itemIdx = state.itemIds.indexOf(currentId)
-        if (itemIdx < 0 || itemIdx >= state.itemDurationsMs.size) return
-
-        val serverNowMs = System.currentTimeMillis() + state.serverOffsetMs
-        val elapsed = (serverNowMs - state.loopStartedAtMs).coerceAtLeast(0L)
-        val offset = elapsed % state.totalDurationMs
-
-        // Expected position within the loop, then narrow to this item.
-        var cumulative = 0L
-        var expectedIdx = -1
-        var expectedPos = 0L
-        for (i in state.itemDurationsMs.indices) {
-            val d = state.itemDurationsMs[i]
-            if (offset < cumulative + d) {
-                expectedIdx = i
-                expectedPos = offset - cumulative
-                break
-            }
-            cumulative += d
-        }
-        if (expectedIdx < 0) return
-
-        // If we're on the wrong item, let the snap-at-transition path
-        // handle it on the next natural boundary (or last-resort seek).
-        if (expectedIdx != itemIdx) {
-            // Big drift — only seek if we're more than ~1 s past the
-            // wrong-item boundary. Otherwise we're a few hundred ms
-            // either side of a transition and the next onMediaItemTransition
-            // will pull us into line.
-            val itemDur = state.itemDurationsMs[itemIdx]
-            val howFarOff = if (expectedIdx > itemIdx) {
-                // Expected later in loop — we're behind. Distance is
-                // remainder of this item + cumulative of items between.
-                var d = itemDur - player.currentPosition
-                for (j in (itemIdx + 1) until expectedIdx) d += state.itemDurationsMs[j]
-                d += expectedPos
-                d
-            } else {
-                // Expected earlier — we're ahead (or loop wrapped).
-                // Don't try to "seek backward" mid-item; the next
-                // natural wrap will fix it.
-                Long.MAX_VALUE
-            }
-            if (howFarOff in 0L..2000L) {
-                // Within rate-control range — speed up so the boundary
-                // catches up. Skip the seek.
-                setPlaybackSpeedNudge(+1)
-                return
-            }
-            // Real divergence: snap. Restore speed. Same backward-
-            // guard as snapToGroupExpectedItem — never seek to a
-            // previous item from this code path.
-            if (expectedIdx < itemIdx) {
-                setPlaybackSpeedNudge(0)
-                return
-            }
-            setPlaybackSpeedNudge(0)
-            LogBuffer.i(
-                "PlayerController",
-                "Drift seek → item ${state.itemIds[expectedIdx]} at ${expectedPos}ms (wrong item)",
-            )
-            // Map expectedIdx (itemIds space) back to queue index.
-            val queueIdx = (0 until player.mediaItemCount)
-                .firstOrNull { i -> player.getMediaItemAt(i).mediaId == state.itemIds[expectedIdx] }
-                ?: return
-            player.seekTo(queueIdx, expectedPos)
+    private fun syncTickImpl() {
+        val s = groupSync ?: return
+        if (s.itemIds.isEmpty() || s.itemIds.size != s.itemDurationsMs.size) return
+        val elapsed = s.elapsedMs()
+        if (elapsed < 0L || pendingCoordinatedStart != null) {
+            report(s, SyncMath.Spot(0, 0L), null, "waiting")
             return
         }
-
-        // Right item — close the gap with rate control.
-        // **v0.1.18:** never nudge in the last 1.5 s of an item or the
-        // first 500 ms after a transition. Both are danger zones for
-        // misaligning the natural transition with the math-expected
-        // boundary:
-        //   • Late: a 1.01× nudge causes the item to end ~10-15 ms
-        //     early per second of playback. If we keep nudging right
-        //     up to the natural end, the cumulative early-finish
-        //     would re-trigger snap-back.
-        //   • Early: the player's currentPosition isn't stable until
-        //     a few hundred ms after `seekTo`, so drift reads are
-        //     noisy. Letting the player settle avoids spurious nudges.
-        val itemDuration = state.itemDurationsMs[itemIdx]
-        val nearEnd = player.currentPosition > itemDuration - 1500L
-        val nearStart = player.currentPosition < 500L
-        if (nearEnd || nearStart) {
-            setPlaybackSpeedNudge(0)
-            return
-        }
-
-        val drift = player.currentPosition - expectedPos
-        when {
-            abs(drift) < 100L -> setPlaybackSpeedNudge(0)
-            abs(drift) < 2000L -> setPlaybackSpeedNudge(if (drift > 0) -1 else +1)
-            else -> {
-                // > 2 s: rate-control would take too long. Seek.
-                setPlaybackSpeedNudge(0)
-                LogBuffer.i(
-                    "PlayerController",
-                    "Drift seek → ${expectedPos}ms (was ${player.currentPosition}ms, drift=${drift}ms)",
-                )
-                player.seekTo(player.currentMediaItemIndex, expectedPos)
-            }
-        }
-    }
-
-    /**
-     * `direction` is -1 (slow down), 0 (run at real-time), or +1 (speed up).
-     *
-     * **v0.1.18:** dialled the nudge from ±3% to ±1%. The 3% rate
-     * caused items to finish ~440 ms before their natural duration,
-     * which the math then saw as "you should still be on the last
-     * frame of the previous item." `snapToGroupExpectedItem` then
-     * seeked backward to replay the tail — user-visible as "the
-     * video isn't playing fully." ±1% takes longer to close a gap
-     * (a 300 ms drift takes 30 s to recover) but is invisible at
-     * boundaries: a 15 s item finishes ~150 ms off natural, which
-     * the boundary guard in [snapToGroupExpectedItem] absorbs
-     * without snap-back.
-     */
-    private fun setPlaybackSpeedNudge(direction: Int) {
-        val target = when {
-            direction > 0 -> 1.01f
-            direction < 0 -> 0.99f
-            else -> 1.0f
-        }
-        if (currentPlaybackSpeed == target) return
-        currentPlaybackSpeed = target
-        player.playbackParameters = PlaybackParameters(target)
-    }
-
-    /**
-     * If we're in a sync group, jump to the item the group should be
-     * on right now. Called from [Player.Listener.onMediaItemTransition]
-     * — i.e. only at natural item boundaries, where ExoPlayer is
-     * already swapping items and a seek is invisible. The one
-     * exception is when [applyGroupSync] receives a new epoch, which
-     * forces an immediate snap (see `force=true`).
-     *
-     * Splash items in a mix-splash queue aren't part of the group
-     * loop, so the snap is skipped while splash is the current item
-     * — the next real-item transition will land us on the correct
-     * group position. (Mix-splash is forced off in groups by the
-     * server anyway, but defensive check stays.)
-     */
-    private fun snapToGroupExpectedItem(force: Boolean = false) {
-        // v0.1.21: never let an array-bounds exception in here propagate
-        // up through the ExoPlayer listener callback — that path was
-        // crashing the activity when the playlist changed underneath us
-        // (e.g. staff deleting an item mid-playback). Skipping a snap
-        // is fine; the next anchor or transition will re-evaluate.
-        try {
-            snapToGroupExpectedItemImpl(force)
-        } catch (t: Throwable) {
-            LogBuffer.w("PlayerController", "Snap skipped: ${t.javaClass.simpleName}: ${t.message ?: ""}", t)
-        }
-    }
-
-    private fun snapToGroupExpectedItemImpl(force: Boolean) {
-        val state = groupSync ?: return
-        val currentId = player.currentMediaItem?.mediaId ?: return
-        if (currentId == Source.SPLASH) return
-        // v0.1.21: parallel-list invariant check, same as in the drift
-        // path. Mid-playlist-update reads can otherwise index one list
-        // with a position from the other.
-        if (state.itemIds.size != state.itemDurationsMs.size) return
-        if (state.itemIds.isEmpty()) return
-
-        // Server's "now" = local now + offset. Use it to compute where
-        // in the loop we should be.
-        val serverNowMs = System.currentTimeMillis() + state.serverOffsetMs
-        val elapsed = (serverNowMs - state.loopStartedAtMs).coerceAtLeast(0L)
-        val offset = elapsed % state.totalDurationMs
-
-        // Walk durations to find which item the loop is currently on.
-        var cumulative = 0L
-        var expectedIndex = -1
-        var positionInItem = 0L
-        for (i in state.itemDurationsMs.indices) {
-            val d = state.itemDurationsMs[i]
-            if (offset < cumulative + d) {
-                expectedIndex = i
-                positionInItem = offset - cumulative
-                break
-            }
-            cumulative += d
-        }
-        if (expectedIndex < 0) {
-            expectedIndex = state.itemDurationsMs.size - 1
-            positionInItem = state.itemDurationsMs.last() - 1
-        }
-        val expectedId = state.itemIds[expectedIndex]
-        if (currentId == expectedId && !force) return
-        if (currentId == expectedId && force) {
-            // We're on the right item but were just told to re-anchor —
-            // seek to the right position-in-item.
-            player.seekTo(positionInItem)
-            return
-        }
-        // Find the queue index of the expected item. If it's not in
-        // our queue, we're playing the wrong playlist — the next
-        // refreshLivePlaylist() will fix that.
-        val targetQueueIndex = (0 until player.mediaItemCount)
-            .firstOrNull { i -> player.getMediaItemAt(i).mediaId == expectedId }
-            ?: return
-
-        // **v0.1.18:** never seek BACKWARD to a previous item. This
-        // path used to trigger when the player transitioned naturally
-        // a fraction of a second before the math-expected boundary —
-        // e.g. decoder pacing or rate-control overshoot meant a 15 s
-        // item finished at wall-clock 14.85 s, so when ExoPlayer fired
-        // `onMediaItemTransition` into item 1 at pos 0, the math still
-        // said "you should be at item 0 pos 14.85". The old code
-        // seeked backward, visibly replaying the last 150 ms of the
-        // previous video. User-perceived as "the video isn't playing
-        // fully". Forcing forward-only progression means we tolerate
-        // a small early-arrival at the start of each item rather than
-        // replay tails — the rate-control loop closes the gap
-        // mid-item.
-        //
-        // Force=true (epoch re-anchor) overrides this — that path is
-        // explicitly meant to jump to wherever the math says,
-        // including backward.
-        val currentQueueIdx = player.currentMediaItemIndex
-        if (!force) {
-            val isOneStepBack = targetQueueIndex == currentQueueIdx - 1 ||
-                (currentQueueIdx == 0 && targetQueueIndex == player.mediaItemCount - 1)
-            val earlyInCurrent = player.currentPosition < 1500L
-            if (isOneStepBack && earlyInCurrent) {
-                // Just transitioned early; wall-clock will catch up
-                // within the next item. Don't replay the tail.
-                return
-            }
-        }
-
-        LogBuffer.i(
-            "PlayerController",
-            "Group sync snap → item '$expectedId' at ${positionInItem}ms",
+        val spot = SyncMath.locate(elapsed, s.itemDurationsMs) ?: return
+        val queueIds = queueIds()
+        mainHandler.removeCallbacks(boundaryRunnable)
+        mainHandler.postDelayed(
+            boundaryRunnable,
+            SyncMath.remainingMs(spot, s.itemDurationsMs).coerceAtLeast(1L),
         )
-        player.seekTo(targetQueueIndex, positionInItem)
+
+        val wantQueue = SyncMath.queueIndexOf(s.itemIds, spot.index, queueIds)
+        if (wantQueue == null) {
+            if (!waitingForSlot) holdForMissing()
+            report(s, spot, null, "holding")
+            return
+        }
+        if (waitingForSlot) {
+            // The video it was waiting for is here now, or the group moved on.
+            placeOnGroupClock(s)
+            report(s, spot, null, "loading")
+            return
+        }
+        if (player.playbackState != Player.STATE_READY) {
+            report(s, spot, null, "loading")
+            return
+        }
+        val timelineIdx = SyncMath.timelineIndexOf(s.itemIds, queueIds, player.currentMediaItemIndex) ?: return
+        applyEndPolicy(s, timelineIdx)
+        if (!player.playWhenReady) {
+            // Paused by us (holding on the last frame, or waiting out a gap)
+            // or at the end of a short item until its slot is up.
+            report(s, spot, null, "holding")
+            return
+        }
+        if (player.currentMediaItem?.mediaId == Source.SPLASH) return
+
+        val gap = SyncMath.gapMs(timelineIdx, player.currentPosition, s.itemDurationsMs, elapsed)
+        val nowRt = SystemClock.elapsedRealtime()
+        val settling = nowRt - lastTransitionAtMs < 400L
+        if (!settling && checkLandingAtMs > 0L) {
+            // Learn from the last jump: land early next time if we were late.
+            checkLandingAtMs = 0L
+            seekLeadMs = (seekLeadMs - gap / 2).coerceIn(0L, 3_000L)
+        }
+        val mayJump = nowRt - lastJumpAtMs > JUMP_COOLDOWN_MS
+        val isImage = player.currentMediaItem?.mediaId in imageIds
+        if (!settling) {
+            when {
+                gap < -SyncMath.JUMP_MS && mayJump -> {
+                    LogBuffer.i("PlayerController", "Behind the group by ${-gap}ms: jumping to the group clock")
+                    placeOnGroupClock(s)
+                }
+                gap > SyncMath.JUMP_MS -> waitOut(gap)
+                gap < -SyncMath.JUMP_MS -> setPlaybackSpeed(SyncMath.speedFor(gap, true))
+                else -> {
+                    val speed = SyncMath.speedFor(gap, speedCorrecting)
+                    speedCorrecting = speed != 1f
+                    setPlaybackSpeed(speed)
+                }
+            }
+        }
+        report(s, spot, if (settling || isImage) null else gap, if (isImage) "image" else "playing")
+    }
+
+    /** Ahead of the group by a lot: pause on this frame until it catches up.
+     *  Better than playing on and then jumping backwards. */
+    private fun waitOut(gapMs: Long) {
+        val wait = gapMs.coerceAtMost(5_000L)
+        LogBuffer.i("PlayerController", "Ahead of the group by ${gapMs}ms: waiting ${wait}ms")
+        player.playWhenReady = false
+        val resume = Runnable {
+            holdRunnable = null
+            if (groupSync != null && pendingCoordinatedStart == null && !waitingForSlot) player.playWhenReady = true
+        }
+        holdRunnable = resume
+        mainHandler.postDelayed(resume, wait)
+    }
+
+    /** A file that ends well before its slot must pause on its last frame
+     *  (the next item is due at the group's moment, not at the file's end). */
+    private fun applyEndPolicy(s: GroupSyncState, timelineIdx: Int) {
+        val dur = player.duration
+        if (dur == C.TIME_UNSET || player.playbackState != Player.STATE_READY) return
+        val slot = s.itemDurationsMs[timelineIdx]
+        val wantPause = dur < slot - SHORT_FILE_SLACK_MS
+        if (player.pauseAtEndOfMediaItems != wantPause) player.pauseAtEndOfMediaItems = wantPause
+    }
+
+    /** Fires at the end of the item the group is on: make sure the next one
+     *  starts at the right moment whatever the files' lengths. */
+    private fun onBoundary() {
+        try {
+            onBoundaryImpl()
+        } catch (t: Throwable) {
+            LogBuffer.w("PlayerController", "Boundary skipped: ${t.javaClass.simpleName}: ${t.message ?: ""}", t)
+        }
+    }
+
+    private fun onBoundaryImpl() {
+        val s = groupSync ?: return
+        if (pendingCoordinatedStart != null) return
+        val elapsed = s.elapsedMs()
+        if (elapsed < 0L) return
+        val spot = SyncMath.locate(elapsed, s.itemDurationsMs) ?: return
+        mainHandler.removeCallbacks(boundaryRunnable)
+        mainHandler.postDelayed(
+            boundaryRunnable,
+            SyncMath.remainingMs(spot, s.itemDurationsMs).coerceAtLeast(1L),
+        )
+        holdRunnable?.let { mainHandler.removeCallbacks(it) }
+        holdRunnable = null
+
+        val q = SyncMath.queueIndexOf(s.itemIds, spot.index, queueIds())
+        if (q == null) {
+            holdForMissing()
+            return
+        }
+        waitingForSlot = false
+        val cur = player.currentMediaItemIndex
+        if (cur == q) {
+            // Already there. A one-video group restarts here: at the end of a
+            // short file, rewind it rather than waiting for a natural loop.
+            val atEnd = !player.playWhenReady && player.playbackState == Player.STATE_READY &&
+                player.duration != C.TIME_UNSET && player.currentPosition >= player.duration - 100L
+            if (atEnd) {
+                player.seekTo(q, spot.positionMs)
+                player.playWhenReady = true
+                setPlaybackSpeed(1f)
+                lastTransitionAtMs = SystemClock.elapsedRealtime()
+            }
+            return
+        }
+        // Still on an earlier item. If it's about to end by itself, let it:
+        // a natural change is smoother than a seek.
+        val left = player.duration - player.currentPosition
+        val endingNaturally = player.playWhenReady && player.playbackState == Player.STATE_READY &&
+            player.duration != C.TIME_UNSET && left in 0L..NATURAL_END_MS &&
+            (cur + 1) % player.mediaItemCount == q && !player.pauseAtEndOfMediaItems
+        if (endingNaturally) return
+        player.seekTo(q, spot.positionMs)
+        player.playWhenReady = true
+        setPlaybackSpeed(1f)
+        lastTransitionAtMs = SystemClock.elapsedRealtime()
+    }
+
+    private fun report(s: GroupSyncState, spot: SyncMath.Spot, driftMs: Long?, state: String) {
+        val now = SystemClock.elapsedRealtime()
+        while (seekTimesMs.isNotEmpty() && now - seekTimesMs.first() > 600_000L) seekTimesMs.removeFirst()
+        lastSyncReport = SyncReport(
+            anchorMs = s.loopStartedAtMs,
+            itemIndex = spot.index,
+            itemId = s.itemIds.getOrNull(spot.index),
+            positionMs = spot.positionMs,
+            driftMs = driftMs,
+            speed = currentPlaybackSpeed,
+            seeks = seekTimesMs.size,
+            items = s.itemIds.size,
+            state = state,
+        )
     }
 
     /**
@@ -796,11 +781,22 @@ class PlayerController(context: Context) {
         pendingCoordinatedStart?.let { mainHandler.removeCallbacks(it) }
         pendingCoordinatedStart = null
         mainHandler.removeCallbacks(driftTick)
+        stopSyncTimers()
         driftCorrectionTickScheduled = false
         player.release()
     }
 
     companion object {
+        /** How far ahead to aim the first jump: roughly what a seek takes. */
+        private const val SEEK_LEAD_MS = 200L
+        /** Least time between jumps: past this, a slow box keeps catching up
+         *  with speed instead of seeking again and again. */
+        private const val JUMP_COOLDOWN_MS = 5_000L
+        /** A file this much shorter than its slot holds its last frame. */
+        private const val SHORT_FILE_SLACK_MS = 120L
+        /** An item ending within this of its slot's end changes over itself. */
+        private const val NATURAL_END_MS = 150L
+
         /**
          * v0.1.24: build an ExoPlayer with tuning matched to the host's
          * decoder-class tier (see [DeviceInfo.decoderTierFor]).

@@ -71,6 +71,12 @@ fun PlayerScreen(
         }
     }
 
+    // v0.2.25: the heartbeat reports how sync is going.
+    androidx.compose.runtime.DisposableEffect(controller) {
+        repository.syncReportProvider = { controller.syncReport() }
+        onDispose { repository.syncReportProvider = null }
+    }
+
     // Forward the group sync anchor. The controller does the actual
     // sync math locally on every onMediaItemTransition; we just keep
     // the latest epoch + server-clock-offset in sync with what the
@@ -83,14 +89,14 @@ fun PlayerScreen(
         if (anchor != null && items.isNotEmpty()) {
             controller.applyGroupSync(
                 loopStartedAtMs = anchor.loopStartedAtMs,
-                serverOffsetMs = anchor.serverOffsetMs,
+                serverOffsetRtMs = anchor.serverOffsetRtMs,
                 itemIds = items.map { it.item.id },
-                itemDurationsMs = items.map { (it.item.durationSec ?: 15).toLong() * 1000L },
+                itemDurationsMs = items.map { (it.item.durationSec ?: 15).coerceAtLeast(1).toLong() * 1000L },
             )
         } else {
             controller.applyGroupSync(
                 loopStartedAtMs = null,
-                serverOffsetMs = 0L,
+                serverOffsetRtMs = 0L,
                 itemIds = emptyList(),
                 itemDurationsMs = emptyList(),
             )

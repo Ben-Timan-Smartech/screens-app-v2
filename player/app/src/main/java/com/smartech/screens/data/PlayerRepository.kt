@@ -1,6 +1,7 @@
 package com.smartech.screens.data
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.smartech.screens.util.DeviceInfo
 import com.smartech.screens.util.LogBuffer
@@ -17,6 +18,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -888,13 +891,30 @@ class PlayerRepository(
     data class GroupSyncAnchor(
         val groupId: String,
         /** Loop epoch in wall-clock ms. Tablet computes its position
-         *  in the loop as `(System.currentTimeMillis() + serverOffsetMs - loopStartedAtMs) mod totalDurationMs`. */
+         *  in the loop as `(SystemClock.elapsedRealtime() + serverOffsetRtMs - loopStartedAtMs) mod totalDurationMs`. */
         val loopStartedAtMs: Long,
-        /** Difference between server clock and local clock, in ms.
-         *  Added to System.currentTimeMillis() to get "what time is
-         *  it on the server right now." Updated on every poll. */
-        val serverOffsetMs: Long,
+        /** Server clock minus SystemClock.elapsedRealtime(). Not the wall
+         *  clock: Android can step that by seconds when it corrects itself,
+         *  which would throw a screen out of step. Updated on every poll. */
+        val serverOffsetRtMs: Long,
     )
+
+    /** v0.2.25: the sync engine reports through this, for the heartbeat. Set
+     *  by PlayerScreen while it's showing. */
+    @Volatile
+    var syncReportProvider: (() -> com.smartech.screens.player.SyncReport?)? = null
+
+    /** A new anchor held back until just before its start time, so the old
+     *  loop keeps playing meanwhile (see [refreshLivePlaylistLocked]). */
+    @Volatile private var stagedAnchor: GroupSyncAnchor? = null
+
+    /** The anchor belonging to the playlist being downloaded right now. Only
+     *  touched under [refreshMutex]. */
+    private var deferredAnchor: GroupSyncAnchor? = null
+    private val refreshMutex = Mutex()
+    private var lastServerItemCount = 0
+    private var lastMissingRetryAtMs = 0L
+    @Volatile private var lastFastRefreshAtMs = 0L
     private val _groupSync = MutableStateFlow<GroupSyncAnchor?>(null)
     val groupSyncFlow: StateFlow<GroupSyncAnchor?> = _groupSync
 
@@ -1053,6 +1073,41 @@ class PlayerRepository(
      * bumps, fires a rich heartbeat on every tick.
      */
     private suspend fun refreshLivePlaylist(serverUrl: String) {
+        refreshMutex.withLock {
+            deferredAnchor = null
+            try {
+                refreshLivePlaylistLocked(serverUrl)
+            } finally {
+                // The new playlist never went out (download error, nothing
+                // playable): don't leave the group's start unpublished.
+                deferredAnchor?.let {
+                    if (_groupSync.value?.loopStartedAtMs != it.loopStartedAtMs) _groupSync.value = it
+                    if (stagedAnchor == it) stagedAnchor = null
+                }
+                deferredAnchor = null
+            }
+        }
+    }
+
+    /** Wait until [anchor] is [START_WINDOW_MS] from starting. */
+    private suspend fun holdUntilStartWindow(anchor: GroupSyncAnchor) {
+        val wait = anchor.loopStartedAtMs - (SystemClock.elapsedRealtime() + anchor.serverOffsetRtMs) - START_WINDOW_MS
+        if (wait in 1L..60_000L) delay(wait)
+    }
+
+    /** A restart with no new playlist: publish its anchor just before the
+     *  start, unless something newer has replaced it. */
+    private fun launchAnchorAt(anchor: GroupSyncAnchor, waitMs: Long) {
+        liveScope.launch {
+            delay(waitMs)
+            if (stagedAnchor == anchor) {
+                _groupSync.value = anchor
+                stagedAnchor = null
+            }
+        }
+    }
+
+    private suspend fun refreshLivePlaylistLocked(serverUrl: String) {
         val base = serverUrl.trimEnd('/')
         val deviceId = store.ensureDeviceId()
         // Capture t1/t4 around the round-trip so we can debias the
@@ -1076,11 +1131,11 @@ class PlayerRepository(
                 val req = Request.Builder().url("$base/api/state?screenId=$deviceId")
                     .apply { if (WEB_MODE_SUPPORTED) withDeviceSecret() }
                     .build()
-                t1Local = System.currentTimeMillis()
+                t1Local = SystemClock.elapsedRealtime()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) throw IllegalStateException("HTTP ${r.code}")
                     val body = r.body?.string() ?: ""
-                    t4Local = System.currentTimeMillis()
+                    t4Local = SystemClock.elapsedRealtime()
                     body
                 }
             }
@@ -1225,7 +1280,11 @@ class PlayerRepository(
         // overlay can render correctedNow(). Only updates when the
         // offset actually moves, which is rarely — keeps observers
         // cheap.
-        val freshOffset = if (clockSync.sampleCount > 0) clockSync.bestOffsetMs else 0L
+        // The overlay adds this to the wall clock, so convert from the
+        // monotonic base the samples use.
+        val freshOffset = if (clockSync.sampleCount > 0) {
+            clockSync.bestOffsetMs + (SystemClock.elapsedRealtime() - System.currentTimeMillis())
+        } else 0L
         if (freshOffset != _serverOffsetMs.value) {
             _serverOffsetMs.value = freshOffset
         }
@@ -1245,31 +1304,53 @@ class PlayerRepository(
             // legs took equal time) is tightest. Falls back to a
             // single-sample compute when we don't have any clock-sync
             // history yet (very first poll after launch).
-            val serverOffsetMs = if (clockSync.sampleCount > 0) {
+            val serverOffsetRtMs = if (clockSync.sampleCount > 0) {
                 clockSync.bestOffsetMs
             } else {
                 val sn = state.serverNowMs
-                if (sn != null) sn - System.currentTimeMillis() else 0L
+                if (sn != null) sn - SystemClock.elapsedRealtime() else 0L
             }
             val prev = _groupSync.value
             val next = GroupSyncAnchor(
                 groupId = playback.groupId.ifEmpty { state.syncGroup },
                 loopStartedAtMs = playback.loopStartedAtMs,
-                serverOffsetMs = serverOffsetMs,
+                serverOffsetRtMs = serverOffsetRtMs,
             )
-            _groupSync.value = next
+            // v0.2.25: a start that's still ahead (a push or a restart) is
+            // held back until just before it, so the old loop keeps playing
+            // instead of freezing on the first frame for the whole wait. A
+            // push also brings a new playlist in this same response; the
+            // anchor goes out with it, below.
+            val msUntilStart = next.loopStartedAtMs - (SystemClock.elapsedRealtime() + serverOffsetRtMs)
+            val contentOnTheWay = state.revision != lastLiveRevision
+            when {
+                prev == null || prev.loopStartedAtMs == next.loopStartedAtMs -> {
+                    _groupSync.value = next
+                    stagedAnchor = null
+                }
+                msUntilStart > START_WINDOW_MS && msUntilStart <= 60_000L -> {
+                    stagedAnchor = next
+                    if (contentOnTheWay) deferredAnchor = next
+                    else launchAnchorAt(next, msUntilStart - START_WINDOW_MS)
+                }
+                else -> {
+                    _groupSync.value = next
+                    stagedAnchor = null
+                }
+            }
             // One concise diagnostic line per poll so we can see if
             // sync is healthy without scraping logs. RTT under ~80 ms
             // on Wi-Fi is normal; if best-RTT stays high something is
             // off (CDN cold path, congested AP, etc.).
-            if (prev == null || prev.serverOffsetMs != next.serverOffsetMs) {
+            if (prev == null || prev.serverOffsetRtMs != next.serverOffsetRtMs) {
                 LogBuffer.i(
                     TAG,
-                    "Clock sync — offset=${serverOffsetMs}ms, best-rtt=${clockSync.bestRttMs}ms, samples=${clockSync.sampleCount}",
+                    "Clock sync — offset=${serverOffsetRtMs}ms, best-rtt=${clockSync.bestRttMs}ms, samples=${clockSync.sampleCount}",
                 )
             }
         } else {
             _groupSync.value = null
+            stagedAnchor = null
         }
 
         // Per-location splash. Download (or clear) when the URL changes.
@@ -1294,7 +1375,13 @@ class PlayerRepository(
         // dedicated [startHeartbeatLoop] coroutine, no need to fire one
         // from here.
         if (state.revision == lastLiveRevision && _state.value is State.Playing) {
-            return
+            // Unless something is missing from the cache (a failed download,
+            // a purged file): try that again, at most once a minute. One
+            // missing video puts this screen out of step with its group.
+            val now = SystemClock.elapsedRealtime()
+            val missing = _intendedPlaylist.value.any { !cache.has(it.id) }
+            if (!missing || now - lastMissingRetryAtMs < 60_000L) return
+            lastMissingRetryAtMs = now
         }
 
         // v0.1.23: filter out videos that would overwhelm this device's
@@ -1311,6 +1398,7 @@ class PlayerRepository(
         val deviceInfo = com.smartech.screens.util.DeviceInfo.snapshot(appContext)
         val safeMbps = deviceInfo.safeBitrateMbps.toDouble()
         val rawItems = state.items
+        lastServerItemCount = rawItems.size
         val safeRaw = mutableListOf<LiveItem>()
         val skipped = mutableListOf<Pair<LiveItem, Double>>()
         for (li in rawItems) {
@@ -1470,6 +1558,9 @@ class PlayerRepository(
             items = items,
         )
         lastPlaylist = playlist
+        // v0.2.25: a push's anchor waits for its playlist. Both go out just
+        // before the group's start, together.
+        deferredAnchor?.let { holdUntilStartWindow(it); _groupSync.value = it; deferredAnchor = null; stagedAnchor = null }
         publish(playlist)
         lastLiveRevision = state.revision
         // Heartbeats fire on their own 10 s loop (startHeartbeatLoop);
@@ -1810,12 +1901,15 @@ class PlayerRepository(
      */
     suspend fun triggerLocalCalibration(durationSec: Int) {
         val base = store.liveServerUrl.first()?.trimEnd('/') ?: return
-        val deviceId = store.ensureDeviceId()
+        // v0.2.25: the whole group's clock test when this screen is in one
+        // (the server lets a member test its own group); just this screen
+        // otherwise.
+        val target = _syncGroup.value ?: store.ensureDeviceId()
         val body = """{"durationSec":$durationSec}"""
         kotlinx.coroutines.withContext(Dispatchers.IO) {
             runCatching {
                 val req = Request.Builder()
-                    .url("$base/api/sync-groups/${urlEncode(deviceId)}/calibrate")
+                    .url("$base/api/sync-groups/${urlEncode(target)}/calibrate")
                     .post(body.toRequestBody("application/json".toMediaType()))
                     .withDeviceSecret()          // v0.2.9.1: self-calibrate needs the secret too
                     .build()
@@ -1961,17 +2055,19 @@ class PlayerRepository(
     }
 
     /** Set this screen's sync-group membership on the server. Null or
-     *  blank string detaches the screen from any group. */
-    suspend fun setSyncGroupOnServer(value: String?) {
+     *  blank string detaches the screen from any group. Returns whether the
+     *  server took it: the screen only shows the new group once it has (it
+     *  used to show it straight away, even when the request then failed). */
+    suspend fun setSyncGroupOnServer(value: String?): Boolean {
         val normalised = value?.trim()?.ifBlank { null }
         LogBuffer.i(TAG, "setSyncGroupOnServer → ${normalised ?: "(none)"}")
-        _syncGroup.value = normalised
 
         val base = store.liveServerUrl.first()?.trimEnd('/')
         if (base.isNullOrBlank()) {
             LogBuffer.w(TAG, "setSyncGroupOnServer skipped — no liveServerUrl set")
-            return
+            return false
         }
+        var ok = false
         val deviceId = store.ensureDeviceId()
         // null encodes as JSON null so the server clears the field.
         val bodyValue = if (normalised == null) "null" else q(normalised)
@@ -1985,13 +2081,18 @@ class PlayerRepository(
                     .build()
                 httpClient.newCall(req).execute().use { r ->
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setSyncGroupOnServer HTTP ${r.code}")
-                    else LogBuffer.i(TAG, "setSyncGroupOnServer OK")
+                    else {
+                        ok = true
+                        LogBuffer.i(TAG, "setSyncGroupOnServer OK")
+                    }
                 }
-                lastLiveRevision = -1
+                if (ok) lastLiveRevision = -1
             }.onFailure {
                 LogBuffer.w(TAG, "setSyncGroupOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
         }
+        if (ok) _syncGroup.value = normalised
+        return ok
     }
 
     /** v0.2.9: set this screen's display rotation from the tablet (Device
@@ -2353,7 +2454,8 @@ class PlayerRepository(
               "autoConfirmEnabled": ${com.smartech.screens.update.InstallAutoConfirm.isServiceEnabled(appContext)},
               "screenOn": ${power?.isInteractive ?: "null"},
               "keyguardLocked": ${keyguard?.isKeyguardLocked ?: "null"},
-              "awakeHeld": $awakeHeld
+              "awakeHeld": $awakeHeld,
+              "sync": ${syncReportJson()}
             }
         """.trimIndent()
         runCatching {
@@ -2361,8 +2463,55 @@ class PlayerRepository(
                 .url("$base/api/screens/heartbeat")
                 .post(body.toRequestBody("application/json".toMediaType()))
                 .build()
-            httpClient.newCall(req).execute().close()
+            httpClient.newCall(req).execute().use { r ->
+                if (r.isSuccessful) onHeartbeatReply(r.body?.string().orEmpty())
+            }
         }.onFailure { LogBuffer.throttledW(TAG, "heartbeat-fail", "Heartbeat failed: ${it.message}") }
+    }
+
+    /** v0.2.25: the reply to each heartbeat carries the screen's revision and
+     *  its group's loop start. If either isn't what this screen has, check the
+     *  playlist now rather than waiting up to a minute for the next poll: a
+     *  push to a group is only a start "together" if every screen sees it. */
+    @Serializable
+    private data class HeartbeatReply(
+        val revision: Int? = null,
+        val syncLoopStartedAtMs: Long? = null,
+    )
+
+    private fun onHeartbeatReply(body: String) {
+        val reply = runCatching { liveJson.decodeFromString(HeartbeatReply.serializer(), body) }.getOrNull() ?: return
+        val known = lastLiveRevision
+        val anchor = _groupSync.value
+        val staged = stagedAnchor
+        val revisionNew = reply.revision != null && known >= 0 && reply.revision != known
+        val loopMs = reply.syncLoopStartedAtMs
+        val loopNew = loopMs != null &&
+            loopMs != anchor?.loopStartedAtMs && loopMs != staged?.loopStartedAtMs
+        if (!revisionNew && !loopNew) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastFastRefreshAtMs < 4_000L) return
+        lastFastRefreshAtMs = now
+        LogBuffer.i(TAG, "Heartbeat says revision ${reply.revision} / loop $loopMs: checking the playlist now")
+        liveScope.launch {
+            runCatching { refreshPlaylist() }
+                .onFailure { LogBuffer.w(TAG, "Fast refresh failed: ${it.message}") }
+        }
+    }
+
+    /** The "sync" part of the heartbeat, or null when not in a group. */
+    private fun syncReportJson(): String {
+        val group = _groupSync.value ?: return "null"
+        val r = syncReportProvider?.invoke() ?: return "null"
+        val playable = (_state.value as? State.Playing)?.items?.size ?: 0
+        val total = maxOf(lastServerItemCount, r.items)
+        val missing = (lastServerItemCount - playable).coerceAtLeast(0)
+        val rtt = if (clockSync.sampleCount > 0) clockSync.bestRttMs.toString() else "null"
+        return """{"group": ${q(group.groupId)}, "anchorMs": ${r.anchorMs}, "itemIndex": ${r.itemIndex}, """ +
+            """"itemId": ${qOrNull(r.itemId)}, "positionMs": ${r.positionMs}, """ +
+            """"driftMs": ${r.driftMs?.toString() ?: "null"}, "offsetMs": ${_serverOffsetMs.value}, "rttMs": $rtt, """ +
+            """"samples": ${clockSync.sampleCount}, "speed": ${r.speed}, "seeks": ${r.seeks}, """ +
+            """"items": $total, "missing": $missing, "state": ${q(r.state)}}"""
     }
 
     /** Minimal view of POST /api/screens/register's JSON response — we only
@@ -2688,6 +2837,8 @@ class PlayerRepository(
          *  online even mid-download. 10 s is well under the server's
          *  15 s "online" window. */
         private const val HEARTBEAT_INTERVAL_MS = 10_000L
+        /** A coordinated start is applied this long before it happens. */
+        private const val START_WINDOW_MS = 1_500L
 
         // v0.1.75: splash-download retry backoff. On failure the splash
         // fetch waits (exponentially, capped) before trying again instead

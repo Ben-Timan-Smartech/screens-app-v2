@@ -5389,14 +5389,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         meta2 = _screens.get(d) or {}
                         last_hb2 = meta2.get("lastHeartbeat") or 0
                         bucket = available_groups.setdefault(gid, {
-                            "id": gid, "memberCount": 0, "onlineCount": 0,
+                            "id": gid, "memberCount": 0, "onlineCount": 0, "_stores": set(),
                         })
                         bucket["memberCount"] += 1
+                        bucket["_stores"].add((meta2.get("location") or {}).get("storeId"))
                         _, ag_online = _presence(last_hb2, st.get("pollMode"), now_ts2)
                         if ag_online:
                             bucket["onlineCount"] += 1
+                    # v0.2.25: the tablet's Join picker lists groups in its own
+                    # location. A wall elsewhere isn't one it could ever join,
+                    # and "Join" replaces this screen's videos.
+                    own_store = ((screen_meta or {}).get("location") or {}).get("storeId")
                     available_sync_groups = sorted(
-                        available_groups.values(), key=lambda g: g["id"],
+                        ({k: v for k, v in g.items() if k != "_stores"}
+                         for g in available_groups.values()
+                         if not own_store or own_store in g["_stores"]),
+                        key=lambda g: g["id"],
                     )
                     poll_mode = s.get("pollMode", DEFAULT_POLL_MODE)
                     # v0.2.16: web page mode. /api/state is readable by

@@ -197,6 +197,7 @@ fun DeviceAdminScreen(
     val syncGroup by repository.syncGroupFlow.collectAsState()
     val syncGroupMembers by repository.syncGroupMembersFlow.collectAsState()
     val availableSyncGroups by repository.availableSyncGroupsFlow.collectAsState()
+    var syncMessage by remember { mutableStateOf<String?>(null) }
     val cacheCap by store.cacheCapBytes.collectAsState(initial = 8L * 1024 * 1024 * 1024)
     val info = remember { DeviceInfo.snapshot(ctx) }
 
@@ -343,15 +344,17 @@ fun DeviceAdminScreen(
                     availableGroups = availableSyncGroups,
                     onJoin = { gid ->
                         scope.launch {
-                            runCatching { repository.setSyncGroupOnServer(gid) }
-                                .onFailure { LogBuffer.w("Admin", "Join group failed: ${it.message}") }
+                            syncMessage = null
+                            val ok = runCatching { repository.setSyncGroupOnServer(gid) }.getOrDefault(false)
+                            if (!ok) syncMessage = "Couldn't join the group. Check the connection and try again."
                             repository.refreshNow()
                         }
                     },
                     onLeave = {
                         scope.launch {
-                            runCatching { repository.setSyncGroupOnServer(null) }
-                                .onFailure { LogBuffer.w("Admin", "Leave group failed: ${it.message}") }
+                            syncMessage = null
+                            val ok = runCatching { repository.setSyncGroupOnServer(null) }.getOrDefault(false)
+                            if (!ok) syncMessage = "Couldn't leave the group. Check the connection and try again."
                             repository.refreshNow()
                         }
                     },
@@ -361,6 +364,7 @@ fun DeviceAdminScreen(
                                 .onFailure { LogBuffer.w("Admin", "Calibrate failed: ${it.message}") }
                         }
                     },
+                    message = syncMessage,
                 )
             }
 
