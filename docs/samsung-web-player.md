@@ -59,11 +59,24 @@ Restart, Reboot and Update all reload the page, which also picks up a newer
 version of the player. Refresh fetches the playlist straight away. Clear cache
 deletes the stored videos and reloads.
 
+## Sync
+
+Screens in a group cut between videos on the same moment of the group's clock.
+A new playlist or a restart waits a few seconds (until the slowest screen has
+checked in), keeps playing the current loop meanwhile, then every screen cuts
+to the new first video together. Each screen reports how far it is from the
+group clock, so the CMS can show whether the group is in step.
+
 ## Known limits (v1)
 
 - **Not yet tested on a real Samsung screen.** Check the debug readout on the
   first screen: "Cache" should count up to all videos, and "fine speed
   control" should say yes.
+- **Seamless changes** need the screen to open the next video while the
+  current one plays, so it runs two videos at once for a few seconds. If it
+  can't, the player falls back to one by itself and there's a short blank at
+  each change. The readout's "Next" line says which. Adding `?gapless=0` to
+  the address (or `&gapless=0`) forces one.
 - **Offline play** depends on the screen supporting the browser's offline
   storage (a service worker). If it doesn't, the screen streams from the
   server and stops when the network drops.
