@@ -100,6 +100,7 @@ fun PlaylistView(
     // staff can see + change group membership without diving into
     // Device admin. The card pivots between member-list (in a group)
     // and join picker (not in one), and exposes a Leave action.
+    var syncMessage by remember { mutableStateOf<String?>(null) }
     val syncGroupMembers by repository.syncGroupMembersFlow.collectAsState()
     val availableSyncGroups by repository.availableSyncGroupsFlow.collectAsState()
     // intendedPlaylist mirrors what the server says is on this screen, even
@@ -174,16 +175,18 @@ fun PlaylistView(
             onJoin = { gid ->
                 LogBuffer.i("PlaylistView", "Sync join tapped → $gid")
                 scope.launch {
-                    runCatching { repository.setSyncGroupOnServer(gid) }
-                        .onFailure { LogBuffer.w("PlaylistView", "Join failed: ${it.message}") }
+                    syncMessage = null
+                    val ok = runCatching { repository.setSyncGroupOnServer(gid) }.getOrDefault(false)
+                    if (!ok) syncMessage = "Couldn't join the group. Check the connection and try again."
                     repository.refreshNow()
                 }
             },
             onLeave = {
                 LogBuffer.i("PlaylistView", "Sync leave tapped")
                 scope.launch {
-                    runCatching { repository.setSyncGroupOnServer(null) }
-                        .onFailure { LogBuffer.w("PlaylistView", "Leave failed: ${it.message}") }
+                    syncMessage = null
+                    val ok = runCatching { repository.setSyncGroupOnServer(null) }.getOrDefault(false)
+                    if (!ok) syncMessage = "Couldn't leave the group. Check the connection and try again."
                     repository.refreshNow()
                 }
             },
@@ -194,6 +197,7 @@ fun PlaylistView(
                         .onFailure { LogBuffer.w("PlaylistView", "Calibrate failed: ${it.message}") }
                 }
             },
+            message = syncMessage,
         )
     }
 

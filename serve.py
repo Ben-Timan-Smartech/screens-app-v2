@@ -3501,21 +3501,123 @@ def _group_loop_epoch(items: list, group_id: str, current_revision: int, now: fl
     }
 
 
-def _reset_group_loop_epoch(group_id: str, now: float) -> None:
-    """Anchor the group's loop epoch at `now + COORDINATED_START_DELAY_SEC`
-    so every member's tablet does the coordinated-start pause-and-resume
-    dance. Called from the playlist push endpoint when the content
-    for the group changes — the only legitimate trigger for a reset.
+def _reset_group_loop_epoch(group_id: str, now: float) -> float:
+    """Anchor the group's loop epoch a few seconds ahead (see
+    _group_start_delay) so every member gets the new loop before it starts
+    and they begin together. Called when the content for the group changes
+    (a push) or an operator restarts the group, the only legitimate
+    triggers for a reset. Returns the start time (epoch seconds).
 
     Caller must hold _STATE_LOCK."""
+    starts_at = now + _group_start_delay(group_id, now)
     _sync_groups[group_id] = {
-        "loopStartedAt": now + COORDINATED_START_DELAY_SEC,
+        "loopStartedAt": starts_at,
         # lastRevision kept for back-compat with on-disk records but
         # no longer used by the lookup path. Stored as 0 to make it
         # obvious in the JSON that revision tracking is dead code.
         "lastRevision": 0,
     }
     _save_sync_groups()
+    return starts_at
+
+
+# v0.2.25: the coordinated start used to be a flat 5 s, shorter than any
+# screen's check-in, so after a push only the screens that happened to check
+# in within 5 s started together. The rest kept playing the old playlist and
+# then jumped in part-way through a video. Now the start waits for the
+# slowest online member's check-in (plus a margin), capped so a push never
+# feels stuck. Only for groups whose screens can all keep their old loop
+# playing while they wait (web players, and Android from v0.2.25): a group
+# with an older player keeps the 5 s.
+COORDINATED_START_MAX_SEC = 20.0
+# A web player in a sync group checks in at least every 15 s (app/tv/player.js).
+WEB_SYNC_POLL_SEC = 15
+# Android players from this version re-check their playlist as soon as a
+# heartbeat reports a new revision, so they see a push within one heartbeat.
+ANDROID_FAST_PICKUP_MIN_APP = "0.2.25"
+ANDROID_HEARTBEAT_SEC = 10
+
+
+def _holds_old_loop(meta: dict) -> bool:
+    """Can this player keep its current loop playing until a later start?
+    Older Android players can't: they freeze on the first frame of the new
+    one for the whole wait, so a longer wait would be a longer freeze."""
+    return (meta.get("appFlavor") == "web"
+            or _version_tuple(meta.get("appVersion") or "0")
+            >= _version_tuple(ANDROID_FAST_PICKUP_MIN_APP))
+
+
+def _member_checkin_sec(meta: dict, st: dict) -> float:
+    """How long a screen can take to notice a change to its playlist."""
+    poll = _poll_interval_sec(st.get("pollMode"))
+    if meta.get("appFlavor") == "web":
+        return min(poll, WEB_SYNC_POLL_SEC)
+    if _holds_old_loop(meta):
+        return min(poll, ANDROID_HEARTBEAT_SEC)
+    return poll
+
+
+def _group_start_delay(group_id: str, now: float) -> float:
+    """Seconds between a push and the group's coordinated start. Caller must
+    hold _STATE_LOCK."""
+    slowest = 0.0
+    for d, st in _per_screen.items():
+        if st.get("syncGroup") != group_id:
+            continue
+        meta = _screens.get(d) or {}
+        _, online = _presence(meta.get("lastHeartbeat") or 0, st.get("pollMode"), now)
+        if not online:
+            continue
+        if not _holds_old_loop(meta):
+            # One older player in the group keeps the original 5 s for all.
+            return COORDINATED_START_DELAY_SEC
+        slowest = max(slowest, _member_checkin_sec(meta, st))
+    return max(COORDINATED_START_DELAY_SEC, min(COORDINATED_START_MAX_SEC, slowest + 3.0))
+
+
+def _own_items(device_id: str) -> list:
+    """The screen's own playlist, not an event's or a content test's.
+    Caller must hold _STATE_LOCK."""
+    st = _per_screen.get(device_id) or {}
+    ev = _event_holding(device_id)
+    snap = (ev.get("snapshots") or {}).get(device_id) if ev else None
+    real = snap or st.get("_previewSnapshot") or st
+    return list(real.get("items") or [])
+
+
+# v0.2.25: each player reports how its sync is going on every heartbeat, so
+# the CMS can show whether a group is actually in step instead of guessing.
+def _starts_in_sec(starts_ms) -> float | None:
+    """Seconds until a coordinated start, for the CMS to count down."""
+    if not starts_ms:
+        return None
+    return max(0.0, round(starts_ms / 1000 - time.time(), 1))
+
+
+_SYNC_REPORT_INTS = ("anchorMs", "itemIndex", "positionMs", "driftMs", "offsetMs",
+                     "rttMs", "samples", "seeks", "missing", "items")
+_SYNC_REPORT_STRS = ("group", "itemId", "state")
+
+
+def _clean_sync_report(raw) -> dict | None:
+    """Keep only the known, sane fields of a player's sync report."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {}
+    for k in _SYNC_REPORT_INTS:
+        v = raw.get(k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or abs(v) > 1e15:
+            continue
+        out[k] = int(round(v))
+    v = raw.get("speed")
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 10:
+        out["speed"] = round(float(v), 3)
+    for k in _SYNC_REPORT_STRS:
+        v = raw.get(k)
+        if isinstance(v, str) and v:
+            out[k] = v[:120]
+    out["receivedAt"] = time.time()
+    return out
 
 
 def _compute_playback(items: list, group_id: str, current_revision: int, now: float) -> dict | None:
@@ -5236,6 +5338,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                 merged["type"] = lib["type"]
                             if not merged.get("durationSec") and lib.get("durationSec"):
                                 merged["durationSec"] = lib["durationSec"]
+                        # Whole seconds: the Android player reads durationSec
+                        # as an Int, so a Drive-scanned length like 14.6 would
+                        # fail the whole parse and the screen would ignore
+                        # this state. Every member of a sync group gets the
+                        # same rounding, so their loop maths still agree.
+                        if isinstance(merged.get("durationSec"), float):
+                            merged["durationSec"] = max(1, int(round(merged["durationSec"])))
                         # v0.1.86: only screens with the product-card toggle on
                         # get the description / per-currency prices / packshot +
                         # brand logo for the on-screen card. Keeps the payload
@@ -5310,14 +5419,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         meta2 = _screens.get(d) or {}
                         last_hb2 = meta2.get("lastHeartbeat") or 0
                         bucket = available_groups.setdefault(gid, {
-                            "id": gid, "memberCount": 0, "onlineCount": 0,
+                            "id": gid, "memberCount": 0, "onlineCount": 0, "_stores": set(),
                         })
                         bucket["memberCount"] += 1
+                        bucket["_stores"].add((meta2.get("location") or {}).get("storeId"))
                         _, ag_online = _presence(last_hb2, st.get("pollMode"), now_ts2)
                         if ag_online:
                             bucket["onlineCount"] += 1
+                    # v0.2.25: the tablet's Join picker lists groups in its own
+                    # location. A wall elsewhere isn't one it could ever join,
+                    # and "Join" replaces this screen's videos.
+                    own_store = ((screen_meta or {}).get("location") or {}).get("storeId")
                     available_sync_groups = sorted(
-                        available_groups.values(), key=lambda g: g["id"],
+                        ({k: v for k, v in g.items() if k != "_stores"}
+                         for g in available_groups.values()
+                         if not own_store or own_store in g["_stores"]),
+                        key=lambda g: g["id"],
                     )
                     poll_mode = s.get("pollMode", DEFAULT_POLL_MODE)
                     # v0.2.16: web page mode. /api/state is readable by
@@ -5484,7 +5601,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # ("on"), has the accessibility setting off ("off"),
                         # or runs a player too old to finish one unattended
                         # ("old"). The CMS flags anything but "on".
-                        "autoUpdate":            ("old" if _version_tuple(s.get("appVersion") or "0")
+                        # A web player updates itself on every page load.
+                        "autoUpdate":            ("on" if s.get("appFlavor") == "web" else
+                                                  "old" if _version_tuple(s.get("appVersion") or "0")
                                                   < _version_tuple(AUTO_UPDATE_MIN_APP)
                                                   else "on" if s.get("autoConfirmEnabled") else "off"),
                         "autoUpdateMinApp":      AUTO_UPDATE_MIN_APP,
@@ -5492,6 +5611,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "liveThresholdSec":      int(_live_threshold_sec(pm)),
                         "secondsSinceHeartbeat": round(now - last, 1) if last else None,
                         "currentRevision":       state.get("revision", 0),
+                        # v0.2.25: what the screen itself last said it was
+                        # playing (its heartbeat), so the CMS can tell "has it
+                        # yet" from "has been sent it".
+                        "deviceRevision":        s.get("currentRevision"),
+                        "syncStatusAgeSec":      (round(now - s["syncStatus"]["receivedAt"], 1)
+                                                  if isinstance(s.get("syncStatus"), dict)
+                                                  and s["syncStatus"].get("receivedAt") else None),
+                        "syncLoopStartedAtMs":   (int(float(_sync_groups[state["syncGroup"]]["loopStartedAt"]) * 1000)
+                                                  if state.get("syncGroup") in _sync_groups else None),
                         "currentItems":          real_state.get("items") or [],
                         "previewItems":          (state.get("items") or []) if preview_snap else None,
                         "previewRemainingSec":   (max(0, int(round(preview_exp_ms / 1000 - now)))
@@ -5514,6 +5642,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "pollMode":              pm,
                         "lowDataMode":           pm == "slow",
                         "syncGroup":             state.get("syncGroup"),
+                        "pushedAt":              state.get("pushedAt"),   # v0.2.25: newest push = a group's reference playlist
                         # The override the CMS most recently chose (or
                         # null for auto). The heartbeat carries the
                         # current ACTUAL active mode separately
@@ -5960,6 +6089,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     targets = base_targets
                 pushed = 0
                 held = 0
+                live_groups: set[str] = set()   # groups whose playing loop changed
                 for device_id in targets:
                     s = _ensure_screen_state(device_id)
                     # A real push ends any content test on this screen first,
@@ -5980,9 +6110,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         dest["items"] = list(items)
                     if ev is not None:
                         held += 1
+                    elif fan_out and s.get("syncGroup"):
+                        live_groups.add(s["syncGroup"])
                     s["revision"] += 1
                     s["pushedAt"] = time.time()
                     pushed += 1
+                starts_at = {}
+                for gid in sorted(live_groups):
+                    starts_at[gid] = int(_reset_group_loop_epoch(gid, time.time()) * 1000)
                 top_rev = max((s["revision"] for s in _per_screen.values()), default=0)
                 if pushed:
                     _save_per_screen()
@@ -5998,6 +6133,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             )
             self._send_json({"ok": True, "screensTargeted": pushed, "screensInEvent": held,
                              "revision": top_rev, "items": len(items),
+                             "groupStartsAtMs": starts_at,
+                             "startsInSec": _starts_in_sec(max(starts_at.values(), default=0) or None),
                              "skipped": [x.get("id") if isinstance(x, dict) else None for x in skipped]})
             return
 
@@ -6112,7 +6249,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 else:
                     print(f"[self-edit] {group_id} calibrate without device secret (grace)", file=sys.stderr)
             else:
-                if self._require_perm("screens.command") is None:
+                # v0.2.25: a tablet may light up the group it belongs to.
+                _provided = self.headers.get("X-Device-Secret") or ""
+                _member_ok = bool(_provided) and any(
+                    (_per_screen.get(d) or {}).get("syncGroup") == group_id
+                    and hmac.compare_digest(_provided.encode(), (m.get("deviceSecret") or "").encode())
+                    for d, m in _screens.items())
+                if not _member_ok and self._require_perm("screens.command") is None:
                     return
             try:
                 duration_sec = int(body.get("durationSec") or 60)
@@ -6147,6 +6290,57 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 target=group_id,
             )
             self._send_json({"ok": True, "calibrateUntilMs": until_ms, "screensTargeted": len(targets)})
+            return
+
+        # v0.2.25: start a group's loop again from the first video, together.
+        if path.startswith("/api/sync-groups/") and path.endswith("/restart"):
+            if self._require_perm("screens.push") is None:
+                return
+            group_id = urllib.parse.unquote(path[len("/api/sync-groups/"):-len("/restart")])
+            with _STATE_LOCK:
+                members = [d for d, st in _per_screen.items() if st.get("syncGroup") == group_id]
+                if members:
+                    # No revision bump: players older than v0.2.25 rebuild
+                    # their queue on one and start playing straight away,
+                    # which undoes the coordinated start. Newer players see
+                    # the new start time on their next heartbeat reply.
+                    starts_ms = int(_reset_group_loop_epoch(group_id, time.time()) * 1000)
+            if not members:
+                self.send_error(404, "No screens in that group"); return
+            n = len(members)
+            _log_activity(kind="settings", icon="refresh", target=group_id,
+                          text=f"Restarted sync group '{group_id}' ({n} screen{'' if n == 1 else 's'})")
+            self._send_json({"ok": True, "screensTargeted": n, "groupStartsAtMs": starts_ms,
+                             "startsInSec": _starts_in_sec(starts_ms)})
+            return
+
+        # v0.2.25: rename a group. The name IS the id, so this moves every
+        # member and the loop start across together; nothing restarts.
+        if path.startswith("/api/sync-groups/") and path.endswith("/rename"):
+            if self._require_perm("screens.push") is None:
+                return
+            group_id = urllib.parse.unquote(path[len("/api/sync-groups/"):-len("/rename")])
+            new_name = " ".join(str(body.get("name") or "").split())[:60]
+            if not new_name:
+                self.send_error(400, "A name is needed"); return
+            with _STATE_LOCK:
+                members = [d for d, st in _per_screen.items() if st.get("syncGroup") == group_id]
+                taken = new_name != group_id and any(
+                    st.get("syncGroup") == new_name for st in _per_screen.values())
+                if members and not taken and new_name != group_id:
+                    for d in members:
+                        _per_screen[d]["syncGroup"] = new_name
+                    if group_id in _sync_groups:
+                        _sync_groups[new_name] = _sync_groups.pop(group_id)
+                        _save_sync_groups()
+                    _save_per_screen_soon()
+            if not members:
+                self.send_error(404, "No screens in that group"); return
+            if taken:
+                self.send_error(409, "Another group already has that name"); return
+            _log_activity(kind="settings", icon="settings", target=new_name,
+                          text=f"Renamed sync group '{group_id}' to '{new_name}'")
+            self._send_json({"ok": True, "name": new_name, "screensTargeted": len(members)})
             return
 
         if path == "/api/screens/heartbeat":
@@ -6228,6 +6422,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if key == "location" and s.get("locationSetByOperator"):
                         continue
                     s[key] = val
+                # v0.2.25: how the player's sync is going (see _clean_sync_report).
+                sync_report = _clean_sync_report(body.get("sync"))
+                if sync_report is not None:
+                    s["syncStatus"] = sync_report
                 s["lastHeartbeat"] = time.time()
                 # v0.1.37: pick the right pollMode default for a brand-
                 # new tablet. Legacy flavor (Android 6/7 hardware on
@@ -6247,10 +6445,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # permanently over the GCS ~1/sec per-object write cap, which is
                 # what took the whole CMS down. See _save_screens_soon.
                 _save_screens_soon()
+                # v0.2.25: the group's loop start, so a player can notice a
+                # restart within one heartbeat (compare with the anchor it
+                # holds) and re-check without waiting for its next poll.
+                sg = state.get("syncGroup")
+                loop_ms = (int(float(_sync_groups[sg]["loopStartedAt"]) * 1000)
+                           if sg and sg in _sync_groups else None)
             self._send_json({
                 "ok":          True,
                 "revision":    state["revision"],
                 "mixSplash":   state["mixSplash"],
+                "syncLoopStartedAtMs": loop_ms,
             })
             return
 
@@ -7064,6 +7269,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     else:
                         targets = [device_id]
                     held_by_event = 0
+                    group_changed = False   # did any member's playing loop change?
                     for tid in targets:
                         st = _ensure_screen_state(tid)
                         _cancel_preview_on(st)  # sync-group fan-out: same rule as above
@@ -7072,6 +7278,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         dest, ev = _edit_target(tid, ("items",))
                         if ev is not None:
                             held_by_event += 1
+                        else:
+                            group_changed = True
                         if mode == "append":
                             existing = {x.get("id") for x in dest["items"]}
                             for v in items:
@@ -7091,8 +7299,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # _group_loop_epoch no longer ping-pongs the epoch
                     # based on per-screen revision counters that
                     # naturally diverge across group members.
-                    if group_id:
-                        _reset_group_loop_epoch(group_id, time.time())
+                    group_starts_ms = None
+                    if group_id and group_changed:
+                        group_starts_ms = int(_reset_group_loop_epoch(group_id, time.time()) * 1000)
                     _save_per_screen()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     verb = "Replaced playlist on" if mode == "replace" else "Added to"
@@ -7119,6 +7328,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "screensTargeted": len(targets),
                         "screensInEvent": held_by_event,
                         "syncGroup": group_id,
+                        "groupStartsAtMs": group_starts_ms,
+                        "startsInSec": _starts_in_sec(group_starts_ms),
                         "skipped": skipped_ids,
                     })
                     return
@@ -7431,7 +7642,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         cleaned = raw_group.strip()
                         new_group = cleaned if cleaned else None
                     state = _ensure_screen_state(device_id)
+                    old_group = state.get("syncGroup")
                     state["syncGroup"] = new_group
+                    adopted = None
+                    if new_group and new_group != old_group:
+                        # v0.2.25: take the group's playlist, or the screen
+                        # plays its own videos on the group's clock. The
+                        # member pushed to most recently is the reference.
+                        donors = [(d, st) for d, st in _per_screen.items()
+                                  if d != device_id and st.get("syncGroup") == new_group]
+                        if donors:
+                            donor_id = max(donors, key=lambda kv: kv[1].get("pushedAt") or 0)[0]
+                            _cancel_preview_on(state)
+                            dest, ev = _edit_target(device_id, ("items",))
+                            dest["items"] = [dict(x) for x in _own_items(donor_id) if isinstance(x, dict)]
+                            adopted = len(dest["items"])
+                            if ev is not None:
+                                _save_events()
+                    if new_group != old_group:
+                        # Bump so the screen re-checks now rather than at its
+                        # next poll.
+                        state["revision"] = int(state.get("revision") or 0) + 1
                     _save_per_screen_soon()
                     screen_name = (_screens.get(device_id) or {}).get("name") or device_id
                     _log_activity(
@@ -7443,7 +7674,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         icon="settings",
                         target=device_id,
                     )
-                    self._send_json({"ok": True, "syncGroup": new_group})
+                    self._send_json({"ok": True, "syncGroup": new_group,
+                                     "adoptedItems": adopted})
                     return
                 if action == "display-mode":
                     # Pick an HDMI mode for this screen. null = auto
@@ -8648,23 +8880,10 @@ def main() -> None:
             }
             _save_secrets()
         print("[secrets] seeded brandApiKey from SCREENS_BRAND_API_KEY", file=sys.stderr)
-    # v0.1.50: clear ALL auto-set "store:<id>" sync groups. The
-    # auto-group-by-storeId logic is gone (see the register handler);
-    # this clears the residue from earlier installs so the current
-    # state matches the new "opt in only" model. Custom group names
-    # the operator explicitly typed (e.g. "wall-A") don't start with
-    # "store:" and stay intact.
-    with _STATE_LOCK:
-        cleared = 0
-        for d, s in _per_screen.items():
-            grp = s.get("syncGroup")
-            if not grp or not grp.startswith("store:"):
-                continue
-            s["syncGroup"] = None
-            cleared += 1
-        if cleared:
-            _save_per_screen()
-            print(f"[migrate] cleared {cleared} auto-set store:* sync group(s)", file=sys.stderr)
+    # v0.2.25: the v0.1.50 start-up step that cleared every "store:<id>"
+    # sync group is gone. It was meant to tidy up the old automatic
+    # grouping once, but the CMS went on naming new groups "store:<id>",
+    # so every deploy or cold start quietly took every wall out of sync.
     # v0.2.12: background state flusher — persists dirty _screens / _per_screen
     # to disk off the request thread and out from under _STATE_LOCK, so a slow
     # gcsfuse write can't stall polls or self-edit/toggle POSTs (which is what

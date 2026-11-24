@@ -18,6 +18,29 @@ Rules:
 
 ---
 
+## v0.2.25
+
+- **Sync groups no longer switch themselves off.** Every server restart used to
+  clear any group the CMS had created, so a wall silently went out of step
+  after each update. Groups now stay until someone changes them.
+- **Groups start together.** A new playlist, a push from the Library or the new
+  "Restart together" makes every screen in the group start the same video at
+  the same moment, and each screen keeps playing its current videos until
+  then instead of freezing.
+- **See whether a group is in step.** Each screen reports how far it is from
+  the group's clock. The CMS Sync groups page shows "In step", "Catching up",
+  "Out of step", "Different playlist", "Not reporting" and so on, per screen
+  and for the group. It can also name, rename, add and remove screens, match
+  playlists and restart a group.
+- **Screens stay closer together.** Screens now close small gaps smoothly and
+  no longer jump back to the last video at the start of a loop, or replay the
+  end of a clip. Videos whose length doesn't match their slot hold the last
+  frame, so every screen changes video on the same moment.
+- **Joining a group takes its videos.** A screen that joins a group now plays
+  the group's videos instead of its own. The tablet asks first, lists only
+  groups at its location, and says so if joining fails.
+- **The tablet's clock test covers the whole group**, not just that tablet.
+
 ## v0.2.24
 
 - **Holt Renfrew Yorkdale is now a location.** Toronto has its own city and

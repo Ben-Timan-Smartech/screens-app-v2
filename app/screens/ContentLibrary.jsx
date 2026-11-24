@@ -308,8 +308,8 @@ const AddContentModal = ({ targetDeviceId, targetName, onClose }) => {
     try {
       const chosen = MOCK_VIDEOS.filter((v) => selected.has(v.id) && canGoOnScreen(v));
       if (chosen.length === 0) { showToast('None of those videos has synced yet', 'err'); return; }
-      await setScreenPlaylist(targetDeviceId, chosen, 'append');
-      showToast(`Added ${chosen.length} to ${targetName}`, 'ok');
+      const res = await setScreenPlaylist(targetDeviceId, chosen, 'append');
+      showToast(syncPushToast(res, `Added ${chosen.length} to ${targetName}`), 'ok');
       onClose(true);
     } catch (e) {
       showToast(`Add failed: ${e.message}`, 'err');

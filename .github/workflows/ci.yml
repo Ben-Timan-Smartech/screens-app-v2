@@ -75,3 +75,8 @@ jobs:
         # tests. Faster than full assemble of both flavors; catches the
         # same class of regressions.
         run: gradle :app:assembleModernDebug --no-daemon --stacktrace
+      - name: Unit tests (modern)
+        working-directory: player
+        # Plain JVM tests: the sync maths is Android-free on purpose so it can
+        # be checked without a device.
+        run: gradle :app:testModernDebugUnitTest --no-daemon --stacktrace

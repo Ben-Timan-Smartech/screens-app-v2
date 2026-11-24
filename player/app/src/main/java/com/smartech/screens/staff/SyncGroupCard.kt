@@ -56,9 +56,11 @@ fun SyncGroupCard(
     onJoin: (String) -> Unit,
     onLeave: () -> Unit,
     onCalibrate: () -> Unit,
+    message: String? = null,
 ) {
     val inGroup = !currentGroupId.isNullOrBlank()
     var confirmLeave by remember { mutableStateOf(false) }
+    var confirmJoin by remember { mutableStateOf<String?>(null) }
 
     if (confirmLeave) {
         AlertDialog(
@@ -82,6 +84,28 @@ fun SyncGroupCard(
         )
     }
 
+    confirmJoin?.let { gid ->
+        AlertDialog(
+            onDismissRequest = { confirmJoin = null },
+            title = { Text("Join $gid?") },
+            text = {
+                Text(
+                    "This screen plays the group's videos in step with the other screens. " +
+                        "The videos it has now are replaced."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmJoin = null
+                    onJoin(gid)
+                }) { Text("Join group") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmJoin = null }) { Text("Cancel") }
+            },
+        )
+    }
+
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -90,11 +114,11 @@ fun SyncGroupCard(
                 modifier = Modifier.weight(1f),
             )
             if (inGroup) {
-                // Calibrate runs the 60 s synchronised clock overlay on
+                // Clock test runs the 60 s synchronised clock overlay on
                 // every group member — quickest "are we on the same
                 // tick?" sanity check.
                 PillButton(
-                    label = "Calibrate",
+                    label = "Clock test",
                     onClick = onCalibrate,
                 )
                 Spacer(Modifier.size(8.dp))
@@ -105,11 +129,15 @@ fun SyncGroupCard(
                 )
             }
         }
+        if (message != null) {
+            Spacer(Modifier.height(6.dp))
+            Text(message, color = Color(0xFFA63824), fontSize = 13.sp)
+        }
         Spacer(Modifier.height(10.dp))
         if (inGroup) {
             MemberList(currentGroupId!!, members)
         } else {
-            JoinPicker(availableGroups, onJoin)
+            JoinPicker(availableGroups, onJoin = { confirmJoin = it })
         }
     }
 }
@@ -142,7 +170,7 @@ private fun MemberList(
         SyncDivider()
         if (members.isEmpty()) {
             Text(
-                "Waiting for member list… (next poll)",
+                "Checking which screens are in the group…",
                 color = SyncMuted, fontSize = 13.sp,
                 modifier = Modifier.padding(18.dp),
             )
@@ -217,8 +245,8 @@ private fun JoinPicker(
                     color = SyncInk, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                 )
                 Text(
-                    "Playing independently. Joining a group locks this screen to the " +
-                        "group's playlist and clock so videos start in step.",
+                    "Plays on its own. Join a group to play the same videos at the same " +
+                        "moment as the other screens in it.",
                     color = SyncMuted, fontSize = 12.sp,
                 )
             }
@@ -226,8 +254,8 @@ private fun JoinPicker(
         SyncDivider()
         if (available.isEmpty()) {
             Text(
-                "No sync groups exist on the fleet yet. Create one from the CMS " +
-                    "(Screens → pick a screen → Sync group).",
+                "No sync groups at this location. Create one in the CMS " +
+                    "(Screens, pick a screen, Sync group).",
                 color = SyncMuted, fontSize = 13.sp,
                 modifier = Modifier.padding(18.dp),
             )
