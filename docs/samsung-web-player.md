@@ -1,8 +1,13 @@
 # Samsung screens: setting up the web player
 
 The web player runs the Screens playlist directly on a Samsung signage screen
-(for example the QM43C), with no media player box. The screen opens a web page
-from our server through its built-in **Custom App** setting.
+(for example the QM43C), with no media player box. The screen installs a small
+app from our server through its built-in **Custom App** setting, and the app
+opens the player.
+
+Custom App doesn't open web pages. It asks the address for `sssp_config.xml`,
+then downloads the signed app (`Screens.wgt`) named in it. If there's nothing
+there, or the screen's date is wrong, it says it can't connect to the server.
 
 ## Each screen's address
 
@@ -33,14 +38,22 @@ https://screens.smartechworld.com/tv/?store=tmrw-holt-yorkdale&code=COL.L-1
 
 ## On the screen
 
-1. Menu → **System → Play via → Custom App**.
-2. Enter the screen's address (above) when asked.
-3. Under **System → Power Control**: **Auto Power On** on, **Auto Power Off** off.
-4. Turn the **screen saver** off.
-5. Switch the screen off at the wall and back on. It should open the player
+1. Set the **date and time** (Menu → System → Time). A wrong date stops the
+   install.
+2. Menu → **System → Play via → Custom App**.
+3. Press **SOURCE** and pick **HDMI**, then HOME → **App Management** →
+   **Install Custom App**, and enter the screen's address (above). If the
+   install can't find the app, try the address with a `/` on the end.
+4. Under **System → Power Control**: **Auto Power On** on, **Auto Power Off** off.
+5. Turn the **screen saver** off.
+6. Switch the screen off at the wall and back on. It should open the player
    by itself.
 
-The menu names can differ slightly between firmware versions.
+The menu names differ slightly between firmware versions. These come from
+signage vendors' guides for the same range and haven't been checked on a QM43C.
+
+If it says **Unable to install**, the address works and the certificate is the
+problem: check that this screen's Unique Device ID is in it.
 
 ## In the CMS
 
@@ -67,11 +80,33 @@ checked in), keeps playing the current loop meanwhile, then every screen cuts
 to the new first video together. Each screen reports how far it is from the
 group clock, so the CMS can show whether the group is in step.
 
+## Building and signing the app
+
+The app's source is in `samsung-app/`. It's a shell that opens the player and
+opens it again if it doesn't start or goes quiet, so it rarely changes: the
+player itself updates from the server.
+
+Each screen has its own package, because Custom App doesn't tell an app which
+address it came from. All of them use one Samsung certificate, which must list
+every screen's **Unique Device ID** (Menu → Support → Contact Samsung).
+
+1. In Tizen Studio's Certificate Manager, make a **Samsung → TV** profile. It
+   needs a Samsung account. Add every screen's ID to the distributor
+   certificate. Keep the author certificate and its password safe and out of
+   this repo: an update signed with a different one won't install over the old.
+2. Raise `samsung-app/VERSION`.
+3. `python samsung-app/build.py --store holt --codes L1-L6,R1-R6 --profile <name>`
+4. Commit `app/tv/apps/`, merge, and restart each screen.
+
+Adding a screen later means adding its ID to the certificate and building again.
+
 ## Known limits (v1)
 
 - **Not yet tested on a real Samsung screen.** Check the debug readout on the
   first screen: "Cache" should count up to all videos, and "fine speed
   control" should say yes.
+- **The certificate is unproven on the QM43C.** Reports on other models say a
+  partner-level certificate tied to each screen's ID is needed.
 - **Seamless changes** need the screen to open the next video while the
   current one plays, so it runs two videos at once for a few seconds. If it
   can't, the player falls back to one by itself and there's a short blank at

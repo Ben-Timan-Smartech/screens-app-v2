@@ -4397,7 +4397,14 @@ def lan_ip() -> str:
 
 # Paths under /tv/ that are files, so a missing one 404s instead of getting
 # the player page (see Handler.translate_path).
-_TV_ASSET_RE = re.compile(r"\.(?:js|css|map|png|jpe?g|gif|svg|ico|json|txt|html?|webmanifest|mp4|webm)$", re.I)
+_TV_ASSET_RE = re.compile(
+    r"\.(?:js|css|map|png|jpe?g|gif|svg|ico|json|txt|html?|webmanifest|mp4|webm|xml|wgt)$", re.I)
+
+# What a Samsung screen's Custom App setting asks for, under the address typed
+# into it (/tv/holt/L1): a description of the app, then the signed app itself.
+# One of each per screen, made by samsung-app/build.py.
+_TV_APP_RE = re.compile(
+    r"^tv/+([a-z0-9-]+)/+(?:col\.)?([a-z]+)-?(\d+)/+(sssp_config\.xml|screens\.wgt)$", re.I)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -4461,6 +4468,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # decodes to `../../data/secrets.json` and `resolve()` escapes APP_DIR,
         # serving the auth DB / integration secrets / source. Mirror the
         # containment the media/splash/brand/uploaded branches already do.
+        m = _TV_APP_RE.match(path)
+        if m:
+            name = "sssp_config.xml" if m[4].lower().endswith(".xml") else "Screens.wgt"
+            return str(APP_DIR / "tv" / "apps" / m[1].lower() / f"{m[2].lower()}{int(m[3])}" / name)
         full = (APP_DIR / path).resolve()
         try:
             full.relative_to(APP_DIR)

@@ -3,8 +3,8 @@
  *
  * Plays a screen's Screens playlist in a browser, using the same server API
  * as the Android player (register, heartbeat, /api/state). Built for Samsung
- * Tizen signage (Chromium M94) opened through the panel's Custom App setting,
- * but it runs in any modern browser.
+ * Tizen signage (Chromium M94), inside the small app in samsung-app/ that the
+ * panel's Custom App setting installs, but it runs in any modern browser.
  *
  * Open it as:
  *   https://screens.smartechworld.com/tv/?store=tmrw-holt-yorkdale&code=COL.L-1
@@ -925,7 +925,7 @@
     var e = expected();
     var item = e ? state.items[e.idx] : null;
     var lines = [
-      'Screens web player ' + VERSION,
+      'Screens web player ' + VERSION + (params.get('app') ? '  ·  Samsung app ' + params.get('app') : ''),
       'Screen   ' + (CODE || '(no code)') + '  ·  ' + deviceId,
       'Store    ' + (STORE || '(none)'),
       'Server   ' + (state.online ? 'online' : 'offline' + (state.lastError ? ' (' + state.lastError + ')' : '')) +
@@ -951,10 +951,27 @@
     debugEl.textContent = lines.join('\n');
   }
 
+  function toggleDebug() { debugOn = !debugOn; renderDebug(); }
+
   document.addEventListener('keydown', function (ev) {
     // Enter / OK on the remote toggles the readout.
-    if (ev.key === 'Enter' || ev.keyCode === 13) { debugOn = !debugOn; renderDebug(); }
+    if (ev.key === 'Enter' || ev.keyCode === 13) toggleDebug();
+    // Return (Back) on a Samsung remote would close the app.
+    if (ev.keyCode === 10009) ev.preventDefault();
   });
+
+  // Inside the Samsung app (samsung-app/src/main.js): say we're alive, so it
+  // knows not to open this page again, and take keys it caught.
+  var embedded = window.parent !== window;
+  function sayAlive() {
+    if (embedded) window.parent.postMessage({ type: 'screens-alive', version: VERSION }, '*');
+  }
+  if (embedded) {
+    window.addEventListener('message', function (ev) {
+      if (ev.source !== window.parent || !ev.data) return;
+      if (ev.data.type === 'screens-key' && ev.data.key === 'Enter') toggleDebug();
+    });
+  }
 
   // ── Start ───────────────────────────────────────────────────────────
   (function boot() {
@@ -967,6 +984,8 @@
     registerServiceWorker();
     register().then(function () { poll(); warmUpClock(4); heartbeat(); scheduleHeartbeat(); });
     setInterval(tick, 200);
+    sayAlive();
+    setInterval(sayAlive, 5000);
     setInterval(refreshCacheStatus, 20000);
     setInterval(renderDebug, 500);
     // If registration failed (offline at boot), keep trying.

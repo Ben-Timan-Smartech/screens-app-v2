@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Screens</title>
+<!-- Samsung's own API, only present inside an installed app. -->
+<script src="$WEBAPIS/webapis/webapis.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  iframe { position: fixed; top: 0; left: 0; width: 100%; height: 100%; border: 0; background: #000; }
+  #cover { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #000; color: #8a8a8a;
+           font: 24px/1.6 sans-serif; text-align: center; }
+  #text { position: absolute; top: 50%; left: 0; width: 100%; margin-top: -60px; }
+  #cover b { color: #ffffff; font-weight: 500; }
+</style>
+</head>
+<body>
+<div id="cover"><div id="text">Starting&hellip;</div></div>
+<script src="main.js"></script>
+</body>
+</html>
