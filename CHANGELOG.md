@@ -40,6 +40,11 @@ Rules:
   the group's videos instead of its own. The tablet asks first, lists only
   groups at its location, and says so if joining fails.
 - **The tablet's clock test covers the whole group**, not just that tablet.
+- **Samsung screens keep their content.** Videos are stored on the screen once
+  downloaded and play from there, so a dropped network doesn't stop them. A
+  screen whose browser won't play stored videos streams them instead.
+- **Samsung screens restart a splash that stops.** The web player already did
+  this for playlist videos. Its readout now shows what the video is doing.
 - **Toronto screens get the tm:rw splash.** The server's saved list of city
   splashes was older than Toronto and hid it. "(no splash)" for a city now also
   survives a restart.

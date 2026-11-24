@@ -3,8 +3,8 @@
  *
  * Plays a screen's Screens playlist in a browser, using the same server API
  * as the Android player (register, heartbeat, /api/state). Built for Samsung
- * Tizen signage (Chromium M94) opened through the panel's Custom App setting,
- * but it runs in any modern browser.
+ * Tizen signage (Chromium M94) opened in the panel's own web browser, but it
+ * runs in any modern browser.
  *
  * Open it as:
  *   https://screens.smartechworld.com/tv/?store=tmrw-holt-yorkdale&code=COL.L-1
@@ -25,7 +25,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'web-1.0.0';
+  var VERSION = 'web-1.1.0';
   var FLAVOR = 'web';
 
   // ── Config from the address ─────────────────────────────────────────
@@ -36,6 +36,7 @@
   var STORES = {
     'tmrw-holt-yorkdale': {
       city: 'TOR', region: 'CANADA', alias: 'holt',
+      concept: 'Holt',        // its own splash (Settings → Splashes)
       shortCode: function (c) {
         var m = /^(?:COL\.?)?([LR])-?(\d{1,2})$/i.exec(c);
         return m ? 'COL.' + m[1].toUpperCase() + '-' + parseInt(m[2], 10) : null;
@@ -171,6 +172,7 @@
     var loc = {};
     if (known.region) loc.region = known.region;
     if (known.city) loc.city = known.city;
+    if (known.concept) loc.concept = known.concept;
     if (STORE) loc.storeId = STORE;
     if (CODE) loc.screenCode = CODE;
     return loc;
@@ -262,7 +264,6 @@
       state.next = newLoop;
       log('New loop of ' + items.length + ' item(s) starts in ' +
         Math.round((anchor - serverNow()) / 1000) + ' s');
-      precache(items);
     } else {
       clearNext();
       useLoop(newLoop);
@@ -277,6 +278,7 @@
 
     setRotation(Number(st.rotation) || 0);
     activeEl().muted = !state.audioOn;
+    keepContent();
 
     if (!fromCache) {
       try {
@@ -305,7 +307,6 @@
       state.anchorLocalMs = localNow();
       badItems = {};
       forgetCue();
-      precache(loop.items);
     }
     forceSwitch = true;
   }
@@ -339,6 +340,7 @@
         break;
       case 'clearCache':
         if (window.caches) {
+          store('screens.localOff', null);
           caches.delete(MEDIA_CACHE).then(function () { location.reload(); });
         }
         break;
@@ -392,8 +394,6 @@
   }
 
   // ── Heartbeat ───────────────────────────────────────────────────────
-  var cachedIds = [];
-
   var heartbeatTimer = null;
 
   /** How this screen's sync is going, for the CMS's sync health view. */
@@ -441,14 +441,30 @@
       orientation: info.orientation,
       status: 'ONLINE',
       currentRevision: state.revision,
-      cachedVideoIds: cachedIds,
+      cachedVideoIds: state.items.filter(function (i) { return isKept(i.url); }).map(function (i) { return i.id; }),
+      cacheBytes: keptBytes(),
+      videoReport: videoReport(),
       sync: syncReport()
     }).catch(function () { /* the next one will try again */ });
   }
 
-  // ── Media cache (service worker) ────────────────────────────────────
+  // ── Content kept on this screen ─────────────────────────────────────
+  // Every file on the playlist, and the splash, is downloaded whole into the
+  // browser's storage and played from there, so the network only matters the
+  // first time. A video that isn't here yet streams. The service worker keeps
+  // the page itself, for a start with no network.
   var MEDIA_CACHE = 'screens-media-v1';
+  var MAX_LOCAL_BYTES = 400 * 1024 * 1024;
+  var kept = {};              // absolute url -> {state, src, bytes, tries, retryAt}
+  var keepBusy = false;
   var swState = 'not supported';
+
+  // Set when this browser won't play a stored file, so it streams instead.
+  // Tried again after a day, or with a newer player.
+  var localOff = (function () {
+    var v = (store('screens.localOff') || '').split('|');
+    return v[0] === VERSION && Math.abs(Date.now() - Number(v[1])) < 24 * 3600 * 1000;
+  })();
 
   function registerServiceWorker() {
     if (!('serviceWorker' in navigator)) return;
@@ -457,7 +473,6 @@
       return navigator.serviceWorker.ready;
     }).then(function () {
       swState = navigator.serviceWorker.controller ? 'active' : 'active (from next load)';
-      if (state.items.length) precache(state.items);
     }).catch(function (e) {
       swState = 'failed: ' + e.message;
       log('Service worker failed: ' + e.message);
@@ -467,23 +482,121 @@
     }
   }
 
-  function precache(items) {
-    var urls = items.map(function (i) { return absUrl(i.url); });
-    if (state.splashUrl) urls.push(absUrl(state.splashUrl));
-    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.controller.postMessage({ type: 'precache', urls: urls });
-    }
-  }
-
   function absUrl(u) { return new URL(u, location.href).href; }
 
-  function refreshCacheStatus() {
-    if (!window.caches) return;
-    caches.open(MEDIA_CACHE).then(function (c) { return c.keys(); }).then(function (keys) {
-      var have = {};
-      keys.forEach(function (k) { have[k.url] = true; });
-      cachedIds = state.items.filter(function (i) { return have[absUrl(i.url)]; }).map(function (i) { return i.id; });
-    }).catch(function () { /* ignore */ });
+  function wantedUrls() {
+    var urls = [];
+    function add(u) { u = absUrl(u); if (urls.indexOf(u) < 0) urls.push(u); }
+    state.items.forEach(function (i) { if (i.url) add(i.url); });
+    if (state.next) state.next.items.forEach(function (i) { if (i.url) add(i.url); });
+    if (state.splashUrl) add(state.splashUrl);
+    return urls;
+  }
+
+  function isKept(url) { var k = kept[absUrl(url)]; return !!k && k.state === 'ready'; }
+
+  function keptBytes() {
+    return Object.keys(kept).reduce(function (n, u) { return n + (kept[u].state === 'ready' ? kept[u].bytes : 0); }, 0);
+  }
+
+  /** The address to play `url` from: this screen's copy if it has one. */
+  function srcFor(url) {
+    var k = kept[absUrl(url)];
+    return k && k.state === 'ready' && k.src && !localOff ? k.src : absUrl(url);
+  }
+
+  /** Download whatever is missing, one file at a time. */
+  function keepContent() {
+    if (keepBusy || !window.caches) return;
+    var now = localNow();
+    var urls = wantedUrls();
+    var url = urls.filter(function (u) {
+      var k = kept[u];
+      return !k || (k.state !== 'ready' && now >= (k.retryAt || 0));
+    })[0];
+    if (!url) { tidyKept(urls); return; }
+    var k = kept[url] = kept[url] || { tries: 0 };
+    k.state = 'loading';
+    keepBusy = true;
+    keepOne(url, k).catch(function (e) {
+      k.state = 'failed';
+      k.tries++;
+      k.retryAt = localNow() + Math.min(300000, 10000 * Math.pow(2, k.tries - 1));
+      log('Could not store ' + url.split('/').pop().split('?')[0] + ': ' + (e && e.message || e));
+    }).then(function () { keepBusy = false; keepContent(); });
+  }
+
+  function keepOne(url, k) {
+    return caches.open(MEDIA_CACHE).then(function (c) {
+      return c.match(url).then(function (hit) {
+        if (hit) return hit;
+        return fetch(url, { cache: 'no-store' }).then(function (res) {
+          if (res.status !== 200) throw new Error('HTTP ' + res.status);
+          return c.put(url, res);        // fails if the download is cut short
+        }).then(function () { return c.match(url); });
+      }).then(function (hit) {
+        if (!hit) throw new Error('not stored');
+        return hit.blob().then(function (blob) {
+          var want = Number(hit.headers.get('Content-Length')) || 0;
+          if (!blob.size || (want && want !== blob.size)) {
+            return c.delete(url).then(function () { throw new Error('incomplete'); });
+          }
+          k.bytes = blob.size;
+          k.tries = 0;
+          // Past the limit it stays stored, and plays through the worker.
+          if (!k.src && !k.localFailed && keptBytes() + blob.size <= MAX_LOCAL_BYTES) k.src = URL.createObjectURL(blob);
+          k.state = 'ready';
+        });
+      });
+    });
+  }
+
+  /** Let go of files no longer on this screen, once everything else is here. */
+  function tidyKept(urls) {
+    if (!state.online || !urls.length) return;
+    if (!urls.every(function (u) { return kept[u] && kept[u].state === 'ready'; })) return;
+    Object.keys(kept).forEach(function (u) {
+      if (urls.indexOf(u) >= 0 || vids.some(function (el) { return el._url === u; })) return;
+      if (kept[u].src) URL.revokeObjectURL(kept[u].src);
+      delete kept[u];
+    });
+    caches.open(MEDIA_CACHE).then(function (c) {
+      return c.keys().then(function (keys) {
+        return Promise.all(keys.filter(function (r) { return urls.indexOf(r.url) < 0 && !kept[r.url]; })
+          .map(function (r) { return c.delete(r); }));
+      });
+    }).catch(function () { /* next time */ });
+  }
+
+  /** A stored file wouldn't play: stream that one. If the stream then plays,
+   *  it was the browser and not the file (see the 'playing' listener). */
+  function localFailed(el, why) {
+    var k = kept[el._url];
+    log('Stored copy would not play (' + why + '), streaming it');
+    if (k) {
+      if (k.src) URL.revokeObjectURL(k.src);
+      k.src = null;
+      k.localFailed = true;
+    }
+    if (el === standbyEl()) { forgetCue(); return; }
+    clearVideo(el);
+    forceSwitch = true;
+  }
+
+  function turnOffLocal() {
+    localOff = true;
+    store('screens.localOff', VERSION + '|' + Date.now());
+    log('This screen streams videos: it can play them, but not its stored copies');
+  }
+
+  /** One line for the CMS about what the video is doing. No addresses. */
+  function videoReport() {
+    var el = activeEl(), n = framesShown(el), urls = wantedUrls();
+    return (el._url ? (el._local ? 'stored' : 'stream') : 'none') + ' ' + el.currentTime.toFixed(1) + '/' +
+      (el.duration || 0).toFixed(1) + 's ' + videoState(el) + ', frames ' + (n === null ? '?' : n) +
+      ' | kept ' + urls.filter(isKept).length + '/' + urls.length + (localOff ? ' (off)' : '') +
+      ' | worker ' + swState.slice(0, 24) + ' | stalls ' + stall.recoveries.length +
+      (lastStall ? ' | last: ' + lastStall : '');
   }
 
   // ── Playback engine ─────────────────────────────────────────────────
@@ -512,7 +625,9 @@
   var rateCheck = null;       // {since, abs} while a speed nudge runs
   var currentRate = 1;
   var lastDriftMs = null;
-  var stall = { lastPos: -1, since: 0, recoveries: [] };
+  var stall = { lastPos: -1, lastFrames: -1, framesSeen: 0, since: 0, recoveries: [] };
+  var lastStall = '';         // what the last freeze looked like
+  var splashPlayAt = 0;       // local time of the last play() on the splash
   var startTimer = null;
   var pageStart = localNow();
   var seekTimes = [];         // local times of corrective seeks (sync report)
@@ -565,9 +680,20 @@
 
   function hideIdle() { idleEl.style.display = 'none'; }
 
-  function sameUrl(el, url) {
-    var src = el.getAttribute('src');
-    return !!src && absUrl(src) === absUrl(url);
+  /** Open `url` on `el`, from this screen's own copy if it has one. */
+  function setVideo(el, url) {
+    el._url = absUrl(url);
+    var src = srcFor(url);
+    el._local = src.indexOf('blob:') === 0;
+    el._openedAt = localNow();
+    el.src = src;
+  }
+
+  function sameUrl(el, url) { return !!el._url && el._url === absUrl(url); }
+
+  /** Streaming a file that is now stored here? */
+  function couldBeLocal(el) {
+    return !!el._url && !el._local && srcFor(el._url).indexOf('blob:') === 0;
   }
 
   /** Put `el` on top. The other element stays underneath, out of sight. */
@@ -582,6 +708,8 @@
     try { el.pause(); } catch (e) { /* ignore */ }
     el.onloadedmetadata = null;
     el.onloadeddata = null;
+    el._url = null;
+    el._local = false;
     if (el.getAttribute('src')) {
       el.removeAttribute('src');
       try { el.load(); } catch (e) { /* ignore */ }
@@ -636,10 +764,11 @@
     if (item.type === 'image') {
       clearVideo(standbyEl());
       var img = new Image();
-      img.src = item.url;     // warm the cache so the cut is instant
+      img.src = srcFor(item.url);     // warm the cache so the cut is instant
       cue = { idx: n, url: item.url, ready: true, image: true };
       return;
     }
+    if (localNow() - (standbyFailed[item.url] || -1e9) < 4000) return;   // it just failed: not again yet
     var el = standbyEl();
     var mine = { idx: n, url: item.url, ready: false, image: false };
     cue = mine;
@@ -652,7 +781,7 @@
     };
     el.muted = true;
     el.preload = 'auto';
-    el.src = item.url;
+    setVideo(el, item.url);
     el.load();
   }
 
@@ -668,7 +797,7 @@
     hideIdle();
 
     if (item.type === 'image') {
-      imageEl.src = item.url;
+      imageEl.src = srcFor(item.url);
       imageEl.style.display = 'block';
       activeEl().pause();
       return;
@@ -704,7 +833,7 @@
     var el = activeEl();
     showVideo(el);
     el.muted = !state.audioOn;
-    if (!sameUrl(el, item.url)) {
+    if (!sameUrl(el, item.url) || couldBeLocal(el)) {
       el.onloadeddata = null;
       el.onloadedmetadata = function () {
         el.onloadedmetadata = null;
@@ -713,7 +842,7 @@
         if (now && now.idx === current.idx) seekVideo(el, now.posMs);
         playVideo(el);
       };
-      el.src = item.url;
+      setVideo(el, item.url);
       el.load();
     } else if (e.waitMs > 0) {
       el.pause();
@@ -726,6 +855,8 @@
 
   vids.forEach(function (el) {
     el.addEventListener('playing', function () {
+      var k = el._url && kept[el._url];
+      if (k && k.localFailed && !el._local && !localOff) turnOffLocal();
       if (el !== activeEl() || !current.id) return;
       delete badItems[current.id];
       var item = state.items[current.idx];
@@ -752,6 +883,7 @@
       pendingSeekTarget = null;
     });
     el.addEventListener('error', function () {
+      if (el._local) { localFailed(el, 'error ' + (el.error ? el.error.code : '?')); return; }
       if (el === activeEl()) {
         log('Video error on ' + (current.id || '?'));
         if (current.id) badItems[current.id] = localNow();
@@ -809,21 +941,111 @@
     }
   }
 
+  function startSplash(el) {
+    el.loop = true;
+    el.muted = !state.audioOn;
+    setVideo(el, state.splashUrl);
+    showVideo(el);
+    playVideo(el);
+    restartStallWatch(localNow());
+  }
+
+  /** The splash has no clock to follow, so just keep it moving: a panel can
+   *  pause a video, stop at the end of a loop or freeze by itself. */
+  function watchSplash(el) {
+    var now = localNow();
+    // It started as a stream and is now stored: change over as it loops.
+    if (couldBeLocal(el) && (el.ended || el.currentTime < stall.lastPos - 1)) {
+      log('Splash now plays from this screen');
+      startSplash(el);
+      return;
+    }
+    if (document.hidden) { restartStallWatch(now); return; }
+    if (pictureMoved(el, now)) return;
+    if (el.ended) { try { el.currentTime = 0; } catch (e) { /* ignore */ } }
+    if ((el.paused || el.ended) && el.readyState >= 2 && now - splashPlayAt > 2000) {
+      splashPlayAt = now;
+      playVideo(el);
+    }
+    // Give a slow download longer than a picture that has stopped.
+    if (now - stall.since <= (el.readyState < 3 && !el.error ? 30000 : 10000)) return;
+    var stuckMs = now - stall.since;
+    noteStall(now);
+    lastStall = (el._local ? 'stored' : 'stream') + ' stopped at ' + el.currentTime.toFixed(1) + ' s for ' +
+      Math.round(stuckMs / 1000) + ' s (' + videoState(el) + ')';
+    log('Splash ' + lastStall + ', reloading it');
+    if (stall.recoveries.length >= 3 && mayReloadPage()) { location.reload(); return; }
+    clearVideo(el);           // the next tick opens it again
+    restartStallWatch(now);
+  }
+
+  function restartStallWatch(now) {
+    stall.lastPos = -1;
+    stall.lastFrames = -1;
+    stall.framesSeen = 0;
+    stall.since = now;
+  }
+
+  function noteStall(now) {
+    stall.recoveries.push(now);
+    stall.recoveries = stall.recoveries.filter(function (t) { return now - t < 300000; });
+  }
+
+  /** True if the picture has changed since the last tick. The frame counter
+   *  only counts once it has been seen to work: some panels don't fill it in. */
+  function pictureMoved(el, now) {
+    var pos = el.currentTime;
+    var frames = framesShown(el);
+    var posMoved = pos !== stall.lastPos;
+    var framesMoved = frames !== null && frames !== stall.lastFrames;
+    if (framesMoved && stall.lastFrames >= 0) stall.framesSeen++;
+    stall.lastPos = pos;
+    stall.lastFrames = frames === null ? -1 : frames;
+    if (!posMoved || (frames !== null && stall.framesSeen >= 10 && !framesMoved)) return false;
+    stall.since = now;
+    return true;
+  }
+
+  function framesShown(el) {
+    try { return el.getVideoPlaybackQuality().totalVideoFrames || null; } catch (e) { return null; }
+  }
+
+  /** At most one page reload every 10 minutes for a splash that won't play,
+   *  and none while offline. */
+  function mayReloadPage() {
+    if (!state.online) return false;
+    var last = parseFloat(store('screens.splashReloadAt') || '0') || 0;
+    if (Math.abs(Date.now() - last) < 600000) return false;
+    store('screens.splashReloadAt', String(Date.now()));
+    return store('screens.splashReloadAt') !== null;   // no storage: can't count, so don't
+  }
+
+  function videoState(el) {
+    return (el.error ? 'error ' + el.error.code : el.ended ? 'ended' : el.paused ? 'paused' : 'playing') +
+      ', ready ' + el.readyState + ', network ' + el.networkState;
+  }
+
   function tick() {
     var e = expected();
     var el = activeEl();
+    if (el._local && el.readyState < 1 && !document.hidden && localNow() - el._openedAt > 8000) {
+      localFailed(el, 'it did not open');
+    }
     if (state.next && !e && state.next.anchor <= serverNow()) { startNext(); return; }
     if (!e) {
       current = { idx: -1, id: null, since: 0 };
       if (cue) forgetCue();
       if (state.splashUrl) {
-        if (!sameUrl(el, state.splashUrl)) {
-          el.loop = true;
-          el.src = state.splashUrl;
-          showVideo(el);
-          playVideo(el);
+        var k = kept[absUrl(state.splashUrl)];
+        if (sameUrl(el, state.splashUrl)) {
+          watchSplash(el);
+          hideIdle();
+        } else if (!el._url && k && k.state === 'loading' && !localOff && localNow() - pageStart < 20000) {
+          showIdle('Loading…');          // about to be stored: start from the copy
+        } else {
+          startSplash(el);
+          hideIdle();
         }
-        hideIdle();
       } else {
         showIdle(state.online ? 'No content assigned to this screen yet.' : 'Connecting…');
       }
@@ -938,11 +1160,19 @@
         '  ·  speed ' + currentRate.toFixed(2) + '  ·  fine speed control ' +
         (rateWorks === null ? 'untested' : rateWorks ? 'yes' : 'no') + '  ·  seek lead ' + Math.round(seekLeadMs) + ' ms',
       'Playing  ' + (item ? (e.idx + 1) + '/' + state.items.length + ' ' + (item.title || item.id) +
-        ' @ ' + (e.posMs / 1000).toFixed(2) + ' s' : '—'),
+        ' @ ' + (e.posMs / 1000).toFixed(2) + ' s' : state.splashUrl ? 'splash' : '—'),
+      'Video    ' + (function () {
+        var el = activeEl(), n = framesShown(el);
+        return el.currentTime.toFixed(1) + '/' + (el.duration || 0).toFixed(1) + ' s  ·  ' + videoState(el) +
+          '  ·  ' + (n === null ? 'no frame count' : n + ' frames') + '  ·  ' + el.videoWidth + '×' + el.videoHeight;
+      })(),
       'Next     ' + (!gapless ? 'seamless changes ' + gaplessNote
         : cue ? (cue.idx + 1) + '/' + state.items.length + (cue.ready ? ' ready' : ' opening…')
         : 'opens 5 s before the change'),
-      'Cache    ' + cachedIds.length + '/' + state.items.length + ' videos on this screen  ·  worker ' + swState,
+      'Stored   ' + wantedUrls().filter(isKept).length + '/' + wantedUrls().length + ' files  ·  ' +
+        (keptBytes() / 1048576).toFixed(1) + ' MB  ·  playing ' +
+        (localOff ? 'from the server (this screen could not play stored videos)'
+          : activeEl()._local ? 'from this screen' : 'from the server') + '  ·  worker ' + swState,
       'Display  ' + (function () { var i = screenInfo(); return i.screenWidth + '×' + i.screenHeight + ' ' + i.orientation; })() +
         '  ·  rotation ' + state.rotation + '°',
       'Agent    ' + navigator.userAgent,
@@ -967,7 +1197,7 @@
     registerServiceWorker();
     register().then(function () { poll(); warmUpClock(4); heartbeat(); scheduleHeartbeat(); });
     setInterval(tick, 200);
-    setInterval(refreshCacheStatus, 20000);
+    setInterval(keepContent, 5000);
     setInterval(renderDebug, 500);
     // If registration failed (offline at boot), keep trying.
     setInterval(function () { if (!registered) register(); }, 60000);
