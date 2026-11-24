@@ -1021,9 +1021,22 @@ const PushPicker = ({ videos, onClose }) => {
     setSelected(new Set(rows.filter(r => r.kind === 'screen' && r.deviceId).map(r => r.id)));
   }, [rows.length]);
 
+  // A screen in a sync group can't be pushed on its own: the server sends
+  // the push to the whole group. So ticking one ticks the group, and the
+  // count below is the real number of screens.
+  const groupOf = (r) => {
+    const s = r && r.deviceId ? liveByDevice.get(r.deviceId) : null;
+    return s ? syncEffectiveGroup(s) : null;
+  };
+  const groupedRows = rows.filter((r) => r.kind === 'screen' && groupOf(r)).length;
+
   const toggle = (id) => {
+    const row = rows.find((r) => r.kind === 'screen' && r.id === id);
+    const g = row ? groupOf(row) : null;
+    const ids = g ? rows.filter((r) => r.kind === 'screen' && groupOf(r) === g).map((r) => r.id) : [id];
     const n = new Set(selected);
-    n.has(id) ? n.delete(id) : n.add(id);
+    const on = !n.has(id);
+    ids.forEach((x) => (on ? n.add(x) : n.delete(x)));
     setSelected(n);
   };
 
@@ -1044,7 +1057,8 @@ const PushPicker = ({ videos, onClose }) => {
       const tail = targetedOfflineCount > 0
         ? ` · ${targetedOfflineCount} offline (queued)`
         : '';
-      showToast(`${verb} ${total} screen${total === 1 ? '' : 's'}${tail}`, 'ok');
+      const starts = r.startsInSec != null ? ` · groups start together in ${Math.max(1, Math.round(r.startsInSec))} s` : '';
+      showToast(`${verb} ${total} screen${total === 1 ? '' : 's'}${tail}${starts}`, 'ok');
       onClose(true);
     } catch (e) {
       showToast(`Push failed: ${e.message}`, 'err');
@@ -1131,7 +1145,8 @@ const PushPicker = ({ videos, onClose }) => {
                   color: 'var(--on-accent)',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}>{checked && <Icon.check size={11} />}</div>
-                <span style={{ fontSize: 13, color: 'var(--ink-1)', flex: 1 }}>{r.name}</span>
+                <span style={{ fontSize: 13, color: 'var(--ink-1)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</span>
+                {groupOf(r) && <Chip tone="neutral">{syncGroupLabel(groupOf(r))}</Chip>}
                 {r.online ? <Chip tone="ok">Online</Chip> : <Chip tone="outline">Offline · queues</Chip>}
               </div>
             );
@@ -1139,8 +1154,11 @@ const PushPicker = ({ videos, onClose }) => {
         </div>
 
         {/* Footer */}
-        <div style={{ padding: '14px 20px', borderTop: 'var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ flex: 1, fontSize: 12, color: 'var(--ink-4)' }}>
+        <div style={{ padding: '14px 20px', borderTop: 'var(--border)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, fontSize: 12, color: 'var(--ink-4)', minWidth: 160 }}>
+            {groupedRows > 0 && (
+              <div style={{ marginBottom: 2 }}>Screens in a sync group are pushed together.</div>
+            )}
             <span className="tnum" style={{ color: 'var(--ink-1)', fontWeight: 500 }}>{targetedDeviceIds.length}</span> screen{targetedDeviceIds.length === 1 ? '' : 's'} will receive {videos.length} video{videos.length === 1 ? '' : 's'}
             {targetedOfflineCount > 0 && (
               <span> · <span className="tnum" style={{ color: 'var(--ink-2)' }}>{targetedOfflineCount}</span> queued for reconnect</span>

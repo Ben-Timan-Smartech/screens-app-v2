@@ -96,301 +96,6 @@ const StatusLine = ({ label, value, mono, tone }) => (
   </div>
 );
 
-// SyncJoinConfirmModal — content-mismatch confirmation. Pops when the
-// user ticks a candidate screen whose current playlist differs from
-// the screen they're configuring. Confirming pushes this screen's
-// playlist to the candidate and joins it to the group. Cancelling is
-// a no-op.
-const SyncJoinConfirmModal = ({ thisScreen, target, onCancel, onConfirm }) => {
-  const myCount = (thisScreen?.currentItems || []).length;
-  const theirCount = (target?.currentItems || []).length;
-  return (
-    <div
-      onClick={onCancel}
-      style={{
-        position: 'absolute', inset: 0, zIndex: 35,
-        background: 'rgba(9,9,11,0.5)', backdropFilter: 'blur(2px)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
-      }}>
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="scr-modal-panel"
-        style={{
-          width: 480, maxWidth: '92%',
-          background: 'var(--ink-10)', border: 'var(--border)', borderRadius: 12,
-          padding: 22,
-          boxShadow: '0 24px 64px rgba(9,9,11,0.24)',
-        }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink-1)', marginBottom: 6 }}>
-          Different content — replace it?
-        </div>
-        <div style={{ fontSize: 12.5, color: 'var(--ink-3)', lineHeight: 1.55, marginBottom: 16 }}>
-          <strong style={{ color: 'var(--ink-1)' }}>{target.name || target.deviceId}</strong>
-          {' '}is currently playing
-          {' '}<strong style={{ color: 'var(--ink-1)' }}>{theirCount} video{theirCount === 1 ? '' : 's'}</strong>
-          {' '}— different from this screen's
-          {' '}<strong style={{ color: 'var(--ink-1)' }}>{myCount} video{myCount === 1 ? '' : 's'}</strong>.
-          {' '}Sync only works when group members play the same loop.
-          <div style={{ marginTop: 10 }}>
-            Push this screen's playlist over to {target.name || 'it'} and join the sync group?
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
-          <Button variant="primary" size="sm" icon={<Icon.arrowR size={12} />} onClick={onConfirm}>
-            Replace + join
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// Compare two playlists for sync purposes. Sync only makes sense when
-// every group member is playing the same loop in the same order; two
-// screens with identical items in identical order are "matched."
-// Empty + empty also matches (the next push will land identically).
-const playlistsMatch = (a, b) => {
-  const idsA = (a || []).map((v) => v && v.id);
-  const idsB = (b || []).map((v) => v && v.id);
-  if (idsA.length !== idsB.length) return false;
-  for (let i = 0; i < idsA.length; i++) {
-    if (idsA[i] !== idsB[i]) return false;
-  }
-  return true;
-};
-
-// SyncGroupCard — visual sync-group picker. Replaces the v0.1.6 text
-// input which was too easy to typo into a typo-only-singleton group.
-//
-// Behavior:
-// - Lists every OTHER registered screen with a checkbox.
-// - Boxes for screens already in the same group are pre-checked.
-// - Checking a previously-independent screen joins it to this
-//   screen's group. If this screen wasn't in a group either, both
-//   get added to a new group keyed off the storeId (or this
-//   screen's id).
-// - Unchecking a member removes it from the group.
-// - A "Stop syncing" button removes THIS screen from the group.
-//
-// Content-match guard (v0.1.12): syncing two screens that have
-// different playlists is meaningless — they'd play different content
-// at the same offset. When the user ticks a screen whose playlist
-// doesn't match this one, the parent opens a confirmation modal
-// asking whether to push this screen's playlist to the other first.
-//
-// The server tracks the group label as a string — clients never
-// need to type it. The UI invents sensible labels when a group
-// needs to be created.
-// v0.1.57: collapsed summary pill that opens the full picker in a
-// modal. Pre-v0.1.57 the full member-grid + buttons sat permanently
-// on ScreenDetail, eating ~250 px even when the screen wasn't in a
-// group. Most operators just want the status at a glance.
-const SyncGroupSummary = ({ screen, allScreens, canEdit, isLive, onOpen }) => {
-  const groupId = screen.syncGroup || null;
-  const memberCount = React.useMemo(
-    () => (allScreens || []).filter((s) => s.syncGroup && s.syncGroup === groupId).length,
-    [allScreens, groupId],
-  );
-  return (
-    <Card padding={14}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)', marginBottom: 2 }}>Sync group</div>
-          {groupId ? (
-            <div style={{ fontSize: 11, color: 'var(--ok)' }}>
-              ● Syncing with {memberCount - 1 > 0
-                ? `${memberCount - 1} other screen${memberCount - 1 === 1 ? '' : 's'}`
-                : 'no one yet'}
-            </div>
-          ) : (
-            <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>● Independent playback</div>
-          )}
-        </div>
-        <Button variant="secondary" size="sm" onClick={onOpen}>
-          {groupId ? 'Manage' : 'Set up'}
-        </Button>
-      </div>
-    </Card>
-  );
-};
-
-const SyncGroupModal = ({ open, onClose, ...props }) => {
-  if (!open) return null;
-  return (
-    <div onClick={onClose} style={{
-      position: 'fixed', inset: 0, zIndex: 40,
-      background: 'rgba(9,9,11,0.5)', backdropFilter: 'blur(2px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
-    }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        width: 'min(560px, 92%)', maxHeight: '85%',
-        background: 'var(--ink-10)', border: 'var(--border)', borderRadius: 14,
-        display: 'flex', flexDirection: 'column', overflow: 'hidden',
-        boxShadow: '0 24px 64px rgba(9,9,11,0.24)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', borderBottom: 'var(--border)' }}>
-          <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>Sync group</div>
-          <Button variant="ghost" size="sm" icon={<Icon.close size={14} />} onClick={onClose} />
-        </div>
-        <div style={{ flex: 1, overflow: 'auto' }}>
-          <SyncGroupCardBody {...props} onAfterAction={onClose} />
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const SyncGroupCardBody = ({ screen, allScreens, onSetGroup, onSetGroupForDevice, onRequestJoinWithDifferentContent, onCalibrate, canEdit, isLive, onAfterAction }) => {
-  const groupId = screen.syncGroup || null;
-  // Members = every screen in this group (including the current one).
-  // Other screens = all other registered screens, sorted by name.
-  const members = React.useMemo(
-    () => (allScreens || []).filter((s) => s.syncGroup && s.syncGroup === groupId),
-    [allScreens, groupId],
-  );
-  const others = React.useMemo(
-    () => (allScreens || [])
-      .filter((s) => s.deviceId !== screen.deviceId)
-      .sort((a, b) => (a.name || a.deviceId).localeCompare(b.name || b.deviceId)),
-    [allScreens, screen.deviceId],
-  );
-
-  // Suggested group key if this screen isn't in one yet. Prefer the
-  // store id so multiple screens at the same store fall together;
-  // fall back to the device id when no store is configured.
-  const suggestedKey = `store:${screen.location?.storeId || screen.deviceId}`;
-  const effectiveGroup = groupId || suggestedKey;
-
-  const onToggleOther = (other) => {
-    if (!canEdit) return;
-    const otherInGroup = !!(other.syncGroup && other.syncGroup === groupId);
-    if (otherInGroup) {
-      // Removing other from group → set their syncGroup to null.
-      onSetGroupForDevice(other.deviceId, null);
-      return;
-    }
-    // Joining: enforce content-match. Sync is meaningless when the
-    // two screens are playing different playlists — they'd land on
-    // the same loop offset but show different videos. If the content
-    // doesn't match, defer to the parent which puts up a modal
-    // asking whether to push this screen's playlist to the other
-    // before joining.
-    const myItems = screen.currentItems || [];
-    const theirItems = other.currentItems || [];
-    if (!playlistsMatch(myItems, theirItems)) {
-      onRequestJoinWithDifferentContent(other);
-      return;
-    }
-    // Content already matches — join silently.
-    if (!groupId) onSetGroup(suggestedKey);
-    onSetGroupForDevice(other.deviceId, effectiveGroup);
-  };
-
-  // v0.1.57: rendered inside SyncGroupModal which already provides
-  // its own framing. The outer Card wrapper is gone — content sits
-  // directly against the modal padding.
-  return (
-    <div style={{ padding: 16 }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
-        <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Sync group</div>
-        {groupId ? (
-          <span style={{ fontSize: 11, color: 'var(--ok)' }}>
-            ● Syncing with {members.length - 1 > 0 ? `${members.length - 1} other screen${members.length - 1 === 1 ? '' : 's'}` : 'no one yet'}
-          </span>
-        ) : (
-          <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>● Independent playback</span>
-        )}
-      </div>
-      <div style={{ fontSize: 11, color: 'var(--ink-4)', lineHeight: 1.5, marginBottom: 12 }}>
-        {isLive
-          ? 'Tick screens to play the same video at the same time. Same content needs to be on each screen — pushing playlists from this page fans out automatically.'
-          : 'Tick screens to play the same video at the same time. Saves now, applies when the tablet reconnects.'}
-      </div>
-
-      {others.length === 0 ? (
-        <div style={{
-          padding: '12px 14px', border: 'var(--border)', borderRadius: 6,
-          fontSize: 12, color: 'var(--ink-4)', textAlign: 'center',
-        }}>
-          No other screens registered yet — sync needs at least two.
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {others.map((other) => {
-            const inSameGroup = !!(other.syncGroup && other.syncGroup === groupId);
-            const inDifferentGroup = !!(other.syncGroup && other.syncGroup !== groupId);
-            return (
-              <button
-                key={other.deviceId}
-                disabled={!canEdit}
-                onClick={() => onToggleOther(other)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 10,
-                  width: '100%', padding: '8px 10px',
-                  border: inSameGroup ? '1px solid var(--ink-0)' : 'var(--border)',
-                  borderRadius: 6,
-                  background: inSameGroup ? 'var(--ink-8)' : 'var(--ink-10)',
-                  textAlign: 'left',
-                  opacity: inDifferentGroup ? 0.55 : 1,
-                  cursor: canEdit ? 'pointer' : 'default',
-                }}
-                title={inDifferentGroup ? `Currently in group '${other.syncGroup}'. Ticking will move it to this one.` : undefined}>
-                <span style={{
-                  width: 16, height: 16, borderRadius: 3,
-                  background: inSameGroup ? 'var(--ink-0)' : 'var(--ink-10)',
-                  border: inSameGroup ? 'none' : '1.5px solid var(--ink-6)',
-                  color: 'var(--on-accent)',
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  flexShrink: 0,
-                }}>
-                  {inSameGroup && <Icon.check size={11} />}
-                </span>
-                <StatusDot status={other.online ? 'online' : 'offline'} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {other.name || other.deviceId}
-                  </div>
-                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {[other.location?.storeId, other.location?.screenCode].filter(Boolean).join(' · ') || other.deviceId}
-                    {inDifferentGroup && ` · in '${other.syncGroup}'`}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Calibrate — lights up every group member (or this one screen
-          if it's solo) with a giant ticking server-corrected clock
-          overlay for 60 s. Staff visually confirm whether the screens
-          tick on the same wall-clock second; if they do, clock sync
-          is healthy and any visible drift in playback is a content
-          / queue issue rather than a clock issue. Always available
-          when the screen is live — useful even pre-sync to eyeball
-          a single tablet's clock against your watch. */}
-      <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <Button
-          variant="secondary" size="sm"
-          disabled={!canEdit || !isLive}
-          onClick={() => onCalibrate && onCalibrate()}
-          title={isLive ? 'Show a giant synced clock on every group member for 60 s' : 'Available once the screen reconnects.'}>
-          Calibrate screens
-        </Button>
-        {groupId && (
-          <Button
-            variant="ghost" size="sm"
-            disabled={!canEdit}
-            onClick={() => onSetGroup(null)}>
-            Stop syncing this screen
-          </Button>
-        )}
-      </div>
-    </div>
-  );
-};
-
 // PollModeRow — three discrete poll cadences replacing the old binary
 // Low Data Mode toggle. Visual is a segmented control so it reads as
 // a single choice rather than a stack of options. Slow also skips the
@@ -1817,21 +1522,6 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
   // each screen, short enough that the overlay doesn't get stuck if
   // the staff forgets to dismiss it (it auto-hides on the tablet
   // when correctedNow() passes the cutoff).
-  const handleCalibrate = async () => {
-    if (!targetDeviceId) return;
-    const groupOrSelf = lastKnown?.syncGroup || targetDeviceId;
-    try {
-      const res = await calibrateSyncGroup(groupOrSelf, 60);
-      const n = res.screensTargeted || 1;
-      showToast(
-        `Calibration started on ${n} screen${n === 1 ? '' : 's'} for 60s — watch the digits match.`,
-        'ok',
-      );
-    } catch (e) {
-      showToast(`Calibrate failed: ${e.message}`, 'err');
-    }
-  };
-
   // Push a new HDMI mode override. `modeId` is an int from the
   // screen's supportedModes list, or null to clear (== auto). The
   // tablet re-validates against its supportedModes before touching
@@ -1858,81 +1548,20 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
-  // Set this screen's sync group. `next` can be a group label string
-  // or null to detach. Used by SyncGroupCard's "Stop syncing" button
-  // and as the bootstrap call when joining the first other screen.
-  const handleSetSyncGroup = async (next) => {
-    if (!targetDeviceId) return;
-    try {
-      await setScreenSyncGroup(targetDeviceId, next || null);
-      showToast(
-        next
-          ? 'Joined sync group — push a playlist to keep group members aligned.'
-          : 'Stopped syncing this screen.',
-        'ok',
-      );
-    } catch (e) {
-      showToast(`Failed: ${e.message}`, 'err');
-    }
-  };
-
-  // Move some OTHER screen into / out of a group. Same endpoint, the
-  // CMS just calls it on a different deviceId. SyncGroupCard fires
-  // this when a checkbox is ticked or unticked.
-  const handleSetSyncGroupForDevice = async (deviceId, next) => {
-    if (!deviceId) return;
-    try {
-      await setScreenSyncGroup(deviceId, next || null);
-      // Don't toast here; the parent click already showed visual
-      // feedback by re-rendering the checkbox state.
-    } catch (e) {
-      showToast(`Failed: ${e.message}`, 'err');
-    }
-  };
-
-  // Confirmed: push this screen's playlist to `other` and add it to
-  // this screen's sync group. Called by the content-mismatch modal.
-  const confirmJoinReplacingContent = async () => {
-    const other = syncJoinTarget;
-    if (!other || !targetDeviceId) { setSyncJoinTarget(null); return; }
-    const myItems = lastKnown?.currentItems || [];
-    // Suggested group key — keep in step with SyncGroupCard's logic.
-    const suggested = lastKnown?.syncGroup || `store:${lastKnown?.location?.storeId || lastKnown?.deviceId}`;
-    try {
-      // Step 1: push our playlist to the other screen (replace mode).
-      // This is the cross-screen edit the modal is asking permission
-      // for — without it, the two would still be in different groups
-      // OR same group with mismatched content.
-      await setScreenPlaylist(other.deviceId, myItems, 'replace');
-      // Step 2: make sure this screen is in a group.
-      if (!lastKnown?.syncGroup) {
-        await setScreenSyncGroup(targetDeviceId, suggested);
-      }
-      // Step 3: move the other screen into that group.
-      await setScreenSyncGroup(other.deviceId, lastKnown?.syncGroup || suggested);
-      showToast(
-        `Pushed ${myItems.length} video${myItems.length === 1 ? '' : 's'} to ${other.name || other.deviceId} and joined the sync group.`,
-        'ok',
-      );
-    } catch (e) {
-      showToast(`Sync join failed: ${e.message}`, 'err');
-    } finally {
-      setSyncJoinTarget(null);
-    }
-  };
-
   const handleClearAll = async () => {
     if (!targetDeviceId) return;
     const len = playlist.length;
     if (len === 0) return;
+    const where = groupSize > 1 ? `all ${groupSize} screens in ${syncGroupLabel(inGroup)}` : screen.name;
     const note = isLive
-      ? `Remove all ${len} video${len === 1 ? '' : 's'} from ${screen.name}? The screen will fall back to the splash loop.`
-      : `Clear queued playlist for ${screen.name}? Screen is offline — change runs when it reconnects.`;
+      ? `Remove all ${len} video${len === 1 ? '' : 's'} from ${where}? ${groupSize > 1 ? 'They' : 'The screen'} will fall back to the splash loop.`
+      : `Clear the playlist for ${where}? The screen is offline, so the change runs when it reconnects.`;
     if (!confirm(note)) return;
     try {
-      await setScreenPlaylist(targetDeviceId, [], 'replace');
+      const res = await setScreenPlaylist(targetDeviceId, [], 'replace');
       showToast(
-        isLive ? `Cleared ${screen.name}` : `Cleared ${screen.name} — applies on reconnect`,
+        isLive ? syncPushToast(res, `Cleared ${groupSize > 1 ? 'the playlist' : screen.name}`)
+          : `Cleared ${groupSize > 1 ? syncPushToast(res, 'the playlist') : screen.name} — applies on reconnect`,
         'ok',
       );
     } catch (e) {
@@ -1940,7 +1569,6 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
 
-  const [syncOpen, setSyncOpen] = React.useState(false);
   const [addOpen, setAddOpen] = React.useState(false);
   const [testOpen, setTestOpen] = React.useState(false);
   const [endingTest, setEndingTest] = React.useState(false);
@@ -1964,19 +1592,18 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     }
   };
   const [previewVideo, setPreviewVideo] = React.useState(null);
-  // v0.1.57: sync group modal — opens when the summary pill is tapped.
-  const [syncModalOpen, setSyncModalOpen] = React.useState(false);
   // v0.1.74: device-logs viewer modal.
   const [logsOpen, setLogsOpen] = React.useState(false);
-  // Set when the user ticks a sync-group candidate that has different
-  // content from this screen. The modal asks whether to push this
-  // screen's playlist to the candidate before joining; null = closed.
-  const [syncJoinTarget, setSyncJoinTarget] = React.useState(null);
   // Drag-to-reorder state. dragIndex = the row being dragged; overIndex =
   // the row currently being hovered (drop indicator renders above it).
   const [dragIndex, setDragIndex] = React.useState(null);
   const [overIndex, setOverIndex] = React.useState(null);
-  const handleOpenSync = onOpenSync || (() => setSyncOpen(true));
+  const auth = useAuth();
+  const user = auth.user || { permissions: [] };
+  const canPush = can(user, 'screens.push');
+  const canCommand = can(user, 'screens.command');
+  const inGroup = targetDeviceId ? syncEffectiveGroup(lastKnown || {}) : null;
+  const groupSize = inGroup ? (live.screens || []).filter((x) => syncEffectiveGroup(x) === inGroup).length : 0;
 
   const handleReorder = async (from, to) => {
     if (from === to || from == null || to == null || !canEdit) return;
@@ -1988,9 +1615,9 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
     const insertAt = from < to ? to - 1 : to;
     next.splice(insertAt, 0, moved);
     try {
-      await setScreenPlaylist(targetDeviceId, next, 'replace');
+      const res = await setScreenPlaylist(targetDeviceId, next, 'replace');
       showToast(
-        isLive ? `Reordered "${moved.title}"` : `Reordered "${moved.title}" — applies on reconnect`,
+        isLive ? syncPushToast(res, `Reordered "${moved.title}"`) : `Reordered "${moved.title}" — applies on reconnect`,
         'ok',
       );
     } catch (e) {
@@ -2052,7 +1679,6 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
           </>
         }
       />
-      {syncOpen && typeof SyncPicker !== 'undefined' && <SyncPicker onClose={() => setSyncOpen(false)} />}
       {addOpen && canEdit && (
         <AddContentModal
           targetDeviceId={targetDeviceId}
@@ -2064,14 +1690,6 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
         <TestOnScreenModal deviceId={targetDeviceId} onClose={() => setTestOpen(false)} />
       )}
       <PreviewModal video={previewVideo} onClose={() => setPreviewVideo(null)} />
-      {syncJoinTarget && (
-        <SyncJoinConfirmModal
-          thisScreen={lastKnown}
-          target={syncJoinTarget}
-          onCancel={() => setSyncJoinTarget(null)}
-          onConfirm={confirmJoinReplacingContent}
-        />
-      )}
       <div style={{
         flex: 1, overflow: 'auto',
         padding: vp.isCompact ? '16px 14px 32px' : '20px 24px 40px',
@@ -2117,6 +1735,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
 
             {/* Playlist */}
             <div>
+              {hasHistory && <SyncPlaylistBanner screen={lastKnown} screens={live.screens || []} />}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
                 <div style={{ flex: 1, minWidth: 140 }}>
                   <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink-1)' }}>Playlist</div>
@@ -2297,7 +1916,7 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
                           const alsoGone = (res?.skipped || []).length;
                           const extra = alsoGone ? ` (and ${alsoGone} with no video file)` : '';
                           showToast(
-                            isLive ? `Removed "${v.title}"${extra}` : `Removed "${v.title}"${extra} — applies on reconnect`,
+                            isLive ? syncPushToast(res, `Removed "${v.title}"${extra}`) : `Removed "${v.title}"${extra} — applies on reconnect`,
                             'ok',
                           );
                         } catch (e) {
@@ -2490,31 +2109,13 @@ const ScreenDetail = ({ onOpenSync, storeId, screenId }) => {
               );
             })()}
 
-            {/* v0.1.57: sync group now collapses to a small summary
-                pill. Tap Manage / Set up to open the full picker in a
-                modal — keeps the page short for the common case where
-                the operator just wants to glance at sync status. */}
+            {/* Sync group: a summary card; "Manage" opens the group's panel. */}
             {hasHistory && (
-              <SyncGroupSummary
+              <SyncGroupCard
                 screen={lastKnown}
-                allScreens={live.screens || []}
-                canEdit={canEdit}
-                isLive={isLive}
-                onOpen={() => setSyncModalOpen(true)}
-              />
-            )}
-            {hasHistory && (
-              <SyncGroupModal
-                open={syncModalOpen}
-                onClose={() => setSyncModalOpen(false)}
-                screen={lastKnown}
-                allScreens={live.screens || []}
-                onSetGroup={handleSetSyncGroup}
-                onSetGroupForDevice={handleSetSyncGroupForDevice}
-                onRequestJoinWithDifferentContent={(other) => setSyncJoinTarget(other)}
-                onCalibrate={handleCalibrate}
-                canEdit={canEdit}
-                isLive={isLive}
+                screens={live.screens || []}
+                canPush={canPush && canEdit}
+                canCommand={canCommand}
               />
             )}
 
