@@ -191,8 +191,7 @@ class PlayerController(context: Context) {
 
     private fun stopSyncTimers() {
         mainHandler.removeCallbacks(boundaryRunnable)
-        holdRunnable?.let { mainHandler.removeCallbacks(it) }
-        holdRunnable = null
+        cancelHold()
         waitingForSlot = false
     }
 
@@ -578,7 +577,11 @@ class PlayerController(context: Context) {
         applyEndPolicy(s, timelineIdx)
         if (!player.playWhenReady) {
             // Paused by us (holding on the last frame, or waiting out a gap)
-            // or at the end of a short item until its slot is up.
+            // or at the end of a short item until its slot is up. A pause with
+            // no reason left for it mustn't outlive a tick.
+            val atEnd = player.duration != C.TIME_UNSET &&
+                player.currentPosition >= player.duration - 150L
+            if (holdRunnable == null && !atEnd) player.playWhenReady = true
             report(s, spot, null, "holding")
             return
         }
@@ -657,17 +660,16 @@ class PlayerController(context: Context) {
             boundaryRunnable,
             SyncMath.remainingMs(spot, s.itemDurationsMs).coerceAtLeast(1L),
         )
-        holdRunnable?.let { mainHandler.removeCallbacks(it) }
-        holdRunnable = null
-
         val q = SyncMath.queueIndexOf(s.itemIds, spot.index, queueIds())
         if (q == null) {
+            cancelHold()
             holdForMissing()
             return
         }
         waitingForSlot = false
         val cur = player.currentMediaItemIndex
         if (cur == q) {
+            // (If it's waiting out a lead, [holdRunnable] resumes it.)
             // Already there. A one-video group restarts here: at the end of a
             // short file, rewind it rather than waiting for a natural loop.
             val atEnd = !player.playWhenReady && player.playbackState == Player.STATE_READY &&
@@ -687,10 +689,16 @@ class PlayerController(context: Context) {
             player.duration != C.TIME_UNSET && left in 0L..NATURAL_END_MS &&
             (cur + 1) % player.mediaItemCount == q && !player.pauseAtEndOfMediaItems
         if (endingNaturally) return
+        cancelHold()
         player.seekTo(q, spot.positionMs)
         player.playWhenReady = true
         setPlaybackSpeed(1f)
         lastTransitionAtMs = SystemClock.elapsedRealtime()
+    }
+
+    private fun cancelHold() {
+        holdRunnable?.let { mainHandler.removeCallbacks(it) }
+        holdRunnable = null
     }
 
     private fun report(s: GroupSyncState, spot: SyncMath.Spot, driftMs: Long?, state: String) {
