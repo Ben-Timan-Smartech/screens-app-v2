@@ -4397,7 +4397,10 @@ def lan_ip() -> str:
 
 # Paths under /tv/ that are files, so a missing one 404s instead of getting
 # the player page (see Handler.translate_path).
-_TV_ASSET_RE = re.compile(r"\.(?:js|css|map|png|jpe?g|gif|svg|ico|json|txt|html?|webmanifest|mp4|webm)$", re.I)
+# .xml and .wgt are what a Samsung screen's Custom App setting asks for first
+# (an app to install); the player page isn't an answer to that.
+_TV_ASSET_RE = re.compile(
+    r"\.(?:js|css|map|png|jpe?g|gif|svg|ico|json|txt|html?|webmanifest|mp4|webm|xml|wgt)$", re.I)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
