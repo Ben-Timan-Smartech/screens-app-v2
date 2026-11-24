@@ -25,7 +25,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'web-1.2.1';
+  var VERSION = 'web-1.2.2';
   var FLAVOR = 'web';
 
   // ── Config from the address ─────────────────────────────────────────
@@ -448,7 +448,7 @@
       startLeadMs: Math.round(startLeadMs),
       startErrMs: startErrMs === null ? null : Math.round(startErrMs),
       measure: measureBy + (calm ? ', ' + (calmPhase || 'calm') + ', spare ' + (calmSpareMs === null ? '?' : Math.round(calmSpareMs)) +
-        ', back ' + (calmBackMs === null ? '?' : Math.round(calmBackMs)) : rateWorks === false ? ', no speed control' : ''),
+        ', back ' + (calmBackMs === null ? '?' : Math.round(calmBackMs)) + ', reopened ' + calmLoads : rateWorks === false ? ', no speed control' : ''),
       seeks: seekTimes.filter(function (t) { return localNow() - t < 600000; }).length,
       state: calmPhase && calmPhase !== 'opening' ? (waiting ? 'waiting' : 'playing') : waiting ? 'waiting' : !item ? 'idle' : item.type === 'image' ? 'image' : playing ? 'playing' : 'loading'
     };
@@ -677,8 +677,8 @@
   // How long this screen takes from play() to a moving picture. Learned at
   // each change, and the next video is started that much early.
   var MAX_LEAD_MS = 3000;
-  var startLeadMs = Math.max(0, Math.min(MAX_LEAD_MS, parseFloat(store('screens.startLead') || '0') || 0));
-  var startsMeasured = 0;
+  var startLeadMs = Math.max(calm ? -1000 : 0, Math.min(MAX_LEAD_MS, parseFloat(store('screens.startLead') || '0') || 0));
+  var MIN_LEAD_MS = -1000;    // a screen that runs early is started late
   var startErrMs = null;      // how far off the last start landed
   var startCheck = null;      // {el, from, list} while a start is measured
   var prerollTimer = null;
@@ -922,6 +922,10 @@
   var calmTimer = null;
   var calmList = [];          // drift readings since the start
   var calmSince = 0;
+  var CALM_TAIL_MS = 450;
+  var calmLoads = 0;          // times the file had to be opened again
+  var calmLeads = [];         // the start delay each of the last starts called for
+  var calmLeadUsed = 0;
   var calmInStep = false;     // the last start landed where it should
   var calmSpareMs = null;     // time left over before the last start was due, - = late
   var calmSkippedAt = -1e9;   // when a loop was last sat out
@@ -938,9 +942,18 @@
   }
 
   function calmBack(el) {
+    var ended = el.ended;
     try { el.pause(); } catch (e) { /* ignore */ }
-    if (el.currentTime > 0.01 || el.ended) { try { el.currentTime = 0; } catch (e) { /* ignore */ } }
+    if (ended) { calmLoad(el); return; }
+    if (el.currentTime > 0.01) { try { el.currentTime = 0; } catch (e) { /* ignore */ } }
     calmPhaseTo('back');
+  }
+
+  /** Open the same file again: slower than going back, and it may blank. */
+  function calmLoad(el) {
+    calmLoads++;
+    try { el.load(); } catch (e) { /* ignore */ }
+    calmPhaseTo('opening');
   }
 
   function calmTick(e, el, item) {
@@ -970,13 +983,13 @@
     }
     if (calmPhase === 'back') {
       if (!el.seeking && el.readyState >= 2 && el.currentTime < 0.2) { calmBackMs = now - calmSince; calmList = []; calmPhaseTo('ready'); }
-      else if (now - calmSince > 15000) calmReopen(el, 'did not go back to the start');
+      else if (now - calmSince > 2500) { lastStall = 'did not go back to the start'; calmLoad(el); }
       return;
     }
     if (calmPhase === 'ready') {
       if (!calmTimer) {
         var wait = e.waitMs > 0 ? e.waitMs : item.durMs - e.posMs;
-        if (wait <= 700 + startLeadMs) {
+        if (wait <= 700 + Math.max(0, startLeadMs)) {
           // Too late for this start, usually because the last one was: sit one
           // loop out and start on time. Not again soon, in case there simply
           // isn't enough time between the end of the video and its next start.
@@ -987,6 +1000,7 @@
             log('Waiting one loop to start on time');
           }
           calmSpareMs = wait - startLeadMs;
+          calmLeadUsed = startLeadMs;
           calmTimer = setTimeout(function () {
             calmTimer = null;
             calmList = [];
@@ -1001,7 +1015,9 @@
     }
 
     // Playing.
-    if (el.ended || (fileMs > 0 && el.currentTime * 1000 >= fileMs - 40)) { calmLearn(); calmBack(el); return; }
+    // Go back just before the end: once a Samsung video has ended, it ignores
+    // being sent to the start (QM43C, 24/11/2026).
+    if (el.ended || (fileMs > 0 && el.currentTime * 1000 >= fileMs - CALM_TAIL_MS)) { calmLearn(); calmBack(el); return; }
     if (el.paused && !el.seeking && now - calmSince > 3000 && now - splashPlayAt > 2000) {
       splashPlayAt = now;
       playVideo(el);
@@ -1033,7 +1049,13 @@
     // Ahead with nothing left to take off, or a long way out: not a start delay.
     calmInStep = Math.abs(err) <= 120;
     if (Math.abs(err) > MAX_LEAD_MS) return;
-    learnStart(err, startsMeasured++ ? 0.6 : 1);
+    // The middle of the last five, so one odd start doesn't move it.
+    startErrMs = err;
+    calmLeads.push(calmLeadUsed - err);
+    if (calmLeads.length > 5) calmLeads.shift();
+    var sorted = calmLeads.slice().sort(function (a, b) { return a - b; });
+    startLeadMs = Math.max(MIN_LEAD_MS, Math.min(MAX_LEAD_MS, sorted[Math.floor(sorted.length / 2)]));
+    store('screens.startLead', startLeadMs.toFixed(1));
   }
 
   // ── The "lining up" mark ─────────────────────────────────────────────
