@@ -55,6 +55,13 @@ function serveMedia(req) {
   var key = cacheKey(req.url);
   return caches.open(MEDIA_CACHE).then(function (cache) {
     return cache.match(key).then(function (hit) {
+      // Tell the player, so it can report whether videos come from here.
+      // (A download by the player itself isn't a video being played.)
+      if (req.destination === 'video') {
+        self.clients.matchAll().then(function (list) {
+          list.forEach(function (c) { c.postMessage({ type: 'media', stored: !!hit }); });
+        });
+      }
       return hit ? fromCache(hit, req.headers.get('range')) : fetch(req);
     });
   });

@@ -222,6 +222,38 @@ const syncSetGroup = async (deviceId, group) => {
   }
 };
 
+const setScreenSyncTrim = async (deviceId, trimMs) => {
+  const res = await fetch(`/api/screens/${encodeURIComponent(deviceId)}/sync-trim`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trimMs }),
+  });
+  if (!res.ok) throw new Error(`adjustment failed (${res.status})`);
+  return res.json();
+};
+
+/** Line one screen up with the others by eye, 10 ms at a time. */
+const SyncTrim = ({ screen }) => {
+  const saved = screen.syncTrimMs || 0;
+  const [draft, setDraft] = React.useState(null);   // {ms, at} until the list catches up
+  const [busy, setBusy] = React.useState(false);
+  const ms = draft && Date.now() - draft.at < 30000 ? draft.ms : saved;
+  const set = async (next) => {
+    const v = Math.max(-500, Math.min(500, next));
+    if (v === ms) return;
+    setBusy(true);
+    try { await setScreenSyncTrim(screen.deviceId, v); setDraft({ ms: v, at: Date.now() }); }
+    catch (e) { showToast(e.message, 'err'); }
+    finally { setBusy(false); }
+  };
+  const name = syncScreenName(screen);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }} title="Adjust this screen's timing if it looks early or late next to the others">
+      <Button variant="ghost" size="sm" disabled={busy || ms <= -500} onClick={() => set(ms - 10)} title={`Make ${name} 10 ms later`}>Later</Button>
+      <span className="tnum" style={{ fontSize: 11, color: ms ? 'var(--ink-1)' : 'var(--ink-4)', minWidth: 52, textAlign: 'center' }}>{ms > 0 ? `+${ms}` : ms} ms</span>
+      <Button variant="ghost" size="sm" disabled={busy || ms >= 500} onClick={() => set(ms + 10)} title={`Make ${name} 10 ms earlier`}>Earlier</Button>
+    </div>
+  );
+};
+
 const restartSyncGroup = async (groupId) => {
   const res = await fetch(`/api/sync-groups/${encodeURIComponent(groupId)}/restart`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
@@ -486,8 +518,8 @@ const SyncGroupPanel = ({ group, screens, canPush, canCommand, focusDeviceId, on
 
       <div style={{ marginTop: 12, borderTop: 'var(--border-faint)', paddingTop: 8, display: 'flex', flexDirection: 'column', gap: 2 }}>
         {group.health.map(({ screen: m, health }) => (
-          <div key={m.deviceId} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 6 }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
+          <div key={m.deviceId} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 6, flexWrap: 'wrap' }}>
+            <div style={{ flex: 1, minWidth: 140 }}>
               <button type="button" onClick={() => onNavigate && onNavigate(m)}
                 style={{ border: 'none', background: 'none', padding: 0, cursor: onNavigate ? 'pointer' : 'default', fontSize: 13, color: 'var(--ink-1)', fontWeight: 500, textAlign: 'left', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {syncScreenName(m)}
@@ -496,6 +528,7 @@ const SyncGroupPanel = ({ group, screens, canPush, canCommand, focusDeviceId, on
                 {health.detail}
               </div>
             </div>
+            {canPush && m.appFlavor === 'web' && <SyncTrim screen={m} />}
             <SyncHealthPill health={health} />
             {canPush && (
               <Button variant="ghost" size="sm" disabled={doing} icon={<Icon.close size={12} />} onClick={() => remove(m)} title={`Take ${syncScreenName(m)} out of the group`} />

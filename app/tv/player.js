@@ -25,7 +25,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'web-1.1.0';
+  var VERSION = 'web-1.2.0';
   var FLAVOR = 'web';
 
   // ── Config from the address ─────────────────────────────────────────
@@ -120,8 +120,10 @@
   function recordClock(t1, t3, t4) {
     var rtt = Math.max(0, t4 - t1);
     var offset = t3 + rtt / 2 - t4;
-    clock.samples.push({ offset: offset, rtt: rtt });
-    if (clock.samples.length > 8) clock.samples.shift();
+    // The quickest round trip of the last 90 s: long enough to ride out a slow
+    // patch of Wi-Fi, short enough that the screen's own clock hasn't wandered.
+    clock.samples.push({ offset: offset, rtt: rtt, at: t4 });
+    clock.samples = clock.samples.filter(function (x) { return t4 - x.at < 90000; }).slice(-40);
     var best = clock.samples[0];
     for (var i = 1; i < clock.samples.length; i++) {
       if (clock.samples[i].rtt < best.rtt) best = clock.samples[i];
@@ -218,6 +220,7 @@
     audioOn: false,
     pollMs: 60000,
     splashUrl: null,
+    trimMs: 0,
     online: false,
     lastPollOk: 0,
     lastError: ''
@@ -249,6 +252,8 @@
     state.syncGroup = syncGroup;
     state.audioOn = !!st.audioOn;
     state.splashUrl = st.splashUrl || null;
+    var trim = Math.max(-500, Math.min(500, Number(st.syncTrimMs) || 0));
+    if (trim !== state.trimMs) { state.trimMs = trim; resetMeasure(); graceUntil = localNow() + 1500; }
 
     var same = playlistKey(items) === playlistKey(state.items) && anchor === state.anchorServerMs;
     var sameNext = state.next && playlistKey(items) === playlistKey(state.next.items) && anchor === state.next.anchor;
@@ -257,13 +262,13 @@
       if (state.next && !sameNext) clearNext();
     } else if (sameNext) {
       // Already waiting for exactly this.
-    } else if (anchor && anchor - serverNow() > 800 && state.items.length && current.id) {
+    } else if (anchor && anchor - groupNow() > 800 && state.items.length && current.id) {
       // A new loop that starts in a moment: keep playing what's on until then,
       // so the picture never freezes, and open the new first video ready for
       // a straight cut at the start time every screen shares.
       state.next = newLoop;
       log('New loop of ' + items.length + ' item(s) starts in ' +
-        Math.round((anchor - serverNow()) / 1000) + ' s');
+        Math.round((anchor - groupNow()) / 1000) + ' s');
     } else {
       clearNext();
       useLoop(newLoop);
@@ -285,7 +290,7 @@
         store('screens.lastState', JSON.stringify({
           items: st.items, revision: st.revision, syncGroup: st.syncGroup,
           playback: st.playback, rotation: st.rotation, audioOn: st.audioOn,
-          pollMode: st.pollMode, splashUrl: st.splashUrl
+          pollMode: st.pollMode, splashUrl: st.splashUrl, syncTrimMs: st.syncTrimMs
         }));
       } catch (e) { /* too big for storage: fine */ }
     }
@@ -386,15 +391,34 @@
       });
   }
 
-  // A few quick polls at start so the clock offset settles in seconds,
-  // not minutes.
-  function warmUpClock(n) {
-    if (n <= 0) return;
-    setTimeout(function () { poll(); warmUpClock(n - 1); }, 1500);
+  // Short requests that only fetch the time. A poll does other work on the
+  // server, which makes its time less exact.
+  var clockTimer = null;
+  var timeApi = true;         // false if the server doesn't have it
+  function sampleClock(n) {
+    clearTimeout(clockTimer);
+    if (n <= 0 || !timeApi) {
+      clockTimer = setTimeout(function () { sampleClock(state.syncGroup ? 4 : 0); }, 20000);
+      return;
+    }
+    var t1 = localNow(), t4 = 0;
+    fetchWithTimeout('/api/time', { cache: 'no-store' }, 4000).then(function (r) {
+      t4 = localNow();
+      if (r.status === 404) timeApi = false;
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      if (j && j.nowMs) recordClock(t1, Number(j.nowMs), t4);
+    }).catch(function () { /* the polls still set the clock */ }).finally(function () {
+      clockTimer = setTimeout(function () { sampleClock(n - 1); }, 150);
+    });
   }
 
   // ── Heartbeat ───────────────────────────────────────────────────────
   var heartbeatTimer = null;
+
+  /** The group's clock on this screen, with its adjustment from the CMS. */
+  function groupNow() { return serverNow() + state.trimMs; }
 
   /** How this screen's sync is going, for the CMS's sync health view. */
   function syncReport() {
@@ -419,8 +443,13 @@
       rttMs: clock.bestRttMs === null ? null : Math.round(clock.bestRttMs),
       samples: clock.samples.length,
       speed: currentRate,
+      trimMs: state.trimMs,
+      startLeadMs: Math.round(startLeadMs),
+      startErrMs: startErrMs === null ? null : Math.round(startErrMs),
+      measure: measureBy + (calm ? ', ' + (calmPhase || 'calm') + ', spare ' + (calmSpareMs === null ? '?' : Math.round(calmSpareMs)) +
+        ', back ' + (calmBackMs === null ? '?' : Math.round(calmBackMs)) : rateWorks === false ? ', no speed control' : ''),
       seeks: seekTimes.filter(function (t) { return localNow() - t < 600000; }).length,
-      state: waiting ? 'waiting' : !item ? 'idle' : item.type === 'image' ? 'image' : playing ? 'playing' : 'loading'
+      state: calmPhase && calmPhase !== 'opening' ? (waiting ? 'waiting' : 'playing') : waiting ? 'waiting' : !item ? 'idle' : item.type === 'image' ? 'image' : playing ? 'playing' : 'loading'
     };
   }
 
@@ -458,6 +487,8 @@
   var kept = {};              // absolute url -> {state, src, bytes, tries, retryAt}
   var keepBusy = false;
   var swState = 'not supported';
+  var served = { stored: 0, net: 0 };   // video requests the worker answered, and from where
+  var localWhy = '';                    // why a stored file didn't play
 
   // Set when this browser won't play a stored file, so it streams instead.
   // Tried again after a day, or with a newer player.
@@ -468,6 +499,9 @@
 
   function registerServiceWorker() {
     if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.addEventListener('message', function (ev) {
+      if (ev.data && ev.data.type === 'media') served[ev.data.stored ? 'stored' : 'net']++;
+    });
     navigator.serviceWorker.register('/tv/sw.js', { scope: '/tv/' }).then(function () {
       swState = 'registered';
       return navigator.serviceWorker.ready;
@@ -572,6 +606,7 @@
    *  it was the browser and not the file (see the 'playing' listener). */
   function localFailed(el, why) {
     var k = kept[el._url];
+    localWhy = why;
     log('Stored copy would not play (' + why + '), streaming it');
     if (k) {
       if (k.src) URL.revokeObjectURL(k.src);
@@ -594,9 +629,18 @@
     var el = activeEl(), n = framesShown(el), urls = wantedUrls();
     return (el._url ? (el._local ? 'stored' : 'stream') : 'none') + ' ' + el.currentTime.toFixed(1) + '/' +
       (el.duration || 0).toFixed(1) + 's ' + videoState(el) + ', frames ' + (n === null ? '?' : n) +
-      ' | kept ' + urls.filter(isKept).length + '/' + urls.length + (localOff ? ' (off)' : '') +
-      ' | worker ' + swState.slice(0, 24) + ' | stalls ' + stall.recoveries.length +
-      (lastStall ? ' | last: ' + lastStall : '');
+      ' | kept ' + urls.filter(isKept).length + '/' + urls.length + (localOff ? ' off' : '') +
+      (localWhy ? ' (' + localWhy + ')' : '') +
+      ' | worker ' + swState.slice(0, 24) + ' stored ' + served.stored + ' net ' + served.net +
+      ' | ' + caps() + ' | stalls ' + stall.recoveries.length + (lastStall ? ', last: ' + lastStall : '');
+  }
+
+  /** What this browser can do, for choosing how to play on it. */
+  function caps() {
+    var mse = false;
+    try { mse = !!window.MediaSource && MediaSource.isTypeSupported('video/mp4; codecs="avc1.4d4029"'); } catch (e) { /* no */ }
+    return 'mse ' + (mse ? 'yes' : 'no') + ', frame times ' + (activeEl().requestVideoFrameCallback ? 'yes' : 'no') +
+      ', speed ' + (rateWorks === null ? '?' : rateWorks ? 'yes' : 'no') + ', gapless ' + (gapless ? 'yes' : 'no');
   }
 
   // ── Playback engine ─────────────────────────────────────────────────
@@ -610,8 +654,12 @@
   var act = 0;
   function activeEl() { return vids[act]; }
   function standbyEl() { return vids[1 - act]; }
-  var gapless = params.get('gapless') !== '0';
-  var gaplessNote = gapless ? '' : 'turned off in the address';
+  // Samsung panels: one video at a time, and never skip inside a video. A skip
+  // there takes over half a second and lands late, so correcting with skips
+  // makes it worse (Holt, 24/11/2026). See calmTick.
+  var calm = params.get('calm') === '1' || (/Tizen/i.test(navigator.userAgent) && params.get('calm') !== '0');
+  var gapless = !calm && params.get('gapless') !== '0';
+  var gaplessNote = gapless ? '' : calm ? 'off on Samsung screens' : 'turned off in the address';
   var standbyErrors = 0;
   var cue = null;             // {idx, url, ready, image} opened on the standby
   var boundaryTimer = null;
@@ -625,6 +673,20 @@
   var rateCheck = null;       // {since, abs} while a speed nudge runs
   var currentRate = 1;
   var lastDriftMs = null;
+  // How long this screen takes from play() to a moving picture. Learned at
+  // each change, and the next video is started that much early.
+  var MAX_LEAD_MS = 3000;
+  var startLeadMs = Math.max(0, Math.min(MAX_LEAD_MS, parseFloat(store('screens.startLead') || '0') || 0));
+  var startsMeasured = 0;
+  var startErrMs = null;      // how far off the last start landed
+  var startCheck = null;      // {el, from, list} while a start is measured
+  var prerollTimer = null;
+  var frame = null;           // {el, mediaMs, at} the last frame shown
+  var frameToken = 0;
+  var measureBy = 'time';     // what drift is measured from
+  var driftLog = [];          // {at, drift} of the last second or so
+  var lastPosSeen = { pos: -1, at: 0 };
+  var posSteps = 0;           // times the position stood still between ticks
   var stall = { lastPos: -1, lastFrames: -1, framesSeen: 0, since: 0, recoveries: [] };
   var lastStall = '';         // what the last freeze looked like
   var splashPlayAt = 0;       // local time of the last play() on the splash
@@ -639,7 +701,7 @@
   function expected() {
     if (!state.items.length || state.totalMs <= 0) return null;
     var elapsed;
-    if (state.anchorServerMs) elapsed = serverNow() - state.anchorServerMs;
+    if (state.anchorServerMs) elapsed = groupNow() - state.anchorServerMs;
     else elapsed = localNow() - (state.anchorLocalMs || localNow());
     if (elapsed < 0) return { idx: 0, posMs: 0, waitMs: -elapsed };
     var off = elapsed % state.totalMs;
@@ -723,6 +785,7 @@
 
   function setRate(r) {
     if (r === currentRate) return;
+    driftLog = [];
     currentRate = r;
     try { activeEl().playbackRate = r; } catch (e) { rateWorks = false; }
   }
@@ -732,6 +795,7 @@
     if (el.duration && target / 1000 >= el.duration) target = el.duration * 1000 - 50;
     // Only learn from seeks made mid-play. One made while the file is still
     // opening includes the download, and would teach it to aim far ahead.
+    resetMeasure();
     seekTimes.push(localNow());
     if (seekTimes.length > 60) seekTimes.shift();
     pendingSeekTarget = { atLocal: localNow(), targetMs: target, learn: el.readyState >= 3 && !el.paused };
@@ -785,11 +849,204 @@
     el.load();
   }
 
+  /** Start the standby a little early, out of sight, so its picture is moving
+   *  by the time it's shown. */
+  function preroll(idx) {
+    if (!cue || cue.idx !== idx || !cue.ready || cue.image || cue.started) return;
+    var el = standbyEl();
+    el.muted = true;
+    try { el.playbackRate = 1; } catch (e) { /* ignore */ }
+    cue.started = true;
+    playVideo(el);
+  }
+
+  /** Report each frame `el` shows, where the browser can. */
+  function watchFrames(el) {
+    if (!el.requestVideoFrameCallback) return;
+    var token = ++frameToken;
+    function next() {
+      el.requestVideoFrameCallback(function (now, meta) {
+        if (token !== frameToken) return;
+        frame = { el: el, mediaMs: meta.mediaTime * 1000, at: performance.timeOrigin + (meta.expectedDisplayTime || now) };
+        next();
+      });
+    }
+    next();
+  }
+
+  function resetMeasure() { driftLog = []; frame = null; startCheck = null; }
+
+  /** How far `el` is from where the clock says it should be, + = ahead.
+   *  Frames shown are exact. The video's own position can be a step behind on
+   *  a panel that only updates it now and then, so there the highest reading
+   *  of the last second counts. */
+  function measureDrift(el, posMs, now) {
+    var pos = el.currentTime;
+    if (pos !== lastPosSeen.pos) lastPosSeen = { pos: pos, at: now };
+    else if (now - lastPosSeen.at > 120 && posSteps < 100) posSteps++;
+    var f = frame && frame.el === el && Math.abs(now - frame.at) < 250 ? frame : null;
+    var drift = f ? f.mediaMs - (posMs - (now - f.at)) : pos * 1000 - posMs;
+    var coarse = !f && posSteps >= 10;
+    measureBy = f ? 'frames' : coarse ? 'steps' : 'time';
+    driftLog.push({ at: now, drift: drift });
+    driftLog = driftLog.filter(function (d) { return now - d.at < (coarse ? 1200 : 700); });
+    var sorted = driftLog.map(function (d) { return d.drift; }).sort(function (a, b) { return a - b; });
+    return coarse ? sorted[sorted.length - 1] : sorted[Math.floor(sorted.length / 2)];
+  }
+
+  /** Learn from the start just made: land on time at the next one. */
+  function checkStart(el, drift, now) {
+    if (!startCheck || startCheck.el !== el || now < startCheck.from) return;
+    startCheck.list.push(drift);
+    if (now < graceUntil - 250) return;
+    var list = startCheck.list.sort(function (a, b) { return a - b; });
+    startCheck = null;
+    var err = list[Math.floor(list.length / 2)];
+    if (Math.abs(err) > 800) return;      // a hiccup, not a start delay
+    learnStart(err, 0.6);
+  }
+
+  function learnStart(err, share) {
+    startErrMs = err;
+    startLeadMs = Math.max(0, Math.min(MAX_LEAD_MS, startLeadMs - err * share));
+    store('screens.startLead', startLeadMs.toFixed(1));
+  }
+
+  // ── One video in a loop, for panels that are slow to skip ────────────
+  // Wait on the first frame, start at the group's moment less this screen's
+  // start delay, then leave it alone until it ends. Nothing is corrected while
+  // it plays; a start that lands off is put right at the next one. A slot a
+  // little longer than the video gives the panel time to get back to the start.
+  var calmPhase = '';         // '' | opening | back | ready | playing
+  var calmTimer = null;
+  var calmList = [];          // drift readings since the start
+  var calmSince = 0;
+  var calmSpareMs = null;     // time left over before the last start was due, - = late
+  var calmSkippedAt = -1e9;   // when a loop was last sat out
+  var calmBackMs = null;      // how long it took to get back to the start
+
+  function calmPhaseTo(p) { calmPhase = p; calmSince = localNow(); restartStallWatch(calmSince); }
+
+  function calmReset() {
+    clearTimeout(calmTimer);
+    calmTimer = null;
+    calmPhase = '';
+    calmList = [];
+  }
+
+  function calmBack(el) {
+    try { el.pause(); } catch (e) { /* ignore */ }
+    if (el.currentTime > 0.01 || el.ended) { try { el.currentTime = 0; } catch (e) { /* ignore */ } }
+    calmPhaseTo('back');
+  }
+
+  function calmTick(e, el, item) {
+    var now = localNow();
+    if (current.id !== item.id || !sameUrl(el, item.url) || (couldBeLocal(el) && calmPhase !== 'playing') || !calmPhase) {
+      calmReset();
+      current = { idx: 0, id: item.id, since: now, skipped: false };
+      forceSwitch = false;
+      setRate(1);
+      resetMeasure();
+      hideIdle();
+      showVideo(el);
+      el.loop = false;
+      el.muted = !state.audioOn;
+      if (!sameUrl(el, item.url) || couldBeLocal(el)) { setVideo(el, item.url); el.load(); }
+      else calmBack(el);
+      if (calmPhase !== 'back') calmPhaseTo('opening');
+      return;
+    }
+    if (document.hidden) { restartStallWatch(now); return; }
+    var fileMs = (el.duration || 0) * 1000;
+
+    if (calmPhase === 'opening') {
+      if (el.readyState >= 2) calmBack(el);
+      else if (now - calmSince > 30000) calmReopen(el, 'did not open');
+      return;
+    }
+    if (calmPhase === 'back') {
+      if (!el.seeking && el.readyState >= 2 && el.currentTime < 0.2) { calmBackMs = now - calmSince; calmList = []; calmPhaseTo('ready'); }
+      else if (now - calmSince > 15000) calmReopen(el, 'did not go back to the start');
+      return;
+    }
+    if (calmPhase === 'ready') {
+      if (!calmTimer) {
+        var wait = e.waitMs > 0 ? e.waitMs : item.durMs - e.posMs;
+        if (wait <= 700 + startLeadMs) {
+          // Too late for this start, usually because the last one was: sit one
+          // loop out and start on time. Not again soon, in case there simply
+          // isn't enough time between the end of the video and its next start.
+          if (wait - startLeadMs < -60 && now - calmSkippedAt > 300000) {
+            calmSkippedAt = now;
+            wait += item.durMs;
+            log('Waiting one loop to start on time');
+          }
+          calmSpareMs = wait - startLeadMs;
+          calmTimer = setTimeout(function () {
+            calmTimer = null;
+            calmList = [];
+            resetMeasure();
+            watchFrames(el);
+            playVideo(el);
+            calmPhaseTo('playing');
+          }, Math.max(0, wait - startLeadMs));
+        }
+      }
+      return;
+    }
+
+    // Playing.
+    if (el.ended || (fileMs > 0 && el.currentTime * 1000 >= fileMs - 40)) { calmLearn(); calmBack(el); return; }
+    if (el.paused && !el.seeking && now - calmSince > 3000 && now - splashPlayAt > 2000) {
+      splashPlayAt = now;
+      playVideo(el);
+    }
+    if (!pictureMoved(el, now) && now - stall.since > 10000) {
+      noteStall(now);
+      calmReopen(el, 'stopped at ' + el.currentTime.toFixed(1) + ' s (' + videoState(el) + ')');
+      return;
+    }
+    if (el.currentTime > 0.8) {
+      // The video may be on the far side of the group's loop point from the
+      // clock: take the nearer way round.
+      var pos = e.waitMs > 0 ? -e.waitMs : e.posMs;
+      var d = measureDrift(el, pos, now);
+      if (d > item.durMs / 2) d -= item.durMs;
+      else if (d < -item.durMs / 2) d += item.durMs;
+      lastDriftMs = d;
+      if (now - calmSince > 1500 && now - calmSince < 6000) calmList.push(d);
+    }
+  }
+
+  /** How did this start land? The first one is taken as it is. */
+  function calmLearn() {
+    // A start that was already late says nothing about this screen's delay.
+    if (calmList.length < 5 || calmSpareMs === null || calmSpareMs < 0) return;
+    var list = calmList.sort(function (a, b) { return a - b; });
+    calmList = [];
+    var err = list[Math.floor(list.length / 2)];
+    // Ahead with nothing left to take off, or a long way out: not a start delay.
+    if (Math.abs(err) > MAX_LEAD_MS) return;
+    learnStart(err, startsMeasured++ ? 0.6 : 1);
+  }
+
+  function calmReopen(el, why) {
+    lastStall = why;
+    log('Video ' + why + ', opening it again');
+    calmReset();
+    clearVideo(el);
+  }
+
   /** Cut to the item `e` names. */
   function switchTo(e) {
     var item = state.items[e.idx];
     var cued = cue && cue.idx === e.idx && cue.url === item.url && cue.ready;
+    var running = !!(cued && cue.started);
     cue = null;
+    clearTimeout(prerollTimer);
+    prerollTimer = null;
+    resetMeasure();
     forceSwitch = false;
     setRate(1);
     rateCheck = null;
@@ -811,11 +1068,14 @@
       act = 1 - act;
       next.playbackRate = 1;
       next.muted = !state.audioOn;
-      if (e.posMs > 120) { try { next.currentTime = e.posMs / 1000; } catch (x) { /* ignore */ } }
-      playVideo(next);
+      if (e.posMs > 250) { try { next.currentTime = e.posMs / 1000; } catch (x) { /* ignore */ } }
+      if (!running) playVideo(next);
       showVideo(next);
       prev.pause();
-      graceUntil = localNow() + 1000;
+      watchFrames(next);
+      // Let it settle, see how far off it landed, and only then correct it.
+      graceUntil = localNow() + 1600;
+      startCheck = e.posMs > 250 ? null : { el: next, from: localNow() + 500, list: [] };
       return;
     }
 
@@ -832,6 +1092,7 @@
     // Nothing ready on the standby: open it on the element on show.
     var el = activeEl();
     showVideo(el);
+    watchFrames(el);
     el.muted = !state.audioOn;
     if (!sameUrl(el, item.url) || couldBeLocal(el)) {
       el.onloadeddata = null;
@@ -873,7 +1134,9 @@
         }
       }
     });
+    el.addEventListener('ended', function () { if (calmPhase) tick(); });
     el.addEventListener('seeked', function () {
+      if (calmPhase) tick();
       if (!pendingSeekTarget || el !== activeEl()) return;
       // Learn how long a seek takes to land, so the next one aims ahead.
       if (pendingSeekTarget.learn) {
@@ -913,6 +1176,7 @@
 
   function correctDrift(el, drift, posMs, now) {
     var abs = Math.abs(drift);
+    if (calm && abs < 2500) return;       // it lines up again at the next video
     if (abs > 600 || (!rateWorks && abs > 200)) {
       setRate(1);
       rateCheck = null;
@@ -925,7 +1189,7 @@
     // on and off around one threshold.
     var target = 1;
     if (abs > 100) target = drift > 0 ? 0.95 : 1.05;
-    else if (abs > 25 || (currentRate !== 1 && abs > 8)) target = drift > 0 ? 0.98 : 1.02;
+    else if (abs > (measureBy === 'steps' ? 80 : 25) || (currentRate !== 1 && abs > 8)) target = drift > 0 ? 0.98 : 1.02;
     if (target === 1) rateCheck = null;
     else if (!rateCheck) rateCheck = { since: now, abs: abs };
     setRate(target);
@@ -1031,8 +1295,9 @@
     if (el._local && el.readyState < 1 && !document.hidden && localNow() - el._openedAt > 8000) {
       localFailed(el, 'it did not open');
     }
-    if (state.next && !e && state.next.anchor <= serverNow()) { startNext(); return; }
+    if (state.next && !e && state.next.anchor <= groupNow()) { startNext(); return; }
     if (!e) {
+      if (calmPhase) { calmReset(); clearVideo(el); }
       current = { idx: -1, id: null, since: 0 };
       if (cue) forgetCue();
       if (state.splashUrl) {
@@ -1056,13 +1321,19 @@
     // A new loop is waiting for the group's start time: play on, open its
     // first video on the standby, and cut on the exact millisecond.
     if (state.next) {
-      var toStart = state.next.anchor - serverNow();
+      var toStart = state.next.anchor - groupNow();
       if (toStart <= 0) { startNext(); return; }
       if (toStart < 5000 && state.next.items.length) openOnStandby(0, state.next.items[0]);
       if (toStart < 500 && !nextTimer) {
         nextTimer = setTimeout(function () { nextTimer = null; if (state.next) startNext(); }, toStart);
       }
     }
+
+    if (calm && state.items.length === 1 && state.items[0].type === 'video') {
+      calmTick(e, activeEl(), state.items[0]);
+      return;
+    }
+    if (calmPhase) calmReset();
 
     if (e.waitMs > 0) {
       // Coordinated start: sit on frame 0 of the first item until the
@@ -1091,15 +1362,20 @@
     // Open the next item early, then cut to it on the exact millisecond the
     // group clock says, not on whichever 200 ms tick comes after it.
     var remaining = item.durMs - e.posMs;
-    var startSoon = state.next && state.next.anchor - serverNow() < 6000;
+    var startSoon = state.next && state.next.anchor - groupNow() < 6000;
     if (remaining < 5000 && !startSoon) prepareNext(e.idx);   // the standby is the new loop's then
-    if (remaining <= 350 && !boundaryTimer) {
+    if (remaining <= 350 + startLeadMs && !boundaryTimer) {
+      if (startLeadMs >= 5 && cue && cue.idx === (e.idx + 1) % state.items.length) {
+        clearTimeout(prerollTimer);
+        prerollTimer = setTimeout(preroll, Math.max(0, remaining - startLeadMs), cue.idx);
+      }
       boundaryTimer = setTimeout(function () {
         boundaryTimer = null;
         var b = expected();
         if (!b || b.waitMs) return;
         // A one-item playlist wraps onto the same item: that's a cut too.
         if (b.idx !== current.idx || (b.posMs < 400 && localNow() - current.since > 1000)) switchTo(b);
+        else if (cue && cue.started) forgetCue();   // started early for a change that isn't happening
       }, Math.max(0, remaining));
     }
 
@@ -1113,12 +1389,14 @@
       return;
     }
     if (el.paused && !el.seeking) playVideo(el);
-    if (rateWorks === null) probeRate(el);
+    if (rateWorks === null && !calm) probeRate(el);
 
     var now = localNow();
-    if (now < graceUntil || el.seeking) return;
+    if (el.seeking) { driftLog = []; return; }
+    var drift = measureDrift(el, e.posMs, now);     // + = ahead
+    checkStart(el, drift, now);
+    if (now < graceUntil) return;
 
-    var drift = el.currentTime * 1000 - e.posMs;    // + = ahead
     lastDriftMs = drift;
     correctDrift(el, drift, e.posMs, now);
 
@@ -1159,6 +1437,10 @@
       'Drift    ' + (lastDriftMs === null ? '—' : Math.round(lastDriftMs) + ' ms') +
         '  ·  speed ' + currentRate.toFixed(2) + '  ·  fine speed control ' +
         (rateWorks === null ? 'untested' : rateWorks ? 'yes' : 'no') + '  ·  seek lead ' + Math.round(seekLeadMs) + ' ms',
+      'Start    this screen is started ' + Math.round(startLeadMs) + ' ms early  ·  last landed ' +
+        (startErrMs === null ? '—' : Math.round(startErrMs) + ' ms') + (calmPhase ? '  ·  ' + calmPhase : '') +
+        '  ·  adjustment ' + state.trimMs +
+        ' ms  ·  measured by ' + measureBy,
       'Playing  ' + (item ? (e.idx + 1) + '/' + state.items.length + ' ' + (item.title || item.id) +
         ' @ ' + (e.posMs / 1000).toFixed(2) + ' s' : state.splashUrl ? 'splash' : '—'),
       'Video    ' + (function () {
@@ -1195,7 +1477,7 @@
       if (cached) applyState(JSON.parse(cached), true);
     } catch (e) { /* ignore */ }
     registerServiceWorker();
-    register().then(function () { poll(); warmUpClock(4); heartbeat(); scheduleHeartbeat(); });
+    register().then(function () { poll(); sampleClock(8); heartbeat(); scheduleHeartbeat(); });
     setInterval(tick, 200);
     setInterval(keepContent, 5000);
     setInterval(renderDebug, 500);
