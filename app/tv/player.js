@@ -486,6 +486,8 @@
   var kept = {};              // absolute url -> {state, src, bytes, tries, retryAt}
   var keepBusy = false;
   var swState = 'not supported';
+  var served = { stored: 0, net: 0 };   // video requests the worker answered, and from where
+  var localWhy = '';                    // why a stored file didn't play
 
   // Set when this browser won't play a stored file, so it streams instead.
   // Tried again after a day, or with a newer player.
@@ -496,6 +498,9 @@
 
   function registerServiceWorker() {
     if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.addEventListener('message', function (ev) {
+      if (ev.data && ev.data.type === 'media') served[ev.data.stored ? 'stored' : 'net']++;
+    });
     navigator.serviceWorker.register('/tv/sw.js', { scope: '/tv/' }).then(function () {
       swState = 'registered';
       return navigator.serviceWorker.ready;
@@ -600,6 +605,7 @@
    *  it was the browser and not the file (see the 'playing' listener). */
   function localFailed(el, why) {
     var k = kept[el._url];
+    localWhy = why;
     log('Stored copy would not play (' + why + '), streaming it');
     if (k) {
       if (k.src) URL.revokeObjectURL(k.src);
@@ -622,9 +628,18 @@
     var el = activeEl(), n = framesShown(el), urls = wantedUrls();
     return (el._url ? (el._local ? 'stored' : 'stream') : 'none') + ' ' + el.currentTime.toFixed(1) + '/' +
       (el.duration || 0).toFixed(1) + 's ' + videoState(el) + ', frames ' + (n === null ? '?' : n) +
-      ' | kept ' + urls.filter(isKept).length + '/' + urls.length + (localOff ? ' (off)' : '') +
-      ' | worker ' + swState.slice(0, 24) + ' | stalls ' + stall.recoveries.length +
-      (lastStall ? ' | last: ' + lastStall : '');
+      ' | kept ' + urls.filter(isKept).length + '/' + urls.length + (localOff ? ' off' : '') +
+      (localWhy ? ' (' + localWhy + ')' : '') +
+      ' | worker ' + swState.slice(0, 24) + ' stored ' + served.stored + ' net ' + served.net +
+      ' | ' + caps() + ' | stalls ' + stall.recoveries.length + (lastStall ? ', last: ' + lastStall : '');
+  }
+
+  /** What this browser can do, for choosing how to play on it. */
+  function caps() {
+    var mse = false;
+    try { mse = !!window.MediaSource && MediaSource.isTypeSupported('video/mp4; codecs="avc1.4d4029"'); } catch (e) { /* no */ }
+    return 'mse ' + (mse ? 'yes' : 'no') + ', frame times ' + (activeEl().requestVideoFrameCallback ? 'yes' : 'no') +
+      ', speed ' + (rateWorks === null ? '?' : rateWorks ? 'yes' : 'no') + ', gapless ' + (gapless ? 'yes' : 'no');
   }
 
   // ── Playback engine ─────────────────────────────────────────────────

@@ -6427,7 +6427,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if key == "webViewport":
                         val = str(val)[:32]
                     if key == "videoReport":
-                        val = re.sub(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+", "<url>", str(val))[:300]
+                        val = re.sub(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+", "<url>", str(val))[:420]
                     # v0.1.81: a CMS rename sets nameSetByOperator. The tablet
                     # keeps reporting its *local* name on every heartbeat, so
                     # skip the name merge once an operator has overridden it —

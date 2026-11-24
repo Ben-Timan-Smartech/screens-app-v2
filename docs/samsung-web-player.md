@@ -90,6 +90,12 @@ checked in), keeps playing the current loop meanwhile, then every screen cuts
 to the new first video together. Each screen reports how far it is from the
 group clock, so the CMS can show whether the group is in step.
 
+Each screen learns how long it takes from being told to play to a moving
+picture, and starts the next video that much early. It takes three or four
+changes to settle after a screen is first set up. If one screen still looks
+early or late, use **Later** and **Earlier** next to it on the Sync groups page:
+a delay in the panel itself isn't something the player can measure.
+
 ## Known limits (v1)
 
 - **Stored content and sync aren't proven on a Samsung screen yet.** In the

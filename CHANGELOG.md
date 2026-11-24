@@ -40,6 +40,10 @@ Rules:
   the group's videos instead of its own. The tablet asks first, lists only
   groups at its location, and says so if joining fails.
 - **The tablet's clock test covers the whole group**, not just that tablet.
+- **Samsung screens in a group keep closer time.** Each one sets its clock with
+  quick time checks, learns how long it takes to start a video and starts it
+  that much early. Sync groups has Later / Earlier buttons to line a screen up
+  by eye.
 - **Samsung screens keep their content.** Videos are stored on the screen once
   downloaded and play from there, so a dropped network doesn't stop them. A
   screen whose browser won't play stored videos streams them instead.
