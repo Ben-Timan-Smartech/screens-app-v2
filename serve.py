@@ -6399,6 +6399,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # v0.2.23: is the screen on, is Android's lock screen up,
                     # and is the player holding the box awake right now.
                     "screenOn", "keyguardLocked", "awakeHeld",
+                    # v0.2.25: one line from the web player about what its
+                    # video is doing (stored or streaming, frozen, why).
+                    "videoReport",
                 ):
                     val = body.get(key)
                     if val is None:
@@ -6413,6 +6416,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         val = re.sub(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+", "<url>", val)[:300]
                     if key == "webViewport":
                         val = str(val)[:32]
+                    if key == "videoReport":
+                        val = re.sub(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+", "<url>", str(val))[:300]
                     # v0.1.81: a CMS rename sets nameSetByOperator. The tablet
                     # keeps reporting its *local* name on every heartbeat, so
                     # skip the name merge once an operator has overridden it —
