@@ -103,8 +103,9 @@ shows the problem instead).
 ### One video in a loop
 
 Samsung screens are slow to skip, so with a single video the player never
-corrects it while it plays. Each time round it goes back to the first frame,
-waits, and starts on the group's moment. Give the video's slot in the CMS a
+corrects it while it plays. Each time round it goes back to the first frame
+(about half a second before the video's end: once a Samsung video has ended it
+can't be sent back), waits, and starts on the group's moment. Give the video's slot in the CMS a
 second or two more than the video's length, so there's time to get back, and
 make its first and last half second the same still picture, so the wait doesn't
 show. Several videos in a row change with a short blank, so join them into one
