@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" id="http://screens.smartechworld.com/samsung" version="@VERSION@" viewmodes="maximized">
+    <tizen:application id="TmrwScreen.Screens" package="TmrwScreen" required_version="3.0"/>
+    <tizen:profile name="tv"/>
+    <name>Screens</name>
+    <author>Smartech Retail Group</author>
+    <description>Screens player, @CODE@</description>
+    <icon src="icon.png"/>
+    <content src="index.html"/>
+    <access origin="*" subdomains="true"/>
+    <tizen:allow-navigation>*</tizen:allow-navigation>
+    <feature name="http://tizen.org/feature/screen.size.all"/>
+    <tizen:privilege name="http://tizen.org/privilege/internet"/>
+    <tizen:setting screen-orientation="landscape" context-menu="disable" background-support="disable" encryption="disable" install-location="auto" hwkey-event="enable"/>
+</widget>
