@@ -25,7 +25,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'web-1.2.0';
+  var VERSION = 'web-1.2.1';
   var FLAVOR = 'web';
 
   // ── Config from the address ─────────────────────────────────────────
@@ -100,6 +100,7 @@
   var imageEl = document.getElementById('image');
   var idleEl = document.getElementById('idle');
   var debugEl = document.getElementById('debug');
+  var syncingEl = document.getElementById('syncing');
 
   // ── Log ring (shown in the debug readout) ───────────────────────────
   var logLines = [];
@@ -921,6 +922,7 @@
   var calmTimer = null;
   var calmList = [];          // drift readings since the start
   var calmSince = 0;
+  var calmInStep = false;     // the last start landed where it should
   var calmSpareMs = null;     // time left over before the last start was due, - = late
   var calmSkippedAt = -1e9;   // when a loop was last sat out
   var calmBackMs = null;      // how long it took to get back to the start
@@ -928,6 +930,7 @@
   function calmPhaseTo(p) { calmPhase = p; calmSince = localNow(); restartStallWatch(calmSince); }
 
   function calmReset() {
+    calmInStep = false;
     clearTimeout(calmTimer);
     calmTimer = null;
     calmPhase = '';
@@ -979,6 +982,7 @@
           // isn't enough time between the end of the video and its next start.
           if (wait - startLeadMs < -60 && now - calmSkippedAt > 300000) {
             calmSkippedAt = now;
+            calmInStep = false;
             wait += item.durMs;
             log('Waiting one loop to start on time');
           }
@@ -1022,13 +1026,39 @@
   /** How did this start land? The first one is taken as it is. */
   function calmLearn() {
     // A start that was already late says nothing about this screen's delay.
-    if (calmList.length < 5 || calmSpareMs === null || calmSpareMs < 0) return;
+    if (calmList.length < 5 || calmSpareMs === null || calmSpareMs < 0) { calmInStep = false; return; }
     var list = calmList.sort(function (a, b) { return a - b; });
     calmList = [];
     var err = list[Math.floor(list.length / 2)];
     // Ahead with nothing left to take off, or a long way out: not a start delay.
+    calmInStep = Math.abs(err) <= 120;
     if (Math.abs(err) > MAX_LEAD_MS) return;
     learnStart(err, startsMeasured++ ? 0.6 : 1);
+  }
+
+  // ── The "lining up" mark ─────────────────────────────────────────────
+  // Not for more than 3 minutes at a time: a screen that can't get in step
+  // says so in the CMS, not to customers.
+  var liningUpSince = 0;
+
+  function isLiningUp() {
+    if (!state.syncGroup || !state.items.length) return false;
+    if (state.next || clock.offsetMs === null) return true;
+    var e = expected();
+    if (!e) return false;
+    if (e.waitMs > 0) return true;
+    if (calmPhase) return !calmInStep;
+    if (calm) return false;               // several videos: nothing to wait for
+    var item = state.items[e.idx];
+    if (!item || item.type === 'image' || current.skipped) return false;
+    return lastDriftMs === null || Math.abs(lastDriftMs) > 150;
+  }
+
+  function showLiningUp() {
+    var now = localNow();
+    if (!isLiningUp()) liningUpSince = 0;
+    else if (!liningUpSince) liningUpSince = now;
+    syncingEl.className = liningUpSince && now - liningUpSince < 180000 ? 'on' : '';
   }
 
   function calmReopen(el, why) {
@@ -1481,6 +1511,7 @@
     setInterval(tick, 200);
     setInterval(keepContent, 5000);
     setInterval(renderDebug, 500);
+    setInterval(showLiningUp, 500);
     // If registration failed (offline at boot), keep trying.
     setInterval(function () { if (!registered) register(); }, 60000);
   })();

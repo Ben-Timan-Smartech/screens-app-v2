@@ -43,7 +43,8 @@ Rules:
 - **Samsung screens in a group keep closer time.** Each one sets its clock with
   quick time checks, learns how long it takes to start a video and starts it
   that much early. With one video in a loop they never skip inside it: they
-  start together each time round and are left alone. Sync groups has Later / Earlier buttons to line a screen up
+  start together each time round and are left alone. A small faint symbol in
+  the corner shows while a screen is lining up. Sync groups has Later / Earlier buttons to line a screen up
   by eye.
 - **Samsung screens keep their content.** Videos are stored on the screen once
   downloaded and play from there, so a dropped network doesn't stop them. A
