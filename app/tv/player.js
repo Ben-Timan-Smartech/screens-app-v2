@@ -446,9 +446,10 @@
       trimMs: state.trimMs,
       startLeadMs: Math.round(startLeadMs),
       startErrMs: startErrMs === null ? null : Math.round(startErrMs),
-      measure: measureBy + (rateWorks === false ? ', no speed control' : ''),
+      measure: measureBy + (calm ? ', ' + (calmPhase || 'calm') + ', spare ' + (calmSpareMs === null ? '?' : Math.round(calmSpareMs)) +
+        ', back ' + (calmBackMs === null ? '?' : Math.round(calmBackMs)) : rateWorks === false ? ', no speed control' : ''),
       seeks: seekTimes.filter(function (t) { return localNow() - t < 600000; }).length,
-      state: waiting ? 'waiting' : !item ? 'idle' : item.type === 'image' ? 'image' : playing ? 'playing' : 'loading'
+      state: calmPhase && calmPhase !== 'opening' ? (waiting ? 'waiting' : 'playing') : waiting ? 'waiting' : !item ? 'idle' : item.type === 'image' ? 'image' : playing ? 'playing' : 'loading'
     };
   }
 
@@ -653,8 +654,12 @@
   var act = 0;
   function activeEl() { return vids[act]; }
   function standbyEl() { return vids[1 - act]; }
-  var gapless = params.get('gapless') !== '0';
-  var gaplessNote = gapless ? '' : 'turned off in the address';
+  // Samsung panels: one video at a time, and never skip inside a video. A skip
+  // there takes over half a second and lands late, so correcting with skips
+  // makes it worse (Holt, 24/11/2026). See calmTick.
+  var calm = params.get('calm') === '1' || (/Tizen/i.test(navigator.userAgent) && params.get('calm') !== '0');
+  var gapless = !calm && params.get('gapless') !== '0';
+  var gaplessNote = gapless ? '' : calm ? 'off on Samsung screens' : 'turned off in the address';
   var standbyErrors = 0;
   var cue = null;             // {idx, url, ready, image} opened on the standby
   var boundaryTimer = null;
@@ -670,7 +675,9 @@
   var lastDriftMs = null;
   // How long this screen takes from play() to a moving picture. Learned at
   // each change, and the next video is started that much early.
-  var startLeadMs = Math.max(0, Math.min(500, parseFloat(store('screens.startLead') || '0') || 0));
+  var MAX_LEAD_MS = 3000;
+  var startLeadMs = Math.max(0, Math.min(MAX_LEAD_MS, parseFloat(store('screens.startLead') || '0') || 0));
+  var startsMeasured = 0;
   var startErrMs = null;      // how far off the last start landed
   var startCheck = null;      // {el, from, list} while a start is measured
   var prerollTimer = null;
@@ -896,9 +903,139 @@
     startCheck = null;
     var err = list[Math.floor(list.length / 2)];
     if (Math.abs(err) > 800) return;      // a hiccup, not a start delay
+    learnStart(err, 0.6);
+  }
+
+  function learnStart(err, share) {
     startErrMs = err;
-    startLeadMs = Math.max(0, Math.min(500, startLeadMs - err * 0.6));
+    startLeadMs = Math.max(0, Math.min(MAX_LEAD_MS, startLeadMs - err * share));
     store('screens.startLead', startLeadMs.toFixed(1));
+  }
+
+  // ── One video in a loop, for panels that are slow to skip ────────────
+  // Wait on the first frame, start at the group's moment less this screen's
+  // start delay, then leave it alone until it ends. Nothing is corrected while
+  // it plays; a start that lands off is put right at the next one. A slot a
+  // little longer than the video gives the panel time to get back to the start.
+  var calmPhase = '';         // '' | opening | back | ready | playing
+  var calmTimer = null;
+  var calmList = [];          // drift readings since the start
+  var calmSince = 0;
+  var calmSpareMs = null;     // time left over before the last start was due, - = late
+  var calmSkippedAt = -1e9;   // when a loop was last sat out
+  var calmBackMs = null;      // how long it took to get back to the start
+
+  function calmPhaseTo(p) { calmPhase = p; calmSince = localNow(); restartStallWatch(calmSince); }
+
+  function calmReset() {
+    clearTimeout(calmTimer);
+    calmTimer = null;
+    calmPhase = '';
+    calmList = [];
+  }
+
+  function calmBack(el) {
+    try { el.pause(); } catch (e) { /* ignore */ }
+    if (el.currentTime > 0.01 || el.ended) { try { el.currentTime = 0; } catch (e) { /* ignore */ } }
+    calmPhaseTo('back');
+  }
+
+  function calmTick(e, el, item) {
+    var now = localNow();
+    if (current.id !== item.id || !sameUrl(el, item.url) || (couldBeLocal(el) && calmPhase !== 'playing') || !calmPhase) {
+      calmReset();
+      current = { idx: 0, id: item.id, since: now, skipped: false };
+      forceSwitch = false;
+      setRate(1);
+      resetMeasure();
+      hideIdle();
+      showVideo(el);
+      el.loop = false;
+      el.muted = !state.audioOn;
+      if (!sameUrl(el, item.url) || couldBeLocal(el)) { setVideo(el, item.url); el.load(); }
+      else calmBack(el);
+      if (calmPhase !== 'back') calmPhaseTo('opening');
+      return;
+    }
+    if (document.hidden) { restartStallWatch(now); return; }
+    var fileMs = (el.duration || 0) * 1000;
+
+    if (calmPhase === 'opening') {
+      if (el.readyState >= 2) calmBack(el);
+      else if (now - calmSince > 30000) calmReopen(el, 'did not open');
+      return;
+    }
+    if (calmPhase === 'back') {
+      if (!el.seeking && el.readyState >= 2 && el.currentTime < 0.2) { calmBackMs = now - calmSince; calmList = []; calmPhaseTo('ready'); }
+      else if (now - calmSince > 15000) calmReopen(el, 'did not go back to the start');
+      return;
+    }
+    if (calmPhase === 'ready') {
+      if (!calmTimer) {
+        var wait = e.waitMs > 0 ? e.waitMs : item.durMs - e.posMs;
+        if (wait <= 700 + startLeadMs) {
+          // Too late for this start, usually because the last one was: sit one
+          // loop out and start on time. Not again soon, in case there simply
+          // isn't enough time between the end of the video and its next start.
+          if (wait - startLeadMs < -60 && now - calmSkippedAt > 300000) {
+            calmSkippedAt = now;
+            wait += item.durMs;
+            log('Waiting one loop to start on time');
+          }
+          calmSpareMs = wait - startLeadMs;
+          calmTimer = setTimeout(function () {
+            calmTimer = null;
+            calmList = [];
+            resetMeasure();
+            watchFrames(el);
+            playVideo(el);
+            calmPhaseTo('playing');
+          }, Math.max(0, wait - startLeadMs));
+        }
+      }
+      return;
+    }
+
+    // Playing.
+    if (el.ended || (fileMs > 0 && el.currentTime * 1000 >= fileMs - 40)) { calmLearn(); calmBack(el); return; }
+    if (el.paused && !el.seeking && now - calmSince > 3000 && now - splashPlayAt > 2000) {
+      splashPlayAt = now;
+      playVideo(el);
+    }
+    if (!pictureMoved(el, now) && now - stall.since > 10000) {
+      noteStall(now);
+      calmReopen(el, 'stopped at ' + el.currentTime.toFixed(1) + ' s (' + videoState(el) + ')');
+      return;
+    }
+    if (el.currentTime > 0.8) {
+      // The video may be on the far side of the group's loop point from the
+      // clock: take the nearer way round.
+      var pos = e.waitMs > 0 ? -e.waitMs : e.posMs;
+      var d = measureDrift(el, pos, now);
+      if (d > item.durMs / 2) d -= item.durMs;
+      else if (d < -item.durMs / 2) d += item.durMs;
+      lastDriftMs = d;
+      if (now - calmSince > 1500 && now - calmSince < 6000) calmList.push(d);
+    }
+  }
+
+  /** How did this start land? The first one is taken as it is. */
+  function calmLearn() {
+    // A start that was already late says nothing about this screen's delay.
+    if (calmList.length < 5 || calmSpareMs === null || calmSpareMs < 0) return;
+    var list = calmList.sort(function (a, b) { return a - b; });
+    calmList = [];
+    var err = list[Math.floor(list.length / 2)];
+    // Ahead with nothing left to take off, or a long way out: not a start delay.
+    if (Math.abs(err) > MAX_LEAD_MS) return;
+    learnStart(err, startsMeasured++ ? 0.6 : 1);
+  }
+
+  function calmReopen(el, why) {
+    lastStall = why;
+    log('Video ' + why + ', opening it again');
+    calmReset();
+    clearVideo(el);
   }
 
   /** Cut to the item `e` names. */
@@ -997,7 +1134,9 @@
         }
       }
     });
+    el.addEventListener('ended', function () { if (calmPhase) tick(); });
     el.addEventListener('seeked', function () {
+      if (calmPhase) tick();
       if (!pendingSeekTarget || el !== activeEl()) return;
       // Learn how long a seek takes to land, so the next one aims ahead.
       if (pendingSeekTarget.learn) {
@@ -1037,6 +1176,7 @@
 
   function correctDrift(el, drift, posMs, now) {
     var abs = Math.abs(drift);
+    if (calm && abs < 2500) return;       // it lines up again at the next video
     if (abs > 600 || (!rateWorks && abs > 200)) {
       setRate(1);
       rateCheck = null;
@@ -1157,6 +1297,7 @@
     }
     if (state.next && !e && state.next.anchor <= groupNow()) { startNext(); return; }
     if (!e) {
+      if (calmPhase) { calmReset(); clearVideo(el); }
       current = { idx: -1, id: null, since: 0 };
       if (cue) forgetCue();
       if (state.splashUrl) {
@@ -1187,6 +1328,12 @@
         nextTimer = setTimeout(function () { nextTimer = null; if (state.next) startNext(); }, toStart);
       }
     }
+
+    if (calm && state.items.length === 1 && state.items[0].type === 'video') {
+      calmTick(e, activeEl(), state.items[0]);
+      return;
+    }
+    if (calmPhase) calmReset();
 
     if (e.waitMs > 0) {
       // Coordinated start: sit on frame 0 of the first item until the
@@ -1242,7 +1389,7 @@
       return;
     }
     if (el.paused && !el.seeking) playVideo(el);
-    if (rateWorks === null) probeRate(el);
+    if (rateWorks === null && !calm) probeRate(el);
 
     var now = localNow();
     if (el.seeking) { driftLog = []; return; }
@@ -1291,7 +1438,8 @@
         '  ·  speed ' + currentRate.toFixed(2) + '  ·  fine speed control ' +
         (rateWorks === null ? 'untested' : rateWorks ? 'yes' : 'no') + '  ·  seek lead ' + Math.round(seekLeadMs) + ' ms',
       'Start    this screen is started ' + Math.round(startLeadMs) + ' ms early  ·  last landed ' +
-        (startErrMs === null ? '—' : Math.round(startErrMs) + ' ms') + '  ·  adjustment ' + state.trimMs +
+        (startErrMs === null ? '—' : Math.round(startErrMs) + ' ms') + (calmPhase ? '  ·  ' + calmPhase : '') +
+        '  ·  adjustment ' + state.trimMs +
         ' ms  ·  measured by ' + measureBy,
       'Playing  ' + (item ? (e.idx + 1) + '/' + state.items.length + ' ' + (item.title || item.id) +
         ' @ ' + (e.posMs / 1000).toFixed(2) + ' s' : state.splashUrl ? 'splash' : '—'),
