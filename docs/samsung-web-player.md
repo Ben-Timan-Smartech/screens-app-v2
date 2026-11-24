@@ -96,6 +96,10 @@ changes to settle after a screen is first set up. If one screen still looks
 early or late, use **Later** and **Earlier** next to it on the Sync groups page:
 a delay in the panel itself isn't something the player can measure.
 
+A small faint symbol in the bottom right corner shows while a screen is lining
+up with its group, and goes when it's in step (or after 3 minutes, when the CMS
+shows the problem instead).
+
 ### One video in a loop
 
 Samsung screens are slow to skip, so with a single video the player never
