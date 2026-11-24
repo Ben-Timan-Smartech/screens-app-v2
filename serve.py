@@ -2922,8 +2922,11 @@ def _load_state_from_disk() -> None:
                 elif target_name == "_city_brand":
                     # v0.1.56: don't clobber the _city_brand global —
                     # other code holds references to it. Merge in place.
+                    # A city added to the defaults after the file was saved
+                    # isn't in it, so it keeps its default. A city set to
+                    # "(no splash)" is in it, as "".
                     _city_brand.clear()
-                    _city_brand.update(raw)
+                    _city_brand.update({**DEFAULT_CITY_BRAND, **raw})
                 elif target_name == "_secrets":
                     _secrets.clear()
                     _secrets.update(raw)
@@ -7013,7 +7016,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "Missing city"); return
             with _STATE_LOCK:
                 if brand is None or brand == "":
-                    _city_brand.pop(city, None)
+                    _city_brand[city] = ""   # "(no splash)", kept over a restart
                 else:
                     _city_brand[city] = brand
                 # v0.1.56: persist to disk. Pre-v0.1.56 this dict lived
