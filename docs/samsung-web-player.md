@@ -79,8 +79,12 @@ storage, so a dropped network doesn't stop it. The readout's "Stored" line shows
 how many files are there and whether the one on screen is playing from the
 screen or the server. The screen also sends that to the CMS with each check-in.
 
-If the browser can't play a stored file, the player streams it and tries stored
-files again a day later. **Clear cache** deletes the stored files.
+Samsung's browser refuses to play a stored file directly, so a single video or
+the splash is cut into pieces on the screen and fed to it as one stream
+(`app/tv/mp4.js`). That works for H.264 files up to 80 MB, without sound. The
+readout's "Stream" line shows it. If it fails four times in ten minutes the
+screen plays the old way and tries again a day later. **Clear cache** deletes
+the stored files and tries again at once.
 
 ## Sync
 
@@ -100,7 +104,14 @@ A small faint symbol in the bottom right corner shows while a screen is lining
 up with its group, and goes when it's in step (or after 3 minutes, when the CMS
 shows the problem instead).
 
-### One video in a loop
+### One video in a loop, or the splash
+
+Played as a stored stream, each loop is placed on the group's clock a few
+seconds before it starts: the last picture is held, or the end trimmed, by as
+much as the screen is off. Nothing is skipped and nothing restarts. Screens in a
+group showing the same splash are in step as well.
+
+When the stored stream can't be used:
 
 Samsung screens are slow to skip, so with a single video the player never
 corrects it while it plays. Each time round it goes back to the first frame
@@ -116,7 +127,7 @@ file for a synced set.
 - **Stored content and sync aren't proven on a Samsung screen yet.** In the
   readout, "Stored" should count up to all files and say "playing from this
   screen", and "fine speed control" should say yes.
-- **The splash isn't synced.** Only a playlist in a sync group is.
+- **The splash is synced only as a stored stream**, and only in a sync group.
 - **Seamless changes** need the screen to open the next video while the
   current one plays, so it runs two videos at once for a few seconds. If it
   can't, the player falls back to one by itself and there's a short blank at

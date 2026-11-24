@@ -25,7 +25,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'web-1.2.2';
+  var VERSION = 'web-1.3.0';
   var FLAVOR = 'web';
 
   // ── Config from the address ─────────────────────────────────────────
@@ -347,6 +347,7 @@
       case 'clearCache':
         if (window.caches) {
           store('screens.localOff', null);
+          store('screens.msOff', null);
           caches.delete(MEDIA_CACHE).then(function () { location.reload(); });
         }
         break;
@@ -439,7 +440,7 @@
       items: state.items.length,
       missing: bad,
       positionMs: e ? Math.round(e.posMs) : null,
-      driftMs: playing && lastDriftMs !== null ? Math.round(lastDriftMs) : null,
+      driftMs: (playing || (ms && ms.playing)) && lastDriftMs !== null ? Math.round(lastDriftMs) : null,
       offsetMs: clock.offsetMs === null ? null : Math.round(clock.offsetMs),
       rttMs: clock.bestRttMs === null ? null : Math.round(clock.bestRttMs),
       samples: clock.samples.length,
@@ -447,10 +448,10 @@
       trimMs: state.trimMs,
       startLeadMs: Math.round(startLeadMs),
       startErrMs: startErrMs === null ? null : Math.round(startErrMs),
-      measure: measureBy + (calm ? ', ' + (calmPhase || 'calm') + ', spare ' + (calmSpareMs === null ? '?' : Math.round(calmSpareMs)) +
+      measure: measureBy + (ms ? ', stored stream' : calm ? ', ' + (calmPhase || 'calm') + ', spare ' + (calmSpareMs === null ? '?' : Math.round(calmSpareMs)) +
         ', back ' + (calmBackMs === null ? '?' : Math.round(calmBackMs)) + ', reopened ' + calmLoads : rateWorks === false ? ', no speed control' : ''),
       seeks: seekTimes.filter(function (t) { return localNow() - t < 600000; }).length,
-      state: calmPhase && calmPhase !== 'opening' ? (waiting ? 'waiting' : 'playing') : waiting ? 'waiting' : !item ? 'idle' : item.type === 'image' ? 'image' : playing ? 'playing' : 'loading'
+      state: ms ? (ms.state === 'playing' ? 'playing' : 'loading') : calmPhase && calmPhase !== 'opening' ? (waiting ? 'waiting' : 'playing') : waiting ? 'waiting' : !item ? 'idle' : item.type === 'image' ? 'image' : playing ? 'playing' : 'loading'
     };
   }
 
@@ -628,10 +629,10 @@
   /** One line for the CMS about what the video is doing. No addresses. */
   function videoReport() {
     var el = activeEl(), n = framesShown(el), urls = wantedUrls();
-    return (el._url ? (el._local ? 'stored' : 'stream') : 'none') + ' ' + el.currentTime.toFixed(1) + '/' +
+    return (el._url ? (el._mse ? 'stored stream' : el._local ? 'stored' : 'stream') : 'none') + ' ' + el.currentTime.toFixed(1) + '/' +
       (el.duration || 0).toFixed(1) + 's ' + videoState(el) + ', frames ' + (n === null ? '?' : n) +
       ' | kept ' + urls.filter(isKept).length + '/' + urls.length + (localOff ? ' off' : '') +
-      (localWhy ? ' (' + localWhy + ')' : '') +
+      (localWhy ? ' (' + localWhy + ')' : '') + (msNote ? ' [' + msNote.slice(0, 50) + ']' : '') +
       ' | worker ' + swState.slice(0, 24) + ' stored ' + served.stored + ' net ' + served.net +
       ' | ' + caps() + ' | stalls ' + stall.recoveries.length + (lastStall ? ', last: ' + lastStall : '');
   }
@@ -690,6 +691,7 @@
   var posSteps = 0;           // times the position stood still between ticks
   var stall = { lastPos: -1, lastFrames: -1, framesSeen: 0, since: 0, recoveries: [] };
   var lastStall = '';         // what the last freeze looked like
+  var splashStalls = 0;       // freezes in a row without getting going
   var splashPlayAt = 0;       // local time of the last play() on the splash
   var startTimer = null;
   var pageStart = localNow();
@@ -745,6 +747,7 @@
 
   /** Open `url` on `el`, from this screen's own copy if it has one. */
   function setVideo(el, url) {
+    if (el._mse) clearVideo(el);
     el._url = absUrl(url);
     var src = srcFor(url);
     el._local = src.indexOf('blob:') === 0;
@@ -771,6 +774,7 @@
     try { el.pause(); } catch (e) { /* ignore */ }
     el.onloadedmetadata = null;
     el.onloadeddata = null;
+    if (el._mse) { el._mse.dead = true; if (ms === el._mse) ms = null; el._mse = null; }
     el._url = null;
     el._local = false;
     if (el.getAttribute('src')) {
@@ -1064,8 +1068,9 @@
   var liningUpSince = 0;
 
   function isLiningUp() {
-    if (!state.syncGroup || !state.items.length) return false;
+    if (!state.syncGroup || !(state.items.length || ms)) return false;
     if (state.next || clock.offsetMs === null) return true;
+    if (ms) return lastDriftMs === null || Math.abs(lastDriftMs) > 120;
     var e = expected();
     if (!e) return false;
     if (e.waitMs > 0) return true;
@@ -1081,6 +1086,248 @@
     if (!isLiningUp()) liningUpSince = 0;
     else if (!liningUpSince) liningUpSince = now;
     syncingEl.className = liningUpSince && now - liningUpSince < 180000 ? 'on' : '';
+  }
+
+  // ── One video, fed from this screen's own copy ───────────────────────
+  // The stored file is cut into pieces (mp4.js) and fed to the video element
+  // as one stream that never ends. Nothing comes over the network, nothing
+  // restarts, and the next loop is placed where the clock says it belongs: its
+  // start is worked out a few seconds ahead from how far off this screen is
+  // now, and the last picture is held, or the tail trimmed, to fit.
+  var MS_START = 1;           // where the first loop starts on the stream, s
+  var MS_AHEAD = 8;           // seconds kept ready
+  var MS_DECIDE = 4;          // how long before a loop ends its successor is placed
+  var MS_MAX_BYTES = 80 * 1024 * 1024;
+  var ms = null;
+  var msFails = [];
+  var msNote = '';
+  var msOff = (function () {
+    if (params.get('stream') === '0' || !window.ScreensMp4 || !window.MediaSource || !window.caches) return true;
+    var v = (store('screens.msOff') || '').split('|');
+    if (v[0] === VERSION && Math.abs(Date.now() - Number(v[1])) < 24 * 3600 * 1000) { msNote = v[2] || ''; return true; }
+    return false;
+  })();
+
+  function msUsable(url) {
+    if (!calm || msOff || state.audioOn) return false;
+    if (msFails.length && localNow() - msFails[msFails.length - 1] < 4000) return false;
+    var k = kept[absUrl(url)];
+    return !!k && k.state === 'ready' && k.bytes <= MS_MAX_BYTES && !k.msBad;
+  }
+
+  function msReset() {
+    if (!ms) return;
+    var m = ms;
+    ms = null;
+    m.dead = true;
+    if (m.objectUrl) URL.revokeObjectURL(m.objectUrl);
+    if (m.el._mse === m) { m.el._mse = null; clearVideo(m.el); }
+    resetMeasure();
+    lastDriftMs = null;
+  }
+
+  function msFail(why, fileIsBad) {
+    log('Stored stream: ' + why);
+    lastStall = 'stored stream ' + why;
+    msNote = why;
+    var url = ms && ms.url;
+    msReset();
+    if (fileIsBad && url && kept[url]) { kept[url].msBad = true; return; }
+    var now = localNow();
+    msFails = msFails.filter(function (t) { return now - t < 600000; });
+    msFails.push(now);
+    if (msFails.length >= 4) {
+      msOff = true;
+      store('screens.msOff', VERSION + '|' + Date.now() + '|' + why.replace(/\|/g, ' ').slice(0, 60));
+      log('This screen plays without the stored stream for a day');
+    }
+  }
+
+  function msOpen(el, url) {
+    msReset();
+    if (calmPhase) calmReset();
+    clearVideo(el);
+    setRate(1);
+    resetMeasure();
+    lastDriftMs = null;
+    var m = ms = { el: el, url: absUrl(url), queue: [], loops: [], seq: 1, openedAt: localNow(), note: 'opening' };
+    el.loop = false;
+    el.muted = true;
+    showVideo(el);
+    caches.open(MEDIA_CACHE).then(function (c) { return c.match(m.url); }).then(function (hit) {
+      if (!hit) throw new Error('not stored');
+      return hit.arrayBuffer();
+    }).then(function (buf) {
+      if (m.dead) return;
+      try { m.track = ScreensMp4.parse(buf); } catch (e) { msFail('cannot read this file (' + e.message + ')', true); return; }
+      if (!MediaSource.isTypeSupported(m.track.mime)) { msFail('cannot play ' + m.track.codec, true); return; }
+      m.media = new MediaSource();
+      m.media.addEventListener('sourceopen', function () {
+        if (m.dead || m.sb) return;
+        try {
+          m.sb = m.media.addSourceBuffer(m.track.mime);
+          m.sb.mode = 'segments';
+        } catch (e) { msFail('no buffer (' + e.name + ')'); return; }
+        m.sb.addEventListener('updateend', function () { msPump(m); });
+        m.sb.addEventListener('error', function () { if (!m.dead) msFail('buffer error'); });
+        msQueue(m, ScreensMp4.init(m.track));
+        m.note = 'ready';
+        tick();
+      });
+      m.objectUrl = URL.createObjectURL(m.media);
+      el._url = m.url;
+      el._local = false;
+      el._mse = m;
+      el._openedAt = localNow();
+      el.src = m.objectUrl;
+    }).catch(function (e) { if (!m.dead) msFail(e.message || String(e)); });
+  }
+
+  function msQueue(m, bytes) { m.queue.push(bytes); msPump(m); }
+
+  function msPump(m) {
+    if (m.dead || !m.sb || m.sb.updating) return;
+    if (!m.queue.length) {
+      // Let go of what has been played, now and then.
+      var from = m.sb.buffered.length ? m.sb.buffered.start(0) : 0;
+      if (m.el.currentTime - from > 30) { try { m.sb.remove(0, m.el.currentTime - 10); } catch (e) { /* later */ } }
+      return;
+    }
+    try {
+      m.sb.appendBuffer(m.queue[0]);
+      m.queue.shift();
+      m.full = 0;
+    } catch (e) {
+      if (e.name === 'QuotaExceededError' && (m.full = (m.full || 0) + 1) < 20) {
+        try { m.sb.remove(0, Math.max(0.1, m.el.currentTime - 2)); } catch (x) { /* later */ }
+        return;
+      }
+      msFail('append failed (' + e.name + ')');
+    }
+  }
+
+  /** The loop on the stream at `t` seconds, or the first. */
+  function msLoopAt(m, t) {
+    for (var i = m.loops.length - 1; i >= 0; i--) if (m.loops[i].start <= t + 0.001) return m.loops[i];
+    return m.loops[0];
+  }
+
+  /** Feed the piece after the last one fed. */
+  function msFeed(m, periodMs, pos) {
+    var t = m.track, loop = m.loops[m.loops.length - 1];
+    var g = t.gops[m.nextGop];
+    var lastGop = m.nextGop === t.gops.length - 1;
+    var base = loop.start * t.timescale;
+    if (!lastGop) {
+      msQueue(m, ScreensMp4.piece(t, m.seq++, g.from, g.to, base));
+      m.fedTo = loop.start + t.samples[t.gops[m.nextGop + 1].from].pts / t.timescale;
+      m.nextGop++;
+      return true;
+    }
+    // The end of a loop waits until it's known where the next one starts.
+    var fileEnd = loop.start + t.durMs / 1000;
+    var now = m.el.currentTime;
+    if (fileEnd - now > MS_DECIDE && m.playing) return false;
+    var next = fileEnd;
+    if (pos !== null && periodMs) {
+      // Ahead of the clock: start later on the stream. Behind: earlier.
+      var off = m.playing && lastDriftMs !== null && msLoopAt(m, now) === loop ? lastDriftMs : 0;
+      next = Math.max(now + 1, loop.start + 0.5, loop.start + (periodMs + off) / 1000);
+    }
+    msQueue(m, ScreensMp4.lastPiece(t, m.seq++, g, base, (next - loop.start) * t.timescale));
+    m.loops.push({ start: next });
+    if (m.loops.length > 6) m.loops.shift();
+    m.nextGop = 0;
+    m.fedTo = next;
+    return true;
+  }
+
+  /** `periodMs`: length of a slot. `pos`: where in it the clock is, or null to
+   *  just loop. `waitMs`: time until the group's first start. */
+  function msTick(el, url, periodMs, pos, waitMs) {
+    var now = localNow();
+    if (!ms || ms.url !== absUrl(url) || ms.el !== el) { msOpen(el, url); return; }
+    var m = ms;
+    if (!m.sb || !m.track) {
+      if (now - m.openedAt > 20000) msFail('did not open');
+      return;
+    }
+    if (document.hidden) { restartStallWatch(now); return; }
+    var t = m.track, i;
+    var endsAt = t.durMs / 1000;
+
+    if (!m.loops.length) {
+      // Begin a little ahead of the clock, at the top of the next loop if
+      // there's no time left in this one.
+      var at = 0;
+      m.startIn = null;
+      if (pos !== null) {
+        if (waitMs > 0) m.startIn = waitMs;
+        else {
+          at = (pos + 1500) / 1000;
+          if (at * 1000 >= periodMs || at >= endsAt - 0.3) { at = 0; m.startIn = periodMs - pos; }
+          else m.startIn = 1500;
+        }
+      }
+      m.startAt = now + (m.startIn || 0);
+      m.loops = [{ start: MS_START }];
+      m.nextGop = 0;
+      for (i = 0; i < t.gops.length; i++) if (t.gops[i].pts / t.timescale <= at + 0.001) m.nextGop = i;
+      m.fedTo = MS_START + t.gops[m.nextGop].pts / t.timescale;
+      m.target = MS_START + at;
+      m.state = 'filling';
+      restartStallWatch(now);
+    }
+
+    var head = m.state === 'playing' ? el.currentTime : m.target;
+    for (i = 0; i < 6 && m.queue.length < 4 && m.fedTo - head < MS_AHEAD; i++) if (!msFeed(m, periodMs, pos)) break;
+    if (m.dead) return;
+    msPump(m);
+
+    if (m.state === 'filling') {
+      if (now - m.openedAt > 25000 + (m.startIn || 0)) { msFail('did not fill'); return; }
+      if (!m.sb.buffered.length || m.sb.buffered.end(m.sb.buffered.length - 1) < m.target + 0.5) return;
+      if (!m.sought) { m.sought = true; try { el.currentTime = m.target; } catch (e) { /* ignore */ } return; }
+      if (el.seeking || el.readyState < 2) return;
+      hideIdle();
+      var left = m.startAt - now;
+      if (left > 250) return;
+      m.state = 'starting';
+      setTimeout(function () {
+        if (m.dead) return;
+        watchFrames(el);
+        playVideo(el);
+        m.playing = true;
+        m.state = 'playing';
+        restartStallWatch(localNow());
+      }, Math.max(0, left));
+      return;
+    }
+    if (m.state !== 'playing') return;
+
+    hideIdle();
+    if (el.paused && !el.seeking && now - splashPlayAt > 2000) { splashPlayAt = now; playVideo(el); }
+    if (!pictureMoved(el, now) && now - stall.since > 8000) {
+      noteStall(now);
+      msFail('stopped at ' + el.currentTime.toFixed(1) + ' s (' + videoState(el) + ')');
+      return;
+    }
+    if (pos === null) { lastDriftMs = null; return; }
+
+    // How far off is it? Not near a loop point, where the clock and the
+    // stream can be on different sides of it.
+    var loop = msLoopAt(m, el.currentTime);
+    if (pos > 600 && pos < periodMs - 600) {
+      var d = measureDrift(el, loop.start * 1000 + pos, now);
+      if (d > periodMs / 2) d -= periodMs;
+      else if (d < -periodMs / 2) d += periodMs;
+      lastDriftMs = d;
+      // Too far to take up at a loop point: begin again.
+      if (Math.abs(d) > 2500) {
+        if (!m.farSince) m.farSince = now;
+        else if (now - m.farSince > 3000) { log('Stored stream ' + Math.round(d) + ' ms out, starting again'); msOpen(el, url); }
+      } else m.farSince = 0;
+    }
   }
 
   function calmReopen(el, why) {
@@ -1198,6 +1445,7 @@
       pendingSeekTarget = null;
     });
     el.addEventListener('error', function () {
+      if (el._mse) { if (el._mse === ms && el.error) msFail('error ' + el.error.code); return; }
       if (el._local) { localFailed(el, 'error ' + (el.error ? el.error.code : '?')); return; }
       if (el === activeEl()) {
         log('Video error on ' + (current.id || '?'));
@@ -1279,12 +1527,17 @@
     if (document.hidden) { restartStallWatch(now); return; }
     if (pictureMoved(el, now)) return;
     if (el.ended) { try { el.currentTime = 0; } catch (e) { /* ignore */ } }
+    if (el.currentTime > 0.5) splashStalls = 0;
     if ((el.paused || el.ended) && el.readyState >= 2 && now - splashPlayAt > 2000) {
       splashPlayAt = now;
       playVideo(el);
     }
     // Give a slow download longer than a picture that has stopped.
-    if (now - stall.since <= (el.readyState < 3 && !el.error ? 30000 : 10000)) return;
+    // Wait longer each time it doesn't get going: a slow start would
+    // otherwise be cut off and started again for ever.
+    var limit = (el.readyState < 3 && !el.error ? 30000 : 10000) * Math.min(4, Math.pow(2, splashStalls));
+    if (now - stall.since <= limit) return;
+    splashStalls++;
     var stuckMs = now - stall.since;
     noteStall(now);
     lastStall = (el._local ? 'stored' : 'stream') + ' stopped at ' + el.currentTime.toFixed(1) + ' s for ' +
@@ -1349,11 +1602,19 @@
     }
     if (state.next && !e && state.next.anchor <= groupNow()) { startNext(); return; }
     if (!e) {
-      if (calmPhase) { calmReset(); clearVideo(el); }
+      if (calmPhase) { calmReset(); if (!ms) clearVideo(el); }
       current = { idx: -1, id: null, since: 0 };
       if (cue) forgetCue();
       if (state.splashUrl) {
         var k = kept[absUrl(state.splashUrl)];
+        if (msUsable(state.splashUrl)) {
+          // In a group, everyone showing the same splash is in step too: the
+          // file's own length and the clock give the same place on each.
+          var lap = ms && ms.track && ms.url === absUrl(state.splashUrl) ? ms.track.durMs : 0;
+          msTick(el, state.splashUrl, lap, state.syncGroup && clock.offsetMs !== null ? (lap ? groupNow() % lap : 0) : null, 0);
+          return;
+        }
+        if (ms) msReset();
         if (sameUrl(el, state.splashUrl)) {
           watchSplash(el);
           hideIdle();
@@ -1364,11 +1625,12 @@
           hideIdle();
         }
       } else {
+        if (ms) msReset();
         showIdle(state.online ? 'No content assigned to this screen yet.' : 'Connecting…');
       }
       return;
     }
-    el.loop = false;
+    if (!ms) el.loop = false;
 
     // A new loop is waiting for the group's start time: play on, open its
     // first video on the standby, and cut on the exact millisecond.
@@ -1381,6 +1643,15 @@
       }
     }
 
+    if (calm && state.items.length === 1 && state.items[0].type === 'video' && msUsable(state.items[0].url)
+        && (ms || calmPhase !== 'playing')) {
+      var only = state.items[0];
+      current = { idx: 0, id: only.id, since: current.id === only.id ? current.since : localNow(), skipped: false };
+      forceSwitch = false;
+      msTick(activeEl(), only.url, only.durMs, e.posMs, e.waitMs);
+      return;
+    }
+    if (ms) msReset();
     if (calm && state.items.length === 1 && state.items[0].type === 'video') {
       calmTick(e, activeEl(), state.items[0]);
       return;
@@ -1506,7 +1777,9 @@
       'Stored   ' + wantedUrls().filter(isKept).length + '/' + wantedUrls().length + ' files  ·  ' +
         (keptBytes() / 1048576).toFixed(1) + ' MB  ·  playing ' +
         (localOff ? 'from the server (this screen could not play stored videos)'
-          : activeEl()._local ? 'from this screen' : 'from the server') + '  ·  worker ' + swState,
+          : activeEl()._local || activeEl()._mse ? 'from this screen' : 'from the server') + '  ·  worker ' + swState,
+      'Stream   ' + (ms ? (ms.state || ms.note) + '  ·  ' + (ms.loops.length ? 'loop at ' + ms.loops.map(function (l) { return l.start.toFixed(2); }).slice(-2).join(', ') : '') +
+        '  ·  ' + (ms.fedTo ? (ms.fedTo - activeEl().currentTime).toFixed(1) + ' s ready' : '') : msOff ? 'off' : 'not in use') + (msNote ? '  ·  ' + msNote : ''),
       'Display  ' + (function () { var i = screenInfo(); return i.screenWidth + '×' + i.screenHeight + ' ' + i.orientation; })() +
         '  ·  rotation ' + state.rotation + '°',
       'Agent    ' + navigator.userAgent,
