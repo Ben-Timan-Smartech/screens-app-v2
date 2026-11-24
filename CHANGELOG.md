@@ -41,6 +41,17 @@ Rules:
   groups at its location, and says so if joining fails.
 - **The tablet's clock test covers the whole group**, not just that tablet.
 
+## v0.2.24
+
+- **Holt Renfrew Yorkdale is now a location.** Toronto has its own city and
+  Canada its own region, so screens at the new store can be set up under
+  "tm:rw · Holt Renfrew Yorkdale". They play the tm:rw splash and run their
+  overnight updates on Toronto time.
+- **Toronto prices are in Canadian dollars.** If a product card is turned on,
+  a Toronto screen shows the product's Canadian price. When a product has no
+  Canadian price, the card leaves the price out rather than showing euros,
+  pounds or US dollars.
+
 ## v0.2.23
 
 - **Dashboard screens stay awake and unlocked.** The office Elo box dropped to

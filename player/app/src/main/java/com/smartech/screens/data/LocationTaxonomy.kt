@@ -14,7 +14,8 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 object LocationTaxonomy {
 
-    enum class Region { USA, UK, EU, GLOBAL }
+    // v0.2.24: CANADA for Holt Renfrew Yorkdale (Toronto).
+    enum class Region { USA, UK, EU, CANADA, GLOBAL }
 
     /** v0.2.19: [timeZone] is the IANA zone the store's opening hours run
      *  in. The overnight update window uses it instead of the box's own
@@ -46,6 +47,7 @@ object LocationTaxonomy {
         City("LDN", Region.UK, "Europe/London"),
         City("BER", Region.EU, "Europe/Berlin"),
         City("ROM", Region.EU, "Europe/Rome"),
+        City("TOR", Region.CANADA, "America/Toronto"),
         // v0.1.37: GLB hosts the "Events" + "Test" stores and any
         // custom-added store that isn't anchored to a real retail
         // city. Region GLOBAL keeps them out of the cascade dropdowns
@@ -81,6 +83,13 @@ object LocationTaxonomy {
             name = "tm:rw · La Rinascente",
             address = "Galleria Alberto Sordi, 00187 Roma",
             cityCode = "ROM",
+        ),
+        // v0.2.24: tm:rw's Toronto store, inside Holt Renfrew at Yorkdale.
+        Store(
+            id = "tmrw-holt-yorkdale",
+            name = "tm:rw · Holt Renfrew Yorkdale",
+            address = "Yorkdale Shopping Centre, 3401 Dufferin St, Toronto, ON M6A 2T9",
+            cityCode = "TOR",
         ),
         // v0.1.37: ad-hoc stores. Events for pop-ups + trade shows,
         // Test for dev/QA fixtures. v0.1.38 added a CMS-side add-store
@@ -149,7 +158,7 @@ object LocationTaxonomy {
     val MULTI_CONCEPT_CITIES: Set<String> = setOf("NYC", "LDN")
 
     /** Concept is only asked for at retail stores in a multi-concept city.
-     *  Offices, Events/Test and single-concept cities (BER, ROM) skip it. */
+     *  Offices, Events/Test and single-concept cities (BER, ROM, TOR) skip it. */
     fun conceptApplies(cityCode: String?, storeId: String?): Boolean =
         cityCode != null && cityCode in MULTI_CONCEPT_CITIES && storeById(storeId)?.isOffice != true
 
