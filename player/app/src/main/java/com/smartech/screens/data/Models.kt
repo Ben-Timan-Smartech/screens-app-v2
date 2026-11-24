@@ -80,6 +80,8 @@ data class Prices(
     val eur: Double? = null,
     val berlinEur: Double? = null,
     val romeEur: Double? = null,
+    /** v0.2.24: Canadian dollars, for the Toronto store. */
+    val cad: Double? = null,
 )
 
 /** v0.2.8: one product on the shopper card's cycle. Mirrors the single-product

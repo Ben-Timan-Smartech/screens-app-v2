@@ -180,6 +180,7 @@ const TaxonomyList = ({ title, items, render }) => (
 const BUILTIN_STORE_IDS = new Set([
   'tmrw-times-square', 'smartech-selfridges',
   'smartech-kadewe', 'tmrw-rinascente',
+  'tmrw-holt-yorkdale',
   'events', 'test',
 ]);
 

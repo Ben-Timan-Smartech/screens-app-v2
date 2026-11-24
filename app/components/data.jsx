@@ -20,6 +20,7 @@ const MOCK_STORES = [
   { id: 'smartech-selfridges', name: 'Smartech \u00b7 Selfridges LDN', city: 'London',   country: 'UK',  region: 'UK/EU',   total: 0, online: 0, warn: 0, offline: 0 },
   { id: 'smartech-kadewe',     name: 'Smartech \u00b7 KaDeWe',          city: 'Berlin',   country: 'DE',  region: 'EU',      total: 0, online: 0, warn: 0, offline: 0 },
   { id: 'tmrw-rinascente',     name: 'tm:rw \u00b7 La Rinascente',      city: 'Rome',     country: 'IT',  region: 'EU',      total: 0, online: 0, warn: 0, offline: 0 },
+  { id: 'tmrw-holt-yorkdale',  name: 'tm:rw \u00b7 Holt Renfrew Yorkdale', city: 'Toronto', country: 'CA', region: 'Canada', total: 0, online: 0, warn: 0, offline: 0 },
   // v0.1.62: ad-hoc stores. Mirrored from LOCATION_TAXONOMY.stores
   // (and from the tablet's LocationTaxonomy.builtIn) \u2014 every screen
   // registered with storeId='events' / 'test' needs a matching entry
@@ -175,12 +176,13 @@ const ROLE_LABEL = {
 // Custom stores added via Settings → Locations also land here unless
 // the operator picks a real city.
 const LOCATION_TAXONOMY = {
-  regions: ['USA', 'UK', 'EU', 'GLOBAL'],
+  regions: ['USA', 'UK', 'EU', 'CANADA', 'GLOBAL'],
   cities: [
     { code: 'NYC', region: 'USA' },
     { code: 'LDN', region: 'UK'  },
     { code: 'BER', region: 'EU'  },
     { code: 'ROM', region: 'EU'  },
+    { code: 'TOR', region: 'CANADA' },   // v0.2.24: Holt Renfrew Yorkdale
     { code: 'GLB', region: 'GLOBAL' },
   ],
   stores: [
@@ -188,7 +190,8 @@ const LOCATION_TAXONOMY = {
     { id: 'smartech-selfridges', name: 'Smartech · Selfridges LDN',   address: '400 Oxford St, Marylebone, Selfridges, London W1A 1AB',   city: 'LDN' },
     { id: 'smartech-kadewe',     name: 'Smartech · KaDeWe',           address: 'Tauentzienstraße 21–24, 10789 Berlin',                     city: 'BER' },
     { id: 'tmrw-rinascente',     name: 'tm:rw · La Rinascente',       address: 'Galleria Alberto Sordi, 00187 Roma',                       city: 'ROM' },
-    { id: 'events',              name: 'Events',                      address: 'Pop-up + event installations',                              city: 'GLB' },
+    { id: 'tmrw-holt-yorkdale',  name: 'tm:rw · Holt Renfrew Yorkdale', address: 'Yorkdale Shopping Centre, 3401 Dufferin St, Toronto, ON M6A 2T9', city: 'TOR' },
+    { id: 'events',             name: 'Events',                      address: 'Pop-up + event installations',                              city: 'GLB' },
     { id: 'test',                name: 'Test',                        address: 'Development & QA fixtures',                                 city: 'GLB' },
   ],
   // v0.1.81: 'tmrw' is pinned first — it maps to the tm:rw splash (server

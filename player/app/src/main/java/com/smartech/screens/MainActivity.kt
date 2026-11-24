@@ -177,7 +177,7 @@ class MainActivity : ComponentActivity() {
         if (concept?.equals("Smartech", ignoreCase = true) == true) return "smartech"
         return when (city?.trim()?.uppercase()) {
             "LDN", "BER" -> "smartech"
-            "NYC", "ROM", "GLB" -> "tmrw"
+            "NYC", "ROM", "TOR", "GLB" -> "tmrw"
             else -> null
         }
     }

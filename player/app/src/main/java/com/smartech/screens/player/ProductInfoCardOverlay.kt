@@ -383,9 +383,13 @@ private fun resolveRegionPrice(prices: Prices?, city: String?): String? {
         "NYC" -> prices.usd to "$"
         "BER" -> prices.berlinEur to "€"
         "ROM" -> prices.romeEur to "€"
+        "TOR" -> prices.cad to "$"
         else -> null to ""
     }
     preferred.first?.let { return formatPrice(it, preferred.second) }
+    // v0.2.24: Toronto shows a Canadian price or none. Falling through to
+    // €/£/US$ would put the wrong currency in front of a Canadian shopper.
+    if (city?.uppercase() == "TOR") return null
     prices.eur?.let { return formatPrice(it, "€") }
     prices.gbp?.let { return formatPrice(it, "£") }
     prices.usd?.let { return formatPrice(it, "$") }
