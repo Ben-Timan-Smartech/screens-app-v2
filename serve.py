@@ -3523,8 +3523,9 @@ def _reset_group_loop_epoch(group_id: str, now: float) -> float:
 # in within 5 s started together. The rest kept playing the old playlist and
 # then jumped in part-way through a video. Now the start waits for the
 # slowest online member's check-in (plus a margin), capped so a push never
-# feels stuck. Screens that check in less often than the cap (old Android
-# players on Normal or Slow) still join late, part-way through, as before.
+# feels stuck. Only for groups whose screens can all keep their old loop
+# playing while they wait (web players, and Android from v0.2.25): a group
+# with an older player keeps the 5 s.
 COORDINATED_START_MAX_SEC = 20.0
 # A web player in a sync group checks in at least every 15 s (app/tv/player.js).
 WEB_SYNC_POLL_SEC = 15
@@ -3534,12 +3535,21 @@ ANDROID_FAST_PICKUP_MIN_APP = "0.2.25"
 ANDROID_HEARTBEAT_SEC = 10
 
 
+def _holds_old_loop(meta: dict) -> bool:
+    """Can this player keep its current loop playing until a later start?
+    Older Android players can't: they freeze on the first frame of the new
+    one for the whole wait, so a longer wait would be a longer freeze."""
+    return (meta.get("appFlavor") == "web"
+            or _version_tuple(meta.get("appVersion") or "0")
+            >= _version_tuple(ANDROID_FAST_PICKUP_MIN_APP))
+
+
 def _member_checkin_sec(meta: dict, st: dict) -> float:
     """How long a screen can take to notice a change to its playlist."""
     poll = _poll_interval_sec(st.get("pollMode"))
     if meta.get("appFlavor") == "web":
         return min(poll, WEB_SYNC_POLL_SEC)
-    if _version_tuple(meta.get("appVersion") or "0") >= _version_tuple(ANDROID_FAST_PICKUP_MIN_APP):
+    if _holds_old_loop(meta):
         return min(poll, ANDROID_HEARTBEAT_SEC)
     return poll
 
@@ -3553,8 +3563,12 @@ def _group_start_delay(group_id: str, now: float) -> float:
             continue
         meta = _screens.get(d) or {}
         _, online = _presence(meta.get("lastHeartbeat") or 0, st.get("pollMode"), now)
-        if online:
-            slowest = max(slowest, _member_checkin_sec(meta, st))
+        if not online:
+            continue
+        if not _holds_old_loop(meta):
+            # One older player in the group keeps the original 5 s for all.
+            return COORDINATED_START_DELAY_SEC
+        slowest = max(slowest, _member_checkin_sec(meta, st))
     return max(COORDINATED_START_DELAY_SEC, min(COORDINATED_START_MAX_SEC, slowest + 3.0))
 
 
