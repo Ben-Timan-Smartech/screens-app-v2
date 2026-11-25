@@ -72,6 +72,8 @@ Rules:
   one: the product index limits how fast it can be asked, and each refresh
   started again and wiped what it had. They're now kept, filled in steadily and
   asked for again every six hours.
+- **Canadian prices reach Toronto screens.** They're read from the index's
+  Toronto price, including from products that have a separate Canadian record.
 
 ## v0.2.24
 

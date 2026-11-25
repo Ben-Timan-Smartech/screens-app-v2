@@ -2368,17 +2368,47 @@ _PRICE_FIELDS = {
     "eur":       ("priceEur",),
     "berlinEur": ("rrpBerlinEur",),
     "romeEur":   ("rrpRomeEur",),
-    # v0.2.24: Toronto. Named to match the index's priceXxx / rrpXxx pattern;
-    # a row without either simply shows no price on a Toronto screen.
+    # v0.2.24: Toronto. The index doesn't use these names itself: see
+    # _toronto_price. A row without one shows no price on a Toronto screen.
     "cad":       ("priceCad", "rrpCad"),
 }
+
+
+def _toronto_price(row: dict | None) -> float | None:
+    """v0.2.26: the Canadian till price on an index product: its automatic
+    (iVend) Toronto price, as the sales dashboard reads it. None when there's
+    none, or it isn't sold there any more. Always a number: the player can't
+    read a price sent as text, and would ignore the whole playlist."""
+    if not isinstance(row, dict) or row.get("dead") is True or row.get("hidden") is True:
+        return None
+    retired = row.get("retiredStores")
+    if isinstance(retired, list) and "toronto" in retired:
+        return None
+    store = (row.get("pricing") or {}).get("toronto") if isinstance(row.get("pricing"), dict) else None
+    val = store.get("auto") if isinstance(store, dict) else None
+    try:
+        n = float(val) if not isinstance(val, bool) else 0.0
+    except (TypeError, ValueError):
+        return None
+    return round(n, 2) if 0 < n < 1e7 else None
+
+
+def _canadian_sku(sku: str) -> str:
+    """Many products are a separate record in Canada: "SP0AH015" and
+    "SP0AH015 - EU" are "SP0AH015 CA" there."""
+    return re.sub(r"\s*-?\s+(EU|UK|US|CA)$", "", sku.strip(), flags=re.I) + " CA"
 
 
 def _extract_prices(row: dict) -> dict | None:
     if not isinstance(row, dict):
         return None
     out: dict = {}
+    cad = _toronto_price(row)
+    if cad is not None:
+        out["cad"] = cad
     for cur, fields in _PRICE_FIELDS.items():
+        if cur in out:
+            continue
         for f in fields:
             val = row.get(f)
             if val not in (None, "", 0):
@@ -2411,6 +2441,7 @@ _TMRW_VIDEOS_429_UNTIL = 0.0
 # failed call.
 _tmrw_details: dict[str, dict] = {"sku": {}, "brand": {}}   # persisted
 _TMRW_DETAIL_TTL = 6 * 3600.0
+_TMRW_DETAIL_V = 2                       # raise to have everything asked for again
 _TMRW_ERROR_RETRY = 1800.0
 _TMRW_PACE_SEC = 0.3
 _tmrw_wanted: dict[tuple, int] = {}      # ("sku" | "brand", key) -> priority
@@ -2492,7 +2523,25 @@ def _tmrw_fetch_sku(sku: str, key: str) -> dict:
     ddata = _tmrw_get(f"/description?sku={q}", key) or {}
     d["descLong"] = _desc_text(ddata.get("long")) or _desc_text(ddata.get("html"))
     d["descShort"] = _desc_text(ddata.get("short")) or _short_desc(d["descLong"])
+    if "cad" not in (d["prices"] or {}):
+        time.sleep(_TMRW_PACE_SEC)
+        cad = _tmrw_find_cad(sku, key)
+        if cad is not None:
+            d["prices"] = {**(d["prices"] or {}), "cad": cad}
     return d
+
+
+def _tmrw_find_cad(sku: str, key: str) -> float | None:
+    """The Canadian price of a product, on its own record or its Canadian one."""
+    ca = _canadian_sku(sku)
+    rows = _tmrw_get(f"/search?q={urllib.parse.quote(ca[:-3], safe='')}", key)
+    by_sku = {str(r.get("ivendSku") or "").strip().lower(): r for r in rows or [] if isinstance(r, dict)} \
+        if isinstance(rows, list) else {}
+    for want in (sku.strip().lower(), ca.lower()):
+        cad = _toronto_price(by_sku.get(want))
+        if cad is not None:
+            return cad
+    return None
 
 
 _TMRW_PRODUCT_KEEP = ("name", "productName", "ivendSku", "sku", "familyId") \
@@ -2501,8 +2550,15 @@ _TMRW_PRODUCT_KEEP = ("name", "productName", "ivendSku", "sku", "familyId") \
 
 def _tmrw_fetch_brand(brand: str, key: str) -> list:
     got = _tmrw_get(f"/products?brand={urllib.parse.quote(brand, safe='')}", key)
-    return [{k: p[k] for k in _TMRW_PRODUCT_KEEP if p.get(k) not in (None, "")}
-            for p in got or [] if isinstance(p, dict)] if isinstance(got, list) else []
+    out = []
+    for p in got if isinstance(got, list) else []:
+        if isinstance(p, dict):
+            row = {k: p[k] for k in _TMRW_PRODUCT_KEEP if p.get(k) not in (None, "")}
+            cad = _toronto_price(p)
+            if cad is not None:
+                row["priceCad"] = cad
+            out.append(row)
+    return out
 
 
 def _tmrw_due(now: float) -> list[tuple]:
@@ -2510,7 +2566,8 @@ def _tmrw_due(now: float) -> list[tuple]:
     out = []
     for k, prio in list(_tmrw_wanted.items()):
         e = _tmrw_details[k[0]].get(k[1]) or {}
-        if now - (e.get("at") or 0) >= _TMRW_DETAIL_TTL and now >= (e.get("tryAt") or 0):
+        old = now - (e.get("at") or 0) >= _TMRW_DETAIL_TTL or e.get("v") != _TMRW_DETAIL_V
+        if old and now >= (e.get("tryAt") or 0):
             # Never known comes before known but old.
             out.append((prio + (0 if e.get("at") is None else 10), k))
     out.sort(key=lambda t: t[0])
@@ -2544,9 +2601,9 @@ def _tmrw_fill() -> int:
         old = _tmrw_details[kind].get(k) or {}
         try:
             if kind == "sku":
-                _tmrw_details["sku"][k] = {**_tmrw_fetch_sku(k, key), "at": time.time()}
+                _tmrw_details["sku"][k] = {**_tmrw_fetch_sku(k, key), "at": time.time(), "v": _TMRW_DETAIL_V}
             else:
-                _tmrw_details["brand"][k] = {"rows": _tmrw_fetch_brand(k, key), "at": time.time()}
+                _tmrw_details["brand"][k] = {"rows": _tmrw_fetch_brand(k, key), "at": time.time(), "v": _TMRW_DETAIL_V}
             limited = 0
             done += 1
             since_build += 1
@@ -2721,7 +2778,7 @@ def _tmrw_build_videos_locked(rows: list) -> None:
         sku = (p.get("ivendSku") or p.get("sku") or "").strip() or None
         detail = _product_detail(sku) if sku else {
             "packshot": None, "descShort": None, "descLong": None, "prices": None}
-        prices = _extract_prices(p) or detail.get("prices")
+        prices = {**(detail.get("prices") or {}), **(_extract_prices(p) or {})} or None
         card = {
             "product": name,
             "prices": prices,
@@ -2814,10 +2871,12 @@ def _tmrw_build_videos_locked(rows: list) -> None:
             # back to the generated thumbnail / brand logo.
             "packshotUrl": (_product_detail(sku_val, 0)["packshot"] if sku_val else None),
             # v0.1.86: product-card fields — short/long description (tm:rw
-            # /description) + per-currency prices (row first, product fallback).
+            # /description) + per-currency prices (row first, product fallback,
+            # each currency by itself: a row never carries the Canadian one).
             "description": (_product_detail(sku_val)["descShort"] if sku_val else None),
             "descriptionLong": (_product_detail(sku_val)["descLong"] if sku_val else None),
-            "prices": (_extract_prices(r) or (_product_detail(sku_val)["prices"] if sku_val else None)),
+            "prices": ({**((_product_detail(sku_val)["prices"] if sku_val else None) or {}),
+                        **(_extract_prices(r) or {})} or None),
             # v0.2.8: for a family/brand video, the products it represents, so
             # the shopper card can cycle through them. None for a single-product
             # video (or when fewer than two resolve) — the card then keeps its
