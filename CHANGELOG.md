@@ -80,6 +80,9 @@ Rules:
 - **No stand-in logo on the product card.** A product photo a screen can't load
   is left off, and the brand logo no longer takes its place: at Holt it showed
   another company's logo.
+- **The content library refreshes from Drive every day again.** It counted the
+  day from the server's last restart, so on days with several updates it never
+  refreshed and new videos stayed "pending".
 
 ## v0.2.24
 
