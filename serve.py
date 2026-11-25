@@ -3066,6 +3066,72 @@ def _media_path(url: str | None) -> str:
         return ""
 
 
+# v0.2.26: whether each product photo can actually be loaded by a screen. A
+# photo on Google Drive that isn't shared publicly answers with a sign-in page,
+# and the player then shows the brand logo in its place, which may not even be
+# the right company's (FORM at Holt, 25/11/2026). Checked in the background,
+# never on a poll; a photo not checked yet is sent as before.
+_PHOTO_OK_RECHECK = 6 * 3600.0
+_PHOTO_BAD_RECHECK = 1800.0
+_photo_checks: dict[str, dict] = {}      # url -> {ok, at}
+_photo_queue: set[str] = set()
+_photo_check_lock = threading.Lock()
+
+
+def _photo_usable(url: str | None) -> bool | None:
+    """True / False once checked; None while it isn't known (queued)."""
+    if not url:
+        return None
+    c = _photo_checks.get(url)
+    if c is None or time.time() - c["at"] >= (_PHOTO_OK_RECHECK if c["ok"] else _PHOTO_BAD_RECHECK):
+        _photo_queue.add(url)
+    return None if c is None else c["ok"]
+
+
+def _check_photo(url: str) -> bool:
+    req = urllib.request.Request(url, headers={"User-Agent": "okhttp/4.12.0", "Range": "bytes=0-1023"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status in (200, 206) and (r.headers.get("Content-Type") or "").lower().startswith("image/")
+    except urllib.error.HTTPError:
+        return False
+
+
+def _check_photos() -> int:
+    """Check what's queued. Returns how many answers changed."""
+    changed = 0
+    while _photo_queue:
+        url = _photo_queue.pop()
+        try:
+            ok = _check_photo(url)
+        except Exception as e:
+            # Can't tell (no network?): leave it as it was, look again later.
+            print(f"[photos] couldn't check one: {e}", file=sys.stderr)
+            old = _photo_checks.get(url)
+            _photo_checks[url] = {"ok": old["ok"] if old else True, "at": time.time() - _PHOTO_OK_RECHECK + 600}
+            continue
+        if (_photo_checks.get(url) or {}).get("ok") != ok:
+            changed += 1
+        _photo_checks[url] = {"ok": ok, "at": time.time()}
+    if changed:
+        _ENRICHED_CARD_CACHE["etag"] = None          # rebuild the cards
+    return changed
+
+
+def _check_photos_soon() -> None:
+    if not _photo_queue or not _photo_check_lock.acquire(blocking=False):
+        return
+
+    def _worker():
+        try:
+            _check_photos()
+        except Exception as e:
+            print(f"[photos] check crashed: {e}", file=sys.stderr)
+        finally:
+            _photo_check_lock.release()
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def _product_card_for(item: dict) -> dict | None:
     data, etag = _library_with_logos()
     if _ENRICHED_CARD_CACHE["etag"] != etag:
@@ -3086,18 +3152,27 @@ def _product_card_for(item: dict) -> dict | None:
                 card["descriptionLong"] = v["descriptionLong"]
             if v.get("prices"):
                 card["prices"] = v["prices"]
-            if v.get("packshotUrl"):
+            # v0.2.26: a photo a screen can't load isn't sent, and nor is the
+            # brand logo for a video that has a product photo at all: the
+            # player shows the logo only in place of a photo that failed.
+            if v.get("packshotUrl") and _photo_usable(v["packshotUrl"]) is not False:
                 card["packshotUrl"] = v["packshotUrl"]
             if v.get("products"):
-                card["products"] = v["products"]      # v0.2.8: multi-product cycle
+                card["products"] = [                  # v0.2.8: multi-product cycle
+                    p if not p.get("packshotUrl") or _photo_usable(p["packshotUrl"]) is not False
+                    else {k: x for k, x in p.items() if k != "packshotUrl"}
+                    for p in v["products"]
+                ]
+            has_photo = bool(v.get("packshotUrl")) or any(p.get("packshotUrl") for p in v.get("products") or [])
             blogo = logos.get((v.get("brand") or "").lower())
-            if blogo:
+            if blogo and not has_photo:
                 card["brandLogoUrl"] = blogo
             path = _media_path(v.get("mediaUrl"))
             if path:
                 by_path[path] = card
             by_id_title[(vid, v.get("title"))] = card
         _ENRICHED_CARD_CACHE.update({"etag": etag, "byPath": by_path, "byIdTitle": by_id_title})
+        _check_photos_soon()
     card = _ENRICHED_CARD_CACHE["byPath"].get(_media_path(item.get("url")))
     if card is None:
         # The file was replaced since the push. The id alone isn't enough to say
