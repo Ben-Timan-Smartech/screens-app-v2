@@ -303,6 +303,10 @@ def _release_info() -> dict:
 # raises the bar when a later player handles more of the install.
 AUTO_UPDATE_GATE = os.environ.get("SCREENS_AUTO_UPDATE_GATE", "1") != "0"
 AUTO_UPDATE_MIN_APP = os.environ.get("SCREENS_AUTO_UPDATE_MIN_APP", "0.2.22")
+# The newest version screens may install by themselves. A newer release is on
+# the download page and behind every Update / Check for updates button, but no
+# screen takes it overnight until this is raised to it.
+AUTO_UPDATE_MAX_APP = os.environ.get("SCREENS_AUTO_UPDATE_MAX_APP", "0.2.23")
 
 # Players before v0.2.22 ask for the release anonymously, so the only way to
 # let one through for a CMS Update press is by address: draining an "update"
@@ -310,6 +314,18 @@ AUTO_UPDATE_MIN_APP = os.environ.get("SCREENS_AUTO_UPDATE_MIN_APP", "0.2.22")
 MANUAL_UPDATE_WINDOW_SEC = 15 * 60
 _manual_update_ips: dict[str, float] = {}   # client IP -> window end (epoch s)
 _manual_update_lock = threading.Lock()
+
+# Those players also send exactly the same request for "Check for updates" and
+# for their overnight check. Two requests a few seconds apart are a person
+# pressing twice, as long as there's only one such player on that address: the
+# overnight check is every two hours, but a store's screens share one address.
+CHECK_AGAIN_MIN_SEC = 2          # the network test fires three at once
+CHECK_AGAIN_MAX_SEC = 3 * 60
+PLAYER_SEEN_SEC = 20 * 60        # longer than the slowest poll (5 min)
+_last_checks: dict[str, float] = {}              # client IP -> last anonymous check
+_players_by_ip: dict[str, dict[str, float]] = {}  # client IP -> device id -> last seen
+_players_pruned_at = 0.0
+_server_started_at = time.time()
 
 
 def _version_tuple(v) -> tuple:
@@ -329,31 +345,120 @@ def _open_manual_update_window(ip: str) -> None:
         _manual_update_ips[ip] = now + MANUAL_UPDATE_WINDOW_SEC
 
 
-def _release_hold_reason(params: dict, user_agent: str, client_ip: str) -> str | None:
+def _note_player_ip(ip: str, device_id: str) -> None:
+    """Remember which screens poll from an address (see _last_checks)."""
+    global _players_pruned_at
+    if not ip or not device_id:
+        return
+    now = time.time()
+    with _manual_update_lock:
+        if now - _players_pruned_at > 60:
+            _players_pruned_at = now
+            for k in list(_players_by_ip):
+                seen = {d: t for d, t in _players_by_ip[k].items() if now - t <= PLAYER_SEEN_SEC}
+                if seen:
+                    _players_by_ip[k] = seen
+                else:
+                    del _players_by_ip[k]
+            for k in [k for k, t in _last_checks.items() if now - t > CHECK_AGAIN_MAX_SEC]:
+                del _last_checks[k]
+        _players_by_ip.setdefault(ip, {})[device_id] = now
+
+
+def _note_player_start(ip: str) -> None:
+    """A player re-registers each time it starts, and may check for an update
+    ten seconds later. Two starts in a row aren't two presses."""
+    with _manual_update_lock:
+        _last_checks.pop(ip, None)
+
+
+def _asks_anonymously(device_id: str) -> bool:
+    """Is this a player older than v0.2.22? ("0.2.21-legacy" counts by its
+    numbers; a web player never asks for a release.)"""
+    meta = _screens.get(device_id) or {}
+    if meta.get("appFlavor") == "web":
+        return False
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", str(meta.get("appVersion") or ""))
+    return m is None or tuple(int(g) for g in m.groups()) < (0, 2, 22)
+
+
+def _is_second_press(ip: str) -> bool:
+    """Record an anonymous release check; True if it's a person pressing
+    "Check for updates" again."""
+    now = time.time()
+    with _manual_update_lock:
+        before = _last_checks.get(ip)
+        if before is not None and now - before < CHECK_AGAIN_MIN_SEC:
+            return False
+        _last_checks[ip] = now
+        seen = [d for d, t in _players_by_ip.get(ip, {}).items() if now - t <= PLAYER_SEEN_SEC]
+    return (before is not None and now - before <= CHECK_AGAIN_MAX_SEC
+            and _second_press_works(seen, now))
+
+
+def _second_press_works(seen: list, now: float) -> bool:
+    # Just after a restart we don't know yet who shares the address.
+    return (now - _server_started_at > PLAYER_SEEN_SEC
+            and sum(1 for d in seen if _asks_anonymously(d)) <= 1)
+
+
+def _release_hold_reason(params: dict, user_agent: str, client_ip: str, version: str = "") -> str | None:
     """Why this caller shouldn't be offered the latest release right now, or
     None to offer it. Browsers (the login page's download button) always get
     it; so does any manual update."""
-    if not AUTO_UPDATE_GATE:
-        return None
     def p(name: str, default: str = "") -> str:
         return (params.get(name) or [default])[0]
+    unapproved = _version_tuple(version) > _version_tuple(AUTO_UPDATE_MAX_APP)
+    not_yet = f"v{version} isn't approved for automatic updates yet"
     if p("deviceId"):
         # v0.2.22+ player: says who it is, how the check started and whether
         # its auto-confirm service is on.
         if p("trigger", "auto") == "manual":
             return None
-        if _version_tuple(p("appVersion", "0")) < _version_tuple(AUTO_UPDATE_MIN_APP):
-            return f"automatic updates need player v{AUTO_UPDATE_MIN_APP} or later"
-        if p("autoConfirm") != "1":
-            return "the auto-update accessibility setting is off on this screen"
-        return None
+        if AUTO_UPDATE_GATE:
+            if _version_tuple(p("appVersion", "0")) < _version_tuple(AUTO_UPDATE_MIN_APP):
+                return f"automatic updates need player v{AUTO_UPDATE_MIN_APP} or later"
+            if p("autoConfirm") != "1":
+                return "the auto-update accessibility setting is off on this screen"
+        return not_yet if unapproved else None
     if user_agent.lower().startswith("okhttp"):
         # A player older than v0.2.22: it can't finish an update by itself.
+        if not AUTO_UPDATE_GATE and not unapproved:
+            return None
         with _manual_update_lock:
             if _manual_update_ips.get(client_ip, 0) > time.time():
                 return None
-        return f"automatic updates need player v{AUTO_UPDATE_MIN_APP} or later"
+        if _is_second_press(client_ip):
+            return None
+        return (f"automatic updates need player v{AUTO_UPDATE_MIN_APP} or later"
+                if AUTO_UPDATE_GATE else not_yet)
     return None
+
+
+def _held_back_release(info: dict, reason: str, identified: bool, client_ip: str) -> dict:
+    """What a held-back player is told."""
+    held = {
+        "heldBack":          True,
+        "heldBackReason":    reason,
+        "versionCode":       0,
+        "latestVersionName": info.get("versionName"),
+    }
+    if identified:
+        return held
+    # A player before v0.2.22 doesn't know about heldBack, and reads version 0
+    # as "up to date" even when someone pressed the button. Given a newer
+    # version with no file it does nothing in the background, and on a press
+    # shows "Release <versionName> has no APK URL". So say what to do there.
+    now = time.time()
+    with _manual_update_lock:
+        seen = [d for d, t in _players_by_ip.get(client_ip, {}).items() if now - t <= PLAYER_SEEN_SEC]
+    held["versionCode"] = info.get("versionCode") or 0
+    held["modernUrl"] = held["legacyUrl"] = None
+    held["versionName"] = f"{info.get('versionName')} is available. " + (
+        "Press Check for updates again now to install it. The first press"
+        if _second_press_works(seen, now) else
+        "Install it from screens.smartechworld.com/download or press Update on this screen in the CMS. This button")
+    return held
 
 # MEDIA_DIR / SPLASH_DIR are overridable via environment so the same code
 # runs on a dev laptop (default Windows G:\ path) and inside a container
@@ -5259,18 +5364,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             info = _release_info() or {"error": "release_lookup_failed"}
             # Strip the internal-only keys (asset IDs) before responding.
             public_info = {k: v for k, v in info.items() if not k.startswith("_")}
-            # v0.2.22: automatic-update gate. A held-back player sees
-            # versionCode 0, which every player version reads as "up to date".
-            hold = _release_hold_reason(params, self.headers.get("User-Agent") or "", self._client_ip())
+            # v0.2.22: automatic-update gate.
+            # Players v0.2.22+ read `heldBack`; older ones get a newer version
+            # with no file, which they ignore unless someone pressed the button.
+            hold = _release_hold_reason(params, self.headers.get("User-Agent") or "",
+                                        self._client_ip(), public_info.get("versionName") or "")
             if hold and "versionCode" in public_info:
                 who = (params.get("deviceId") or ["a pre-0.2.22 player"])[0]
                 print(f"[release] held back v{public_info.get('versionName')} from {who}: {hold}", file=sys.stderr)
-                public_info = {
-                    "heldBack":          True,
-                    "heldBackReason":    hold,
-                    "versionCode":       0,
-                    "latestVersionName": public_info.get("versionName"),
-                }
+                public_info = _held_back_release(public_info, hold, bool(params.get("deviceId")), self._client_ip())
             self._send_json(public_info)
             return
 
@@ -5310,6 +5412,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # synthetic "default" state (used by the CMS to show "current
             # global push" and by tablets that haven't picked their id yet).
             screen_id = (params.get("screenId") or [None])[0]
+            if screen_id:
+                _note_player_ip(self._client_ip(), screen_id)
             with _STATE_LOCK:
                 if screen_id:
                     s = _ensure_screen_state(screen_id)
@@ -6175,6 +6279,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         if path == "/api/screens/register":
             device_id = body.get("deviceId") or "unknown"
+            _note_player_start(self._client_ip())
             with _STATE_LOCK:
                 prev = _screens.get(device_id, {})
                 # v0.1.81: if an operator has renamed this screen from the
