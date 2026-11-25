@@ -51,6 +51,9 @@ Rules:
   doesn't stop it and the loop has no pause. A screen that can't do this streams
   it as before.
 - **The splash is in step too**, on Samsung screens in a sync group.
+- **A Samsung screen replaces a stored video it can't read.** One came back from
+  a night without power unable to read its copy, and streamed for the day
+  instead, out of step with its group.
 - **Samsung screens restart a splash that stops.** The web player already did
   this for playlist videos. Its readout now shows what the video is doing.
 - **Pricing and description shows the product.** It showed the video's file title.
