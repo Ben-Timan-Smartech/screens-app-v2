@@ -53,6 +53,9 @@ Rules:
 - **The splash is in step too**, on Samsung screens in a sync group.
 - **Samsung screens restart a splash that stops.** The web player already did
   this for playlist videos. Its readout now shows what the video is doing.
+- **Pricing and description shows the product.** It showed the video's file title.
+  It also takes its price from the video that's playing: after a file was added
+  to a brand, a screen could show another product's price.
 - **Toronto screens get the tm:rw splash.** The server's saved list of city
   splashes was older than Toronto and hid it. "(no splash)" for a city now also
   survives a restart.
