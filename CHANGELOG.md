@@ -68,6 +68,10 @@ Rules:
 - **Automatic updates wait for approval.** A new release is on the download
   page and behind the buttons straight away, but no screen installs it by
   itself until it's approved.
+- **Product descriptions reach the card.** Most single-product videos never got
+  one: the product index limits how fast it can be asked, and each refresh
+  started again and wiped what it had. They're now kept, filled in steadily and
+  asked for again every six hours.
 
 ## v0.2.24
 
