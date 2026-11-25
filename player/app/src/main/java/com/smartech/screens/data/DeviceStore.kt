@@ -1,18 +1,35 @@
 package com.smartech.screens.data
 
 import android.content.Context
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import java.util.UUID
 
-private val Context.dataStore by preferencesDataStore(name = "screens_device")
+/**
+ * v0.2.25: a settings file that can't be parsed is replaced with an empty one,
+ * so the box opens on setup. Without this every read throws, the first of them
+ * while the first screen is drawn: the app stops on every open, and can't send
+ * the crash report because the server address is in the same file. The likely
+ * cause of the Holt boxes that did this after power cuts (25/11/2026); clearing
+ * the app's storage by hand fixed them.
+ */
+private val Context.dataStore by preferencesDataStore(
+    name = "screens_device",
+    corruptionHandler = ReplaceFileCorruptionHandler { e ->
+        LogBuffer.e("DeviceStore", "Saved settings were damaged and have been reset: ${e.message}")
+        emptyPreferences()
+    },
+)
 
 /**
  * v0.2.16: web page mode — one live URL shown full screen instead of the

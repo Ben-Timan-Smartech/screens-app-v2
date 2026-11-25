@@ -68,6 +68,8 @@ Rules:
 - **Automatic updates wait for approval.** A new release is on the download
   page and behind the buttons straight away, but no screen installs it by
   itself until it's approved.
+- **Damaged settings no longer stop the app opening.** A box whose saved settings
+  can't be read goes to the setup screen instead of closing every time.
 
 ## v0.2.24
 
