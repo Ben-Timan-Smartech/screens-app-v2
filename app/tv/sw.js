@@ -16,7 +16,7 @@
 
 var MEDIA_CACHE = 'screens-media-v1';
 var SHELL_CACHE = 'screens-shell-v1';
-var SHELL_FILES = ['./', './index.html', './player.js'];
+var SHELL_FILES = ['./', './index.html', './mp4.js', './player.js'];
 
 self.addEventListener('install', function (event) {
   self.skipWaiting();

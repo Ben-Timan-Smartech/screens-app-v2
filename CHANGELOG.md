@@ -46,9 +46,11 @@ Rules:
   start together each time round and are left alone. A small faint symbol in
   the corner shows while a screen is lining up. Sync groups has Later / Earlier buttons to line a screen up
   by eye.
-- **Samsung screens keep their content.** Videos are stored on the screen once
-  downloaded and play from there, so a dropped network doesn't stop them. A
-  screen whose browser won't play stored videos streams them instead.
+- **Samsung screens keep their content.** A video is stored on the screen once
+  downloaded and plays from there as one unbroken stream, so a dropped network
+  doesn't stop it and the loop has no pause. A screen that can't do this streams
+  it as before.
+- **The splash is in step too**, on Samsung screens in a sync group.
 - **Samsung screens restart a splash that stops.** The web player already did
   this for playlist videos. Its readout now shows what the video is doing.
 - **Toronto screens get the tm:rw splash.** The server's saved list of city
