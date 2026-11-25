@@ -77,6 +77,9 @@ Rules:
 - **Videos over 32 MB arrive whole on slow Wi-Fi.** A download that was cut off
   could be taken for the finished file, which then wouldn't play and started
   again from nothing. It now carries on where it stopped.
+- **No stand-in logo on the product card.** A product photo a screen can't load
+  is left off, and the brand logo no longer takes its place: at Holt it showed
+  another company's logo.
 
 ## v0.2.24
 
