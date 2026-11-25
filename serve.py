@@ -559,6 +559,10 @@ CUSTOM_STORES_JSON = Path(os.environ.get(
     "SCREENS_CUSTOM_STORES_PATH",
     _state_path_default("custom_stores.json"),
 ))
+# v0.2.26: see "Wi-Fi saving" below.
+STORE_SYNC_JSON = Path(os.environ.get("SCREENS_STORE_SYNC_PATH", _state_path_default("store_sync.json")))
+MEDIA_VERSIONS_JSON = Path(os.environ.get("SCREENS_MEDIA_VERSIONS_PATH", _state_path_default("media_versions.json")))
+TRAFFIC_JSON = Path(os.environ.get("SCREENS_TRAFFIC_PATH", _state_path_default("traffic.json")))
 # v0.2.15: what a location is. "retail" (the default, and what every store
 # saved before this had) or "office" — offices have no in-store concept.
 _STORE_KINDS = ("retail", "office")
@@ -621,6 +625,12 @@ _per_screen: dict[str, dict] = {}   # deviceId -> {revision, items, pushedAt, mi
 _screens: dict[str, dict] = {}      # deviceId -> registry (last heartbeat, device info, etc.)
 # v0.1.38: keyed by slug id. {id, name, address, city}
 _custom_stores: dict[str, dict] = {}
+_store_sync: dict[str, dict] = {}        # storeId -> Wi-Fi saving policy
+_media_versions: dict[str, dict] = {}    # drive id -> {hash, bytes, checkedAt}
+_traffic: dict[str, dict[str, dict]] = {}    # deviceId -> day -> bytes used
+_traffic_dirty = False
+_traffic_flushed_at = 0.0
+_TRAFFIC_FLUSH_SEC = 600.0
 # v0.1.96: uploaded guided experiences (the vendored interactive/*.html aren't
 # in here — see _list_experiences). {id, name, brand, filename, sizeBytes,
 # uploadedAt, uploadedBy}
@@ -1223,6 +1233,7 @@ def _flush_state_loop() -> None:
     releases the lock and writes. Keeping the write off the lock is what stops a
     stalled GCS flush from taking every request thread with it (v0.2.12)."""
     global _screens_dirty, _screens_flushed_at, _per_screen_dirty
+    global _traffic_dirty, _traffic_flushed_at
     while True:
         time.sleep(_STATE_FLUSH_TICK_SEC)
         try:
@@ -1238,12 +1249,19 @@ def _flush_state_loop() -> None:
                     screens_text = json.dumps(_screens, indent=2)
                     _screens_dirty = False
                     _screens_flushed_at = time.monotonic()
+                traffic_text = None
+                if _traffic_dirty and (time.monotonic() - _traffic_flushed_at) >= _TRAFFIC_FLUSH_SEC:
+                    traffic_text = json.dumps(_traffic)
+                    _traffic_dirty = False
+                    _traffic_flushed_at = time.monotonic()
             # Disk I/O with the lock released. Thread-id-tagged temp files (see
             # _atomic_write_text) keep this from racing a rare synchronous save.
             if per_screen_text is not None:
                 _atomic_write_text(PER_SCREEN_JSON, per_screen_text)
             if screens_text is not None:
                 _atomic_write_text(SCREENS_JSON, screens_text)
+            if traffic_text is not None:
+                _atomic_write_text(TRAFFIC_JSON, traffic_text)
         except Exception as e:
             print(f"[state] flush loop error: {e}", file=sys.stderr)
 
@@ -3032,6 +3050,9 @@ def _load_state_from_disk() -> None:
             (CUSTOM_STORES_JSON, "_custom_stores"),
             (CITY_BRAND_JSON, "_city_brand"),
             (SECRETS_JSON, "_secrets"),
+            (STORE_SYNC_JSON, "_store_sync"),
+            (MEDIA_VERSIONS_JSON, "_media_versions"),
+            (TRAFFIC_JSON, "_traffic"),
         ]:
             if not path.is_file():
                 continue
@@ -3057,6 +3078,8 @@ def _load_state_from_disk() -> None:
                 elif target_name == "_secrets":
                     _secrets.clear()
                     _secrets.update(raw)
+                elif target_name in ("_store_sync", "_media_versions", "_traffic"):
+                    globals()[target_name].update(raw)
                 else:
                     _sync_groups = raw
                 print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
@@ -3166,22 +3189,22 @@ def _poll_interval_sec(poll_mode: str | None) -> int:
                                  POLL_INTERVAL_SEC[DEFAULT_POLL_MODE])
 
 
-def _live_threshold_sec(poll_mode: str | None) -> float:
+def _live_threshold_sec(poll_mode: str | None, heartbeat_sec: int = 10) -> float:
     """Hb-age cutoff under which a screen counts as actively connected
     right now. Adds a 5 s floor so FAST-mode jitter (10 s ✕ 1.25 = 12.5)
     leaves room for the actual round-trip."""
-    return max(15.0, _poll_interval_sec(poll_mode) * LIVE_MULTIPLIER)
+    return max(15.0, _poll_interval_sec(poll_mode) * LIVE_MULTIPLIER, heartbeat_sec * LIVE_MULTIPLIER)
 
 
-def _online_threshold_sec(poll_mode: str | None) -> float:
+def _online_threshold_sec(poll_mode: str | None, heartbeat_sec: int = 10) -> float:
     """Hb-age cutoff under which a screen is still considered online.
     Tolerates one fully-missed poll cycle so a single dropped request
     doesn't briefly mark the fleet red on the dashboard."""
-    return max(30.0, _poll_interval_sec(poll_mode) * ONLINE_MULTIPLIER)
+    return max(30.0, _poll_interval_sec(poll_mode) * ONLINE_MULTIPLIER, heartbeat_sec * ONLINE_MULTIPLIER)
 
 
 def _presence(last_heartbeat: float | None, poll_mode: str | None,
-              now: float | None = None) -> tuple[bool, bool]:
+              now: float | None = None, device_id: str | None = None) -> tuple[bool, bool]:
     """Return (live, online) for one screen given its last heartbeat
     timestamp and its pollMode. Both False when last_heartbeat is
     falsy — a screen with no heartbeat at all is offline by definition,
@@ -3189,8 +3212,240 @@ def _presence(last_heartbeat: float | None, poll_mode: str | None,
     if not last_heartbeat:
         return (False, False)
     age = (now if now is not None else time.time()) - last_heartbeat
-    return (age < _live_threshold_sec(poll_mode),
-            age < _online_threshold_sec(poll_mode))
+    hb = _heartbeat_sec(device_id)
+    return (age < _live_threshold_sec(poll_mode, hb),
+            age < _online_threshold_sec(poll_mode, hb))
+
+
+# ── Wi-Fi saving (low-traffic stores) ────────────────────────────────
+# v0.2.26: a store whose Wi-Fi can't take much (Holt: ~34 single-antenna
+# 2.4 GHz boxes on one access point, 25/11/2026) gets a policy here. Its
+# screens spread their downloads out, check in less often, refresh the content
+# library rarely and, when asked, only download overnight. A store without a
+# policy behaves exactly as before: nothing is added to its /api/state.
+_STORE_SYNC_DEFAULTS = {
+    "jitterMin":    10,       # each screen waits a random 0..this before downloading
+    "heartbeatSec": 60,
+    "libraryMin":   720,      # content library refresh (staff opening the menu also refreshes it)
+    "overnight":    False,    # only start downloads inside from..to, store time
+    "from":         "22:00",
+    "to":           "09:00",
+    "nowUntil":     0,        # "Download now": ignore `overnight` until this time (epoch s)
+}
+_CITY_TZ = {
+    "TOR": "America/Toronto", "NYC": "America/New_York", "LDN": "Europe/London",
+    "BER": "Europe/Berlin", "ROM": "Europe/Rome",
+}
+_LOW_TRAFFIC_MIN_APP = (0, 2, 26)
+
+
+def _store_policy(store_id: str | None) -> dict | None:
+    raw = _store_sync.get(store_id or "")
+    return {**_STORE_SYNC_DEFAULTS, **raw} if isinstance(raw, dict) else None
+
+
+def _clean_store_policy(body: dict, current: dict | None) -> tuple[dict | None, str | None]:
+    """(policy, error). Only what's given changes."""
+    out = {**_STORE_SYNC_DEFAULTS, **(current or {})}
+    for key, lo, hi in (("jitterMin", 0, 60), ("heartbeatSec", 10, 300), ("libraryMin", 5, 10080)):
+        if key in body:
+            v = body[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+                return None, f"{key} must be between {lo} and {hi}"
+            out[key] = int(v)
+    if "overnight" in body:
+        out["overnight"] = bool(body["overnight"])
+    for key in ("from", "to"):
+        if key in body:
+            v = str(body[key])
+            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
+                return None, f"{key} must be a time like 22:00"
+            out[key] = v
+    if out["from"] == out["to"]:
+        return None, "from and to can't be the same"
+    if "downloadNowHours" in body:
+        v = body["downloadNowHours"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 24:
+            return None, "downloadNowHours must be between 0 and 24"
+        out["nowUntil"] = int(time.time() + v * 3600) if v else 0
+    return out, None
+
+
+def _download_window_open(policy: dict, city: str | None, now: float) -> bool:
+    """Judged on this clock, in the store's zone: some boxes boot in 2032."""
+    if not policy.get("overnight") or now < (policy.get("nowUntil") or 0):
+        return True
+    try:
+        import datetime
+        import zoneinfo
+        local = datetime.datetime.fromtimestamp(now, zoneinfo.ZoneInfo(_CITY_TZ[city or ""]))
+    except Exception:
+        return True              # unknown zone: never hold a store's content back
+    mins = local.hour * 60 + local.minute
+    start, end = (int(t[:2]) * 60 + int(t[3:]) for t in (policy["from"], policy["to"]))
+    return start <= mins < end if start < end else (mins >= start or mins < end)
+
+
+def _sync_block(location: dict | None, now: float) -> dict | None:
+    """What a player needs from its store's policy (the `sync` in /api/state)."""
+    policy = _store_policy((location or {}).get("storeId"))
+    if policy is None:
+        return None
+    return {
+        "jitterSec":    policy["jitterMin"] * 60,
+        "hold":         not _download_window_open(policy, (location or {}).get("city"), now),
+        "heartbeatSec": policy["heartbeatSec"],
+        "libraryMin":   policy["libraryMin"],
+    }
+
+
+def _heartbeat_sec(device_id: str | None) -> int:
+    """How often this screen checks in. Players before v0.2.26 ignore the policy."""
+    meta = _screens.get(device_id or "") or {}
+    policy = _store_policy((meta.get("location") or {}).get("storeId"))
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", str(meta.get("appVersion") or ""))
+    if policy is None or m is None or tuple(int(g) for g in m.groups()) < _LOW_TRAFFIC_MIN_APP:
+        return 10
+    return policy["heartbeatSec"]
+
+
+# What each file on a low-traffic store's playlists is right now, so a screen
+# can tell a replaced file from one it already has. Asked of Drive in the
+# background (never on a poll) and again every hour.
+_MEDIA_VERSION_RECHECK_SEC = 3600
+
+
+def _item_version(url: str | None) -> dict:
+    """{hash, bytes} for a playlist item's file; {} while it isn't known."""
+    path = _media_path(url)
+    if path.startswith("/media/") and "/" not in path[len("/media/"):]:
+        v = _media_versions.get(path[len("/media/"):]) or {}
+        return {"hash": v["hash"], "bytes": v["bytes"]} if v.get("hash") and v.get("bytes") else {}
+    if path.startswith("/uploaded/") and not path.startswith("/uploaded/splashes/"):
+        # An upload's address carries its upload time and is never reused.
+        import hashlib
+        return {"hash": "u" + hashlib.sha1(path.encode("utf-8")).hexdigest()[:24]}
+    return {}
+
+
+def _policy_screens() -> list[str]:
+    """Caller holds _STATE_LOCK."""
+    return [d for d, m in _screens.items()
+            if _store_policy((m.get("location") or {}).get("storeId")) is not None]
+
+
+def _check_media_versions(now: float | None = None) -> int:
+    """One pass. Returns how many files turned out to have been replaced."""
+    if drive_client is None or not drive_client.is_configured():
+        return 0
+    now = now if now is not None else time.time()
+    with _STATE_LOCK:
+        wanted: dict[str, None] = {}
+        for d in _policy_screens():
+            for it in (_per_screen.get(d) or {}).get("items") or []:
+                path = _media_path(it.get("url") if isinstance(it, dict) else None)
+                fid = path[len("/media/"):] if path.startswith("/media/") else ""
+                if fid and "/" not in fid and drive_client.looks_like_drive_id(fid):
+                    wanted[fid] = None
+        due = [f for f in wanted
+               if now - ((_media_versions.get(f) or {}).get("checkedAt") or 0) >= _MEDIA_VERSION_RECHECK_SEC]
+    changed, dirty = 0, False
+    for fid in due[:60]:
+        old = _media_versions.get(fid) or {}
+        try:
+            md5, size = drive_client.get_content_version(fid)
+        except Exception as e:
+            # Looked at again in five minutes; what's known stays.
+            print(f"[media-version] {fid}: {e}", file=sys.stderr)
+            _media_versions[fid] = {**old, "checkedAt": now - _MEDIA_VERSION_RECHECK_SEC + 300}
+            continue
+        new = {"hash": f"d{md5}" if md5 and size else old.get("hash"),
+               "bytes": size if md5 and size else old.get("bytes"), "checkedAt": now}
+        _media_versions[fid] = new
+        if (new["hash"], new["bytes"]) != (old.get("hash"), old.get("bytes")):
+            dirty = True
+        if old.get("hash") and new["hash"] != old["hash"]:
+            # The file was replaced. Screens only look at a playlist again
+            # when its revision moves.
+            changed += 1
+            with _STATE_LOCK:
+                for d in _policy_screens():
+                    st = _per_screen.get(d) or {}
+                    if any(_media_path(i.get("url")) == f"/media/{fid}"
+                           for i in st.get("items") or [] if isinstance(i, dict)):
+                        st["revision"] = int(st.get("revision") or 0) + 1
+                _save_per_screen_soon()
+            print(f"[media-version] {fid} was replaced", file=sys.stderr)
+    if dirty:
+        _atomic_write_json(MEDIA_VERSIONS_JSON, dict(_media_versions))
+    return changed
+
+
+def _media_version_loop() -> None:
+    while True:
+        time.sleep(30)
+        try:
+            _check_media_versions()
+        except Exception as e:
+            print(f"[media-version] loop error: {e}", file=sys.stderr)
+
+
+# Bytes each screen says it used, per day. Kept apart from _screens, which is
+# sent whole to the CMS, and written at most every ten minutes (see
+# _save_screens_soon for why a write per heartbeat isn't an option).
+_TRAFFIC_KINDS = ("media", "splash", "library", "images", "app", "api")
+_TRAFFIC_KEEP_DAYS = 30
+
+
+def _clean_traffic_day(raw) -> tuple[str, dict] | None:
+    if not isinstance(raw, dict) or not re.fullmatch(r"20\d\d-\d\d-\d\d", str(raw.get("day") or "")):
+        return None
+
+    def num(v) -> int:
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < 1e13 else 0
+    rx = raw.get("rx") if isinstance(raw.get("rx"), dict) else {}
+    files = raw.get("files") if isinstance(raw.get("files"), dict) else {}
+    return raw["day"], {
+        "rx": {k: num(rx.get(k)) for k in _TRAFFIC_KINDS},
+        "tx": num(raw.get("tx")),
+        "files": {k: num(files.get(k)) for k in ("downloaded", "fromDisk", "failed")},
+    }
+
+
+def _record_traffic(device_id: str, raw) -> None:
+    """Caller holds _STATE_LOCK."""
+    global _traffic_dirty
+    if not isinstance(raw, dict):
+        return
+    days = _traffic.get(device_id) or {}
+    touched = False
+    for part in (raw.get("prev"), raw):
+        got = _clean_traffic_day(part)
+        if got and days.get(got[0]) != got[1]:
+            days[got[0]] = got[1]
+            touched = True
+    if touched:
+        for old in sorted(days)[:-_TRAFFIC_KEEP_DAYS]:
+            del days[old]
+        _traffic[device_id] = days
+        _traffic_dirty = True
+
+
+def _traffic_report(store_id: str | None, day_count: int) -> dict:
+    with _STATE_LOCK:
+        rows = []
+        for d, days in _traffic.items():
+            meta = _screens.get(d) or {}
+            loc = meta.get("location") or {}
+            if store_id and loc.get("storeId") != store_id:
+                continue
+            rows.append({
+                "deviceId": d, "name": meta.get("name") or d, "screenCode": loc.get("screenCode"),
+                "storeId": loc.get("storeId"), "appVersion": meta.get("appVersion"),
+                "days": {k: days[k] for k in sorted(days)[-day_count:]},
+            })
+    rows.sort(key=lambda r: str(r["screenCode"] or r["name"]))
+    return {"screens": rows}
 
 
 # ── Platform metrics (Claude Projects Dashboard) ─────────────────────
@@ -3229,7 +3484,7 @@ def _metrics_payload() -> dict:
                 st = _per_screen.get(dev, {})
                 last = meta.get("lastHeartbeat") or 0
                 pm = st.get("pollMode") or DEFAULT_POLL_MODE
-                _, online_flag = _presence(last, pm, now)
+                _, online_flag = _presence(last, pm, now, dev)
                 if online_flag:
                     online += 1
                 sid = ((meta.get("location") or {}).get("storeId") or "").strip()
@@ -3351,7 +3606,7 @@ def _offline_monitor_loop() -> None:
                 for device_id, s in _screens.items():
                     last = s.get("lastHeartbeat") or 0
                     pm = (_per_screen.get(device_id) or {}).get("pollMode", DEFAULT_POLL_MODE)
-                    _, online = _presence(last, pm, now)
+                    _, online = _presence(last, pm, now, device_id)
                     if online:
                         _ever_online.add(device_id)
                         if device_id in _alerted_offline:
@@ -3695,7 +3950,7 @@ def _group_start_delay(group_id: str, now: float) -> float:
         if st.get("syncGroup") != group_id:
             continue
         meta = _screens.get(d) or {}
-        _, online = _presence(meta.get("lastHeartbeat") or 0, st.get("pollMode"), now)
+        _, online = _presence(meta.get("lastHeartbeat") or 0, st.get("pollMode"), now, d)
         if not online:
             continue
         if not _holds_old_loop(meta):
@@ -5455,6 +5710,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     enriched_items = []
                     skipped_ids = []
                     want_card = bool(s.get("productCard"))
+                    sync_block = _sync_block(location, time.time())
                     for it in s["items"]:
                         # An item with no video file would make the player
                         # throw away the whole state (see _playable_item).
@@ -5491,6 +5747,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             card = _product_card_for(it)
                             if card:
                                 merged.update(card)
+                        if sync_block is not None:
+                            merged.update(_item_version(it.get("url")))
                         enriched_items.append(merged)
                     if skipped_ids and _UNPLAYABLE_LOGGED.get(screen_id) != s["revision"]:
                         _UNPLAYABLE_LOGGED[screen_id] = s["revision"]
@@ -5529,7 +5787,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             # with its own pollMode — a SLOW member that
                             # last polled 4 min ago is still considered
                             # online while a FAST member that gap is not.
-                            _, mem_online = _presence(last_hb, st.get("pollMode"), now_ts)
+                            _, mem_online = _presence(last_hb, st.get("pollMode"), now_ts, d)
                             group_members.append({
                                 "deviceId":   d,
                                 "name":       meta.get("name") or d,
@@ -5560,7 +5818,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         })
                         bucket["memberCount"] += 1
                         bucket["_stores"].add((meta2.get("location") or {}).get("storeId"))
-                        _, ag_online = _presence(last_hb2, st.get("pollMode"), now_ts2)
+                        _, ag_online = _presence(last_hb2, st.get("pollMode"), now_ts2, d)
                         if ag_online:
                             bucket["onlineCount"] += 1
                     # v0.2.25: the tablet's Join picker lists groups in its own
@@ -5678,6 +5936,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "splashUrl":   splash["url"] if splash else None,
                         "splashName":  splash["name"] if splash else None,
                     }
+                    # v0.2.26: left out, not null, for a store without a policy.
+                    if sync_block is not None:
+                        payload["sync"] = sync_block
+                        payload["preload"] = [{**p, **_item_version(p.get("url"))} for p in payload["preload"]]
                 else:
                     # Aggregate view for the CMS: sum across all screens.
                     revisions = [s["revision"] for s in _per_screen.values()]
@@ -5718,7 +5980,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # existing semantics ("status pill should be
                     # green") so old consumers keep working.
                     pm = state.get("pollMode", DEFAULT_POLL_MODE)
-                    live_flag, online_flag = _presence(last, pm, now)
+                    live_flag, online_flag = _presence(last, pm, now, device_id)
+                    hb_sec = _heartbeat_sec(device_id)
                     # While a content test runs, the live items are the test
                     # clip. Report the screen's real playlist as currentItems
                     # (what the CMS shows and edits) and the test separately.
@@ -5745,8 +6008,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                                   < _version_tuple(AUTO_UPDATE_MIN_APP)
                                                   else "on" if s.get("autoConfirmEnabled") else "off"),
                         "autoUpdateMinApp":      AUTO_UPDATE_MIN_APP,
-                        "onlineThresholdSec":    int(_online_threshold_sec(pm)),
-                        "liveThresholdSec":      int(_live_threshold_sec(pm)),
+                        "onlineThresholdSec":    int(_online_threshold_sec(pm, hb_sec)),
+                        "liveThresholdSec":      int(_live_threshold_sec(pm, hb_sec)),
                         "secondsSinceHeartbeat": round(now - last, 1) if last else None,
                         "currentRevision":       state.get("revision", 0),
                         # v0.2.25: what the screen itself last said it was
@@ -5801,6 +6064,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     record.pop("deviceSecret", None)
                     screens.append(record)
             self._send_json({"screens": screens})
+            return
+
+        # v0.2.26: Wi-Fi saving. Policies per store, and what each screen used.
+        if path == "/api/store-sync":
+            if self._require_perm("screens.view") is None:
+                return
+            with _STATE_LOCK:
+                out = {}
+                for sid in _store_sync:
+                    city = next(((m.get("location") or {}).get("city") for m in _screens.values()
+                                 if (m.get("location") or {}).get("storeId") == sid), None)
+                    out[sid] = {**_store_policy(sid),
+                                "windowOpen": _download_window_open(_store_policy(sid), city, time.time())}
+            self._send_json({"stores": out, "defaults": _STORE_SYNC_DEFAULTS})
+            return
+
+        if path == "/api/traffic":
+            if self._require_perm("activity.view") is None:
+                return
+            try:
+                days = max(1, min(_TRAFFIC_KEEP_DAYS, int((params.get("days") or ["7"])[0])))
+            except ValueError:
+                days = 7
+            self._send_json(_traffic_report((params.get("storeId") or [None])[0], days))
             return
 
         # v0.1.25: per-device warning/error log stream. Same auth
@@ -6456,6 +6743,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         # v0.2.25: rename a group. The name IS the id, so this moves every
         # member and the loop start across together; nothing restarts.
+        # v0.2.26: POST /api/store-sync/<storeId> { off: true } | policy fields
+        m_sync = re.match(r"^/api/store-sync/([a-z0-9][a-z0-9-]{1,62})$", path)
+        if m_sync:
+            if self._require_perm("settings.edit") is None:
+                return
+            store_id = m_sync.group(1)
+            with _STATE_LOCK:
+                if body.get("off"):
+                    _store_sync.pop(store_id, None)
+                    what = "off"
+                else:
+                    policy, err = _clean_store_policy(body, _store_sync.get(store_id))
+                    if err:
+                        self._send_json({"error": "bad_policy", "detail": err}, status=400); return
+                    _store_sync[store_id] = policy
+                    what = ("download now" if body.get("downloadNowHours")
+                            else "on, downloads overnight" if policy["overnight"] else "on")
+                _atomic_write_json(STORE_SYNC_JSON, _store_sync)
+            _log_activity(kind="settings", text=f"Wi-Fi saving at {store_id}: {what}", icon="settings")
+            self._send_json({"ok": True, "policy": _store_policy(store_id)})
+            return
+
         if path.startswith("/api/sync-groups/") and path.endswith("/rename"):
             if self._require_perm("screens.push") is None:
                 return
@@ -6571,6 +6880,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 sync_report = _clean_sync_report(body.get("sync"))
                 if sync_report is not None:
                     s["syncStatus"] = sync_report
+                _record_traffic(device_id, body.get("traffic"))
                 s["lastHeartbeat"] = time.time()
                 # v0.1.37: pick the right pollMode default for a brand-
                 # new tablet. Legacy flavor (Android 6/7 hardware on
@@ -9054,6 +9364,8 @@ def main() -> None:
     threading.Thread(target=daily_sync_loop, daemon=True).start()
     # v0.1.85: watch for screens dropping offline and alert (webhook + activity).
     threading.Thread(target=_offline_monitor_loop, daemon=True).start()
+    # v0.2.26: notice replaced files for low-traffic stores.
+    threading.Thread(target=_media_version_loop, daemon=True).start()
     # v0.2.15: event scheduler — auto-starts signed-off events when their
     # startAt arrives, auto-stops active events when their endAt passes.
     # Also drives the preview auto-restore (E2.5). One loop, 5s tick:
