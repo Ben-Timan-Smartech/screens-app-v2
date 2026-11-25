@@ -4462,11 +4462,31 @@ def _trigger_initial_sync_if_needed() -> None:
     threading.Thread(target=run_library_scan, daemon=True).start()
 
 
+_DAILY_SYNC_AGE_SEC = 24 * 60 * 60
+_DAILY_SYNC_CHECK_SEC = 10 * 60
+
+
+def _library_age_sec(now: float | None = None) -> float | None:
+    try:
+        return (now if now is not None else time.time()) - LIBRARY_JSON.stat().st_mtime
+    except OSError:
+        return None
+
+
 def daily_sync_loop() -> None:
-    """Re-run the library scan every 24 hours. Designed to run in a daemon
-    thread so it dies with the server."""
+    """Re-run the library scan once the library is a day old. Designed to run
+    in a daemon thread so it dies with the server.
+
+    v0.2.26: it used to wait 24 hours from the server's start, and every deploy
+    restarts the server, so on a day with several deploys it never ran: a video
+    added to Drive stayed "pending" (Cleer at Holt, 25/11/2026). The library
+    file's own age survives restarts. A missing library is left to the
+    start-up path."""
     while True:
-        time.sleep(24 * 60 * 60)
+        time.sleep(_DAILY_SYNC_CHECK_SEC)
+        age = _library_age_sec()
+        if age is None or age < _DAILY_SYNC_AGE_SEC or _sync_state.get("running"):
+            continue
         try:
             run_library_scan()
         except Exception as e:
