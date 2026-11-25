@@ -2766,26 +2766,41 @@ def _library_with_logos() -> tuple[dict, str]:
     return out, etag
 
 
-# v0.1.86: card data for the shopper-facing product card, keyed by the playing
-# item's library id — the tm:rw-enriched description + per-currency prices +
-# packshot, plus the brand logo (for the image fallback: packshot → brand logo
-# → nothing). Cached by the library ETag so /api/state polls don't rebuild the
-# index each time; only screens with the productCard toggle on ever call this.
-_ENRICHED_CARD_CACHE: dict = {"etag": None, "byId": {}}
+# v0.1.86: card data for the shopper-facing product card — the tm:rw-enriched
+# product name + description + per-currency prices + packshot, plus the brand
+# logo (for the image fallback: packshot → brand logo → nothing). Cached by the
+# library ETag so /api/state polls don't rebuild the index each time; only
+# screens with the productCard toggle on ever call this.
+#
+# Keyed by the video's file, not its library id: a Drive id like "hoverair-4" is
+# the file's position in its brand, so it moves to another video when one is
+# added. Going by id put one product's price on another's video.
+_ENRICHED_CARD_CACHE: dict = {"etag": None, "byPath": {}, "byIdTitle": {}}
 
 
-def _product_card_for(video_id: str) -> dict | None:
-    if not video_id:
-        return None
+def _media_path(url: str | None) -> str:
+    """A media URL's path. The CMS saves playlists with relative URLs, tablets
+    with absolute ones; both name the same file."""
+    try:
+        return urllib.parse.unquote(urllib.parse.urlsplit(url or "").path)
+    except ValueError:
+        return ""
+
+
+def _product_card_for(item: dict) -> dict | None:
     data, etag = _library_with_logos()
     if _ENRICHED_CARD_CACHE["etag"] != etag:
         logos = _brand_logo_map()
-        by_id: dict[str, dict] = {}
+        by_path: dict[str, dict] = {}
+        by_id_title: dict[tuple, dict] = {}
         for v in data.get("videos") or []:
             vid = v.get("id")
             if not vid:
                 continue
             card: dict = {}
+            # The player falls back to the video's title without this.
+            if v.get("productLine"):
+                card["product"] = v["productLine"]
             if v.get("description"):
                 card["description"] = v["description"]
             if v.get("descriptionLong"):
@@ -2799,10 +2814,17 @@ def _product_card_for(video_id: str) -> dict | None:
             blogo = logos.get((v.get("brand") or "").lower())
             if blogo:
                 card["brandLogoUrl"] = blogo
-            if card:
-                by_id[vid] = card
-        _ENRICHED_CARD_CACHE.update({"etag": etag, "byId": by_id})
-    return _ENRICHED_CARD_CACHE["byId"].get(video_id)
+            path = _media_path(v.get("mediaUrl"))
+            if path:
+                by_path[path] = card
+            by_id_title[(vid, v.get("title"))] = card
+        _ENRICHED_CARD_CACHE.update({"etag": etag, "byPath": by_path, "byIdTitle": by_id_title})
+    card = _ENRICHED_CARD_CACHE["byPath"].get(_media_path(item.get("url")))
+    if card is None:
+        # The file was replaced since the push. The id alone isn't enough to say
+        # it's the same video; the id and the title together are.
+        card = _ENRICHED_CARD_CACHE["byIdTitle"].get((item.get("id"), item.get("title")))
+    return card
 
 
 def _test_brand_api_key() -> dict:
@@ -5362,7 +5384,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # lean and the enriched-library lookup off the hot path
                         # for every other screen.
                         if want_card:
-                            card = _product_card_for(it.get("id") or "")
+                            card = _product_card_for(it)
                             if card:
                                 merged.update(card)
                         enriched_items.append(merged)
