@@ -246,6 +246,10 @@ class PlayerController(context: Context) {
 
     private var currentSource: String = Source.NONE
 
+    /** v0.2.26: files behind the current queue. A replaced video can arrive
+     *  without a new playlist revision, under a new file name. */
+    private var currentFiles: List<String> = emptyList()
+
     init {
         // Show the bundled splash immediately on launch — before the first
         // playlist arrives. As soon as `apply()` is called with real items it
@@ -294,8 +298,10 @@ class PlayerController(context: Context) {
         // Encode mixSplash into the source key so toggling triggers a re-apply.
         val sourceKey = "$revision|splash=$mixSplash"
         val expectedCount = playlist.size + (if (mixSplash) 1 else 0)
-        if (sourceKey == currentSource && player.mediaItemCount == expectedCount) return
+        val files = playlist.map { it.file.path }
+        if (sourceKey == currentSource && player.mediaItemCount == expectedCount && files == currentFiles) return
         currentSource = sourceKey
+        currentFiles = files
 
         val items = mutableListOf<MediaItem>()
         if (mixSplash) {

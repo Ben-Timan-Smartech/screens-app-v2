@@ -322,7 +322,7 @@ fun DeviceAdminScreen(
                     InfoRow("Sync group",  syncGroup ?: "(independent)")
                     InfoRow("Display",     "${info.widthPx} × ${info.heightPx} · ${info.orientation}")
                     InfoRow("RAM",        "${info.ramMb} MB")
-                    InfoRow("Cached",     "${repository.cache.cachedIds().size} videos · ${formatBytes(repository.cache.totalBytes())}")
+                    InfoRow("Cached",     "${repository.cache.videoCount()} videos · ${formatBytes(repository.cache.totalBytes())}")
                     InfoRow("Free disk",  formatBytes(repository.cache.usableSpace()))
                 }
             }
@@ -521,7 +521,7 @@ fun DeviceAdminScreen(
                     ActionRow(
                         title = "Refresh playlist now",
                         sub = "Re-fetch from the server (or demo source).",
-                        onClick = { scope.launch { repository.refreshPlaylist() } },
+                        onClick = { repository.refreshNow(skipWait = true) },
                     )
                     Divider()
                     // v0.1.81: relaunch the player from the staff overlay —

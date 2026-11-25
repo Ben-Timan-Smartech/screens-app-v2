@@ -1,13 +1,16 @@
 package com.smartech.screens.data
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.smartech.screens.util.DeviceInfo
 import com.smartech.screens.util.LogBuffer
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,11 +20,18 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.random.Random
 
 /**
  * The seam between "what the server says" and "what the player should do right
@@ -36,6 +46,7 @@ class PlayerRepository(
     val api: DeviceApi,
     val cache: VideoCache,
     val httpClient: okhttp3.OkHttpClient,
+    private val traffic: TrafficStats,
 ) {
     /** Late-bound so ScreensApp can wire Repository ↔ Updater without
      *  a circular constructor dependency. The CMS "update" command
@@ -49,7 +60,6 @@ class PlayerRepository(
         httpClient,
         cacheFile = java.io.File(appContext.filesDir, "library-cache.json"),
     )
-    private var libraryRefreshTickCounter = 0
     sealed class State {
         data object Registering : State()
         data class Playing(val items: List<LocalVideo>, val revision: String) : State()
@@ -63,8 +73,9 @@ class PlayerRepository(
     private val _state = MutableStateFlow<State>(State.Registering)
     val state: StateFlow<State> = _state
 
-    /** Cached in-memory copy of the last resolved playlist. */
-    private var lastPlaylist: PlaylistResponse? = null
+    /** Cached in-memory copy of the last resolved playlist — the one on
+     *  screen. A newer one still downloading is [syncTarget]. */
+    @Volatile private var lastPlaylist: PlaylistResponse? = null
 
     /**
      * First-run registration. Safe to call on every launch — short-circuits if
@@ -106,36 +117,53 @@ class PlayerRepository(
         LogBuffer.i(TAG, "Registered as screen ${resp.screenId}")
     }
 
-    /**
-     * Pull the current playlist from the server, download anything missing,
-     * evict anything no longer referenced, and advance [state].
-     */
-    /** Last revision we successfully pulled from the live server. */
-    private var lastLiveRevision: Int = -1
+    /** Revision of the live playlist on screen (fully or partly). */
+    @Volatile private var lastLiveRevision: Int = -1
+
+    /** v0.2.26: what the heartbeat reports. Same thing, except it stays -1
+     *  until something from that revision is actually showing. */
+    @Volatile private var reportedRevision: Int = -1
+
+    /** v0.2.26: bumped to make the next poll apply its playlist even when the
+     *  revision hasn't moved. [appliedForce] is the last value acted on. */
+    private val forceSeq = AtomicInteger(0)
+    private val appliedForce = AtomicInteger(0)
+    private fun forceNextApply() {
+        forceSeq.incrementAndGet()
+    }
+
     // v0.1.78: the empty-items "keeping last good playlist" guard used to log
     // every poll — 58% of all shipped fleet warnings on a screen stuck in
     // that state. Log only when the revision changes so the signal survives
     // without the spam.
     private var lastEmptyItemsLoggedRev: Int = Int.MIN_VALUE
 
-    suspend fun refreshPlaylist() {
+    /**
+     * Pull the current playlist from the server. In live mode this only
+     * decides what should play; downloads happen on [syncLoop], so a poll
+     * never waits for one. Always off the main thread: the watchdog and the
+     * staff screens call it from Main.
+     */
+    suspend fun refreshPlaylist(): Unit = kotlinx.coroutines.withContext(Dispatchers.IO) {
         // Live LAN demo wins if a server URL is configured.
         val serverUrl = store.liveServerUrl.first()
         if (!serverUrl.isNullOrBlank()) {
             refreshLivePlaylist(serverUrl)
-            return
-        }
-        if (DemoMode.isActive) {
+        } else if (DemoMode.isActive) {
             refreshDemoPlaylist()
-            return
+        } else {
+            refreshApiPlaylist()
         }
+    }
+
+    private suspend fun refreshApiPlaylist() {
         try {
             val etag = store.playlistEtag.first()
             val resp = api.playlist(etag)
             if (resp.code() == 304) {
                 Log.d(TAG, "Playlist unchanged (304).")
                 // Even if unchanged, make sure current state reflects cached files.
-                lastPlaylist?.let { publish(it) }
+                republish()
                 return
             }
             if (!resp.isSuccessful) {
@@ -157,8 +185,7 @@ class PlayerRepository(
                 }
             }
 
-            val cap = store.cacheCapBytes.first()
-            cache.reconcile(keep = keepIds(playlist.items), capBytes = cap)
+            cache.trim()
 
             publish(playlist)
         } catch (t: Throwable) {
@@ -173,23 +200,67 @@ class PlayerRepository(
      * (truncated/corrupt MP4 → ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE).
      * Purges the bytes, immediately re-publishes WITHOUT the video so the
      * player stops hammering the bad file (publish() drops anything not
-     * in the cache), then re-downloads it on the live loop — once it
-     * lands clean it rejoins the rotation on the next refresh.
+     * in the cache), then the sync queue downloads it again — once it
+     * lands clean it rejoins the rotation.
+     *
+     * v0.2.26: the first purge of a file retries straight away. A file that
+     * needs purging again is most likely bad at the source, so it waits:
+     * downloading the same bytes every few minutes helps nobody.
      */
     fun invalidateCachedVideo(videoId: String) {
         liveScope.launch {
-            cache.invalidate(videoId)
-            _downloadFailures.update { it - videoId }
-            // Re-publish current playlist sans the now-missing file.
+            runCatching {
+                synchronized(cache.lock) {
+                    val onScreen = (_state.value as? State.Playing)?.items?.firstOrNull { it.item.id == videoId }
+                    val item = onScreen?.item
+                        ?: lastPlaylist?.items?.firstOrNull { it.id == videoId }
+                        ?: syncTarget?.playlist?.items?.firstOrNull { it.id == videoId }
+                    if (item != null) {
+                        cache.invalidate(onScreen?.file ?: cache.file(item))
+                        val key = cache.key(item)
+                        val times = (purges[key] ?: 0) + 1
+                        purges[key] = times
+                        if (times <= 1) {
+                            retries.remove(key)
+                        } else {
+                            val wait = if (times == 2) RETRY_MAX_MS else PURGE_LONG_MS
+                            retries[key] = Retry(times, SystemClock.elapsedRealtime() + spread(wait))
+                        }
+                    }
+                    syncTarget?.let { it.shown = it.shown - videoId }
+                }
+                _downloadFailures.update { it - videoId }
+                // Re-publish current playlist sans the now-missing file.
+                republish()
+                if (syncTarget != null) kickSync() else refreshPlaylist()
+            }.onFailure { LogBuffer.w(TAG, "Re-pull after invalidate($videoId) failed: ${it.message}") }
+        }
+    }
+
+    /** The playlist's items that can play now, each with its file. v0.2.26: an
+     *  item whose new version is still downloading keeps the copy it's playing. */
+    private fun localItems(playlist: PlaylistResponse): List<LocalVideo> {
+        val onScreen = (_state.value as? State.Playing)?.items.orEmpty()
+        return playlist.items.mapNotNull { v ->
+            if (cache.has(v)) {
+                LocalVideo(v, cache.file(v))
+            } else {
+                onScreen.firstOrNull { it.item.id == v.id && it.file.length() > 0L }
+                    ?.let { LocalVideo(v, it.file) }
+            }
+        }
+    }
+
+    /** v0.2.26: put the current playlist up again (a file or a flag changed).
+     *  Under the lock, so it can't overwrite a newer playlist with the old. */
+    private fun republish() {
+        synchronized(cache.lock) {
             lastPlaylist?.let { publish(it) }
-            runCatching { refreshPlaylist() }
-                .onFailure { LogBuffer.w(TAG, "Re-pull after invalidate($videoId) failed: ${it.message}") }
         }
     }
 
     private fun publish(playlist: PlaylistResponse) {
-        val local = playlist.items
-            .mapNotNull { v -> if (cache.has(v.id)) LocalVideo(v, cache.file(v.id)) else null }
+        val local = localItems(playlist)
         // v0.1.80: drop items the watchdog has flagged as unplayable on this
         // device (stuck-buffering → too high-res/bitrate or an unsupported
         // codec) so a known-bad clip isn't re-queued and re-frozen every loop.
@@ -212,11 +283,19 @@ class PlayerRepository(
         if (playlist.items.isNotEmpty()) {
             liveScope.launch {
                 runCatching {
-                    store.saveLastPlaylistJson(playlistJson.encodeToString(PlaylistResponse.serializer(), playlist))
+                    val json = playlistJson.encodeToString(PlaylistResponse.serializer(), playlist)
+                    // v0.2.26: publish() runs far more often than the playlist
+                    // changes; only write when it did.
+                    if (lastPlaylist === playlist && json != savedPlaylistJson) {
+                        store.saveLastPlaylistJson(json)
+                        savedPlaylistJson = json
+                    }
                 }.onFailure { LogBuffer.w(TAG, "saveLastPlaylistJson failed: ${it.message}") }
             }
         }
     }
+
+    @Volatile private var savedPlaylistJson: String? = null
 
     /** Strict Json instance for persisting the last-known playlist — sticks
      *  to defaults so the on-disk format is stable across builds. */
@@ -240,12 +319,31 @@ class PlayerRepository(
             LogBuffer.w(TAG, "lastPlaylistJson decode failed: ${it.message}")
             return
         }
+        savedPlaylistJson = raw
         // Restore lastLiveRevision so the empty-items guard in
         // refreshLivePlaylist can detect a backward jump (post-deploy wipe).
         val parsedRev = playlist.revision.removePrefix("live-").toIntOrNull()
-        if (parsedRev != null) lastLiveRevision = parsedRev
-        lastPlaylist = playlist
-        publish(playlist)
+        synchronized(cache.lock) {
+            // v0.2.26: the first poll can beat us here; its playlist is newer.
+            if (syncTarget != null) return
+            if (parsedRev != null) lastLiveRevision = parsedRev
+            lastPlaylist = playlist
+            // Nothing is on screen yet, so files saved by an older player can
+            // safely take their new names now.
+            cache.adopt(playlist.items, inUse = emptySet())
+            publish(playlist)
+            // v0.2.26: anything not on disk is downloaded by the sync queue,
+            // once the first poll has said whether and when it may.
+            if (parsedRev != null) {
+                val onScreen = _state.value is State.Playing
+                syncTarget = SyncTarget(playlist, parsedRev, playlist.items.map { cache.key(it) }.toSet()).apply {
+                    published = onScreen
+                    shown = playlist.items.filter { cache.has(it) }.map { it.id }.toSet()
+                }
+                lastTargetRevision = parsedRev
+                if (onScreen) reportedRevision = parsedRev
+            }
+        }
         // v0.1.19: also hydrate the "intended" playlist flow. publish()
         // only sets the state.Playing items (what the player can
         // actually start), but the staff overlay reads its rows from
@@ -258,32 +356,7 @@ class PlayerRepository(
         _intendedPlaylist.value = playlist.items
         val playingCount = (state.value as? State.Playing)?.items?.size ?: 0
         LogBuffer.i(TAG, "Rehydrated playlist from cache — $playingCount of ${playlist.items.size} items playable")
-
-        // v0.1.26: trigger downloads for any rehydrated items that
-        // aren't on disk yet. Before this, a cold boot with an empty
-        // local cache would loop the splash until the live-sync
-        // coroutine got around to its first refresh tick (~5 s of
-        // dead air on average). Kicking the downloads off here can
-        // shave several seconds off "first frame of real content" on
-        // a fresh tablet because we don't wait for registration +
-        // settings + the first state poll to land. Best-effort —
-        // failures don't surface here; the live-sync loop will
-        // retry on its next tick.
-        if (playingCount < playlist.items.size) {
-            liveScope.launch {
-                for (v in playlist.items) {
-                    if (cache.has(v.id)) continue
-                    runCatching { cache.ensure(v) }
-                    // Don't bail on a single failed download — try
-                    // the next item, the live loop's redownload
-                    // pass picks up retries.
-                }
-                // Force a re-publish so newly-downloaded items
-                // transition into State.Playing without waiting for
-                // a live poll.
-                lastPlaylist?.let { publish(it) }
-            }
-        }
+        kickSync()
     }
 
     /**
@@ -445,7 +518,7 @@ class PlayerRepository(
                         is State.Error -> "ERROR"
                     },
                     appVersion = appVersion,
-                    cachedVideos = cache.cachedIds(),
+                    cachedVideos = cachedItemIds(),
                     cacheBytes = cache.totalBytes(),
                     freeStorageBytes = cache.usableSpace(),   // v0.2.20: the volume the videos are on
                 )
@@ -551,6 +624,20 @@ class PlayerRepository(
          *  start soon. A cache hint, not a playlist — see [updatePreload].
          *  An older server omits it → nothing to preload. */
         val preload: List<LivePreloadItem> = emptyList(),
+        /** v0.2.26: how gently this screen should use its network. An older
+         *  server omits it → no waiting, as before. */
+        val sync: LiveSync? = null,
+    )
+
+    /** v0.2.26: see [applySyncConfig]. Every field optional. [hold] = don't
+     *  start downloads while something is playing. The server works out the
+     *  overnight hours and "Send now" itself; this box's clock can't. */
+    @Serializable
+    private data class LiveSync(
+        val jitterSec: Int? = null,
+        val hold: Boolean? = null,
+        val heartbeatSec: Int? = null,
+        val libraryMin: Int? = null,
     )
 
     /** v0.2.18: one upcoming-event item to cache ahead of time. Every field is
@@ -563,6 +650,8 @@ class PlayerRepository(
         val type: String = "video",
         val url: String? = null,
         val sizeMb: Double? = null,
+        val hash: String? = null,
+        val bytes: Long? = null,
     )
 
     /** v0.2.16: web page mode settings. [url] carries a display token and
@@ -641,6 +730,9 @@ class PlayerRepository(
         val url: String,
         val durationSec: Int? = null,
         val sizeMb: Double? = null,
+        /** v0.2.26: file version and exact size — see [VideoItem]. */
+        val hash: String? = null,
+        val bytes: Long? = null,
         /** Per-video "play with audio even if screen is muted" flag.
          *  Set in the CMS Content Library. */
         val defaultUnmute: Boolean = false,
@@ -1035,10 +1127,11 @@ class PlayerRepository(
      */
     private val _remoteSplashFile = MutableStateFlow<java.io.File?>(null)
     val remoteSplashFile: StateFlow<java.io.File?> = _remoteSplashFile
-    private var lastSplashUrl: String? = null
-    // v0.1.75: retry backoff for the splash download (see ensureRemoteSplash).
-    @Volatile private var splashFailCount: Int = 0
-    @Volatile private var splashRetryAtMs: Long = 0L
+    @Volatile private var lastSplashUrl: String? = null
+
+    /** v0.2.26: the splash still to be downloaded by [syncLoop], or null. */
+    private data class SplashWanted(val url: String, val file: java.io.File)
+    @Volatile private var splashWanted: SplashWanted? = null
 
     /** Connection state for the live demo server. Surfaced to onboarding +
      *  device admin rails so the user can see at a glance whether they're
@@ -1049,12 +1142,16 @@ class PlayerRepository(
 
     /**
      * Fetch /api/state?screenId=<deviceId> from the LAN server. Drains any
-     * pending commands the CMS queued, downloads new media when revision
-     * bumps, fires a rich heartbeat on every tick.
+     * pending commands the CMS queued and hands a new playlist to [setTarget],
+     * which plays it once its files are here. Downloads nothing itself.
      */
     private suspend fun refreshLivePlaylist(serverUrl: String) {
         val base = serverUrl.trimEnd('/')
         val deviceId = store.ensureDeviceId()
+        // Taken before the request: a force that arrives while it's in flight
+        // belongs to the next poll.
+        val forceSeen = forceSeq.get()
+        val pollNo = pollSeq.incrementAndGet()
         // Capture t1/t4 around the round-trip so we can debias the
         // server-clock offset for one-way latency. See [ClockSync].
         // t1 is taken as late as possible before the byte goes on the
@@ -1103,17 +1200,19 @@ class PlayerRepository(
         state.serverNowMs?.let { t3 ->
             clockSync.record(t1Local = t1Local, t3Server = t3, t4Local = t4Local)
         }
-        // Reachable + parseable. Flag online; the rest of this method may
-        // do downloads but those don't change the "is the server reachable"
-        // signal.
+        // Reachable + parseable. Flag online.
         _connection.value = ConnectionStatus.ONLINE
+
+        // v0.2.26: how gently to use the network (before anything below that
+        // could queue a download).
+        applySyncConfig(state.sync)
 
         // Update splash flag — observable so the staff UI reflects it instantly.
         if (state.mixSplash != _mixSplash.value) {
             _mixSplash.value = state.mixSplash
             LogBuffer.i(TAG, "Mix splash → ${state.mixSplash}")
             // Re-publish current playlist so the controller picks up the new flag.
-            lastPlaylist?.let { publish(it) }
+            republish()
         }
 
         // Screen-wide audio flag. Updated silently — no re-publish
@@ -1229,6 +1328,8 @@ class PlayerRepository(
         if (freshOffset != _serverOffsetMs.value) {
             _serverOffsetMs.value = freshOffset
         }
+        // v0.2.26: the daily network totals run on the store's clock.
+        runCatching { traffic.setClock(LocationTaxonomy.timeZoneOfCity(store.locCity.first()), freshOffset) }
 
         // Group sync anchor. The tablet does all "which item should I
         // be on right now?" math locally using this epoch + the items
@@ -1278,7 +1379,8 @@ class PlayerRepository(
         // instead so a cellular / metered install doesn't burn data on
         // it. FAST and NORMAL fetch as usual.
         if (_pollMode.value != PollMode.SLOW) {
-            ensureRemoteSplash(base, state.splashUrl)
+            runCatching { updateSplash(base, state.splashUrl) }
+                .onFailure { LogBuffer.w(TAG, "Splash update failed: ${it.message}") }
         }
 
         // Execute any pending commands the CMS queued. The server already
@@ -1290,10 +1392,36 @@ class PlayerRepository(
         runCatching { updatePreload(state.preload, base) }
             .onFailure { LogBuffer.w(TAG, "Preload update failed: ${it.message}") }
 
-        // No change to playlist? Bail — heartbeats are handled by the
-        // dedicated [startHeartbeatLoop] coroutine, no need to fire one
-        // from here.
-        if (state.revision == lastLiveRevision && _state.value is State.Playing) {
+        // v0.2.26: the first answer from the server says whether downloads may
+        // start. Spread out, so a store's screens don't all begin together
+        // after a power cut. Nothing starts before the playlist is queued: it
+        // goes ahead of the splash and event content set up above.
+        val first = !haveServerState
+        if (first) startJitter()
+        try {
+            applyServerPlaylist(state, base, forceSeen, pollNo)
+        } finally {
+            if (first) {
+                haveServerState = true
+                firstServerState.complete(Unit)
+            }
+            kickSync()
+        }
+        // Heartbeats fire on their own loop (startHeartbeatLoop); no need to
+        // piggy-back one here.
+    }
+
+    /** The playlist half of a poll: what should be on this screen? */
+    private suspend fun applyServerPlaylist(state: LiveState, base: String, forceSeen: Int, pollNo: Long) {
+        // No change to playlist? Bail — the sync queue is already working on
+        // it, or it's all on screen.
+        val forced = forceSeen != appliedForce.get()
+        val target = syncTarget
+        val knownRevision = target?.revision ?: lastLiveRevision
+        if (!forced && state.revision == knownRevision &&
+            (target != null || _state.value is State.Playing) &&
+            !versionsChanged(state.items)
+        ) {
             return
         }
 
@@ -1377,16 +1505,26 @@ class PlayerRepository(
             // server's revision is BOTH >0 AND strictly greater than the
             // last revision we acted on. Revision 0 = fresh in-memory
             // state; a non-monotonic step backwards means state was lost.
+            val lastRevision = if (forced) -1 else lastLiveRevision
             val trustsTheClear =
-                state.revision > 0 && state.revision > lastLiveRevision
+                state.revision > 0 && state.revision > lastRevision
+            appliedForce.set(forceSeen)
             if (trustsTheClear) {
                 // Genuine clear — wipe the intent flow too so the staff
                 // overlay shows the empty state.
-                _intendedPlaylist.value = emptyList()
-                _state.value = State.Empty("Waiting for content from the CMS")
-                runCatching { store.clearLastPlaylistJson() }
-                lastPlaylist = null
-                lastLiveRevision = state.revision
+                synchronized(cache.lock) {
+                    _intendedPlaylist.value = emptyList()
+                    _state.value = State.Empty("Waiting for content from the CMS")
+                    lastPlaylist = null
+                    syncTarget = null          // stops any download for the old one
+                    lastLiveRevision = state.revision
+                    reportedRevision = state.revision
+                    lastTargetRevision = state.revision
+                }
+                runCatching {
+                    store.clearLastPlaylistJson()
+                    savedPlaylistJson = null
+                }
             } else {
                 if (state.revision != lastEmptyItemsLoggedRev) {
                     LogBuffer.w(
@@ -1403,77 +1541,22 @@ class PlayerRepository(
                 // would show empty even while the player keeps looping
                 // the cached items, and the user could then accidentally
                 // push that empty list back to the server.
-                val cached = lastPlaylist
-                if (cached != null) {
-                    publish(cached)
-                    _intendedPlaylist.value = cached.items
-                }
+                republish()
+                val cached = syncTarget?.playlist ?: lastPlaylist
+                if (cached != null) _intendedPlaylist.value = cached.items
             }
             return
         }
 
-        // Non-empty response — surface to the staff overlay immediately
-        // so the new playlist is visible before the bytes finish
-        // downloading.
-        _intendedPlaylist.value = items
-
         LogBuffer.i(TAG, "Live revision ${state.revision} — ${items.size} items")
-        for (v in items) {
-            try {
-                if (!cache.has(v.id)) {
-                    LogBuffer.i(TAG, "Downloading ${v.id} from ${v.url}")
-                    val startNs = System.nanoTime()
-                    var lastReportNs = startNs
-                    var lastReportBytes = 0L
-                    var rollingBps = 0.0
-                    cache.ensure(v) { bytes, total ->
-                        val now = System.nanoTime()
-                        val elapsedSec = (now - lastReportNs) / 1e9
-                        // Smooth the speed reading — instantaneous values
-                        // bounce wildly with chunked reads. Update once a
-                        // second and exponentially smooth.
-                        if (elapsedSec >= 0.5) {
-                            val instantBps = (bytes - lastReportBytes) / elapsedSec
-                            rollingBps = if (rollingBps == 0.0) instantBps
-                                         else rollingBps * 0.5 + instantBps * 0.5
-                            lastReportNs = now
-                            lastReportBytes = bytes
-                        }
-                        _downloads.update { map ->
-                            map + (v.id to DownloadProgress(
-                                videoId     = v.id,
-                                bytes       = bytes,
-                                totalBytes  = total,
-                                bytesPerSec = rollingBps,
-                            ))
-                        }
-                    }
-                    // Drop progress entry once the file is on disk.
-                    _downloads.update { it - v.id }
-                    LogBuffer.i(TAG, "Cached ${v.id}")
-                }
-                // Cleared on success — drop any earlier failure flag.
-                _downloadFailures.update { it - v.id }
-            } catch (t: Throwable) {
-                LogBuffer.w(TAG, "Live download failed for ${v.id}: ${t.message}")
-                _downloads.update { it - v.id }
-                _downloadFailures.update { it + (v.id to (t.message ?: "Download failed")) }
-            }
-        }
-        val cap = store.cacheCapBytes.first()
-        cache.reconcile(keep = keepIds(items), capBytes = cap)
-
         val playlist = PlaylistResponse(
             screenId = store.locScreenCode.first() ?: "live",
             revision = "live-${state.revision}",
             tier = "MID_720P",
             items = items,
         )
-        lastPlaylist = playlist
-        publish(playlist)
-        lastLiveRevision = state.revision
-        // Heartbeats fire on their own 10 s loop (startHeartbeatLoop);
-        // no need to piggy-back one here.
+        setTarget(playlist, state.revision, pollNo)
+        appliedForce.set(forceSeen)
     }
 
     // ── Tablet → server: staff overlay actions ──────────────────────────
@@ -1499,24 +1582,10 @@ class PlayerRepository(
             val fresh = items.filter { it.id !in existingIds }
             if (fresh.isNotEmpty()) {
                 _intendedPlaylist.value = _intendedPlaylist.value + fresh
-                // Kick off the download immediately so the row's
-                // progress badge starts ticking right away — same
-                // behaviour as a server-driven playlist update. The
-                // detailed progress reporting in refreshLivePlaylist
-                // takes over once the server confirms; this is just
-                // the head start so the staff don't watch a static
-                // spinner for 60 s on Normal poll mode.
-                for (v in fresh) {
-                    liveScope.launch {
-                        runCatching { cache.ensure(v) }
-                            .onFailure { e ->
-                                LogBuffer.w(TAG, "Optimistic pre-cache failed for ${v.id}: ${e.message}")
-                                // v0.1.79: surface the reason on the row.
-                                // Cleared on a later successful download.
-                                _downloadFailures.update { it + (v.id to (e.message ?: "Download failed")) }
-                            }
-                    }
-                }
+                // v0.2.26: the download starts as soon as the server has
+                // accepted the push (see the poll below), when the file's
+                // version is known. Starting it here could fetch a file
+                // that's already on disk under that version.
             }
         } else if (mode == "replace") {
             _intendedPlaylist.value = items
@@ -1559,7 +1628,9 @@ class PlayerRepository(
                         LogBuffer.i(TAG, "pushPlaylistToServer OK")
                     }
                 }
-                lastLiveRevision = -1
+                forceNextApply()
+                // Someone is standing at the screen: fetch what they added now.
+                if (mode == "append") refreshNow(skipWait = true)
             }.onFailure {
                 LogBuffer.w(TAG, "pushPlaylistToServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
@@ -1572,7 +1643,7 @@ class PlayerRepository(
         // Optimistic local update so the toggle's visual flips instantly,
         // before the next polling tick.
         _mixSplash.value = value
-        lastPlaylist?.let { publish(it) }
+        liveScope.launch { runCatching { republish() } }
 
         val base = store.liveServerUrl.first()?.trimEnd('/')
         if (base.isNullOrBlank()) {
@@ -1592,7 +1663,7 @@ class PlayerRepository(
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setMixSplashOnServer HTTP ${r.code}")
                     else LogBuffer.i(TAG, "setMixSplashOnServer OK")
                 }
-                lastLiveRevision = -1
+                forceNextApply()
             }.onFailure {
                 LogBuffer.w(TAG, "setMixSplashOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
@@ -1628,7 +1699,7 @@ class PlayerRepository(
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setProductCardOnServer HTTP ${r.code}")
                     else LogBuffer.i(TAG, "setProductCardOnServer OK")
                 }
-                lastLiveRevision = -1
+                forceNextApply()
             }.onFailure {
                 LogBuffer.w(TAG, "setProductCardOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
@@ -1661,7 +1732,7 @@ class PlayerRepository(
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setProgressBarOnServer HTTP ${r.code}")
                     else LogBuffer.i(TAG, "setProgressBarOnServer OK")
                 }
-                lastLiveRevision = -1
+                forceNextApply()
             }.onFailure {
                 LogBuffer.w(TAG, "setProgressBarOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
@@ -1676,7 +1747,7 @@ class PlayerRepository(
         LogBuffer.i(TAG, "setAudioOnServer → $value")
         // Optimistic local update — UI + player react instantly.
         _audioOn.value = value
-        lastPlaylist?.let { publish(it) }
+        liveScope.launch { runCatching { republish() } }
 
         val base = store.liveServerUrl.first()?.trimEnd('/')
         if (base.isNullOrBlank()) {
@@ -1696,7 +1767,7 @@ class PlayerRepository(
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setAudioOnServer HTTP ${r.code}")
                     else LogBuffer.i(TAG, "setAudioOnServer OK")
                 }
-                lastLiveRevision = -1
+                forceNextApply()
             }.onFailure {
                 LogBuffer.w(TAG, "setAudioOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
@@ -1728,7 +1799,7 @@ class PlayerRepository(
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setPollModeOnServer HTTP ${r.code}")
                     else LogBuffer.i(TAG, "setPollModeOnServer OK")
                 }
-                lastLiveRevision = -1
+                forceNextApply()
             }.onFailure {
                 LogBuffer.w(TAG, "setPollModeOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
@@ -1826,10 +1897,9 @@ class PlayerRepository(
                         LogBuffer.i(TAG, "Local calibration triggered (${durationSec}s)")
                     }
                 }
-                // Bust the rev so the next refresh re-pulls /api/state
-                // immediately instead of returning early on the
-                // unchanged-revision short-circuit.
-                lastLiveRevision = -1
+                // Force the next refresh past the unchanged-revision
+                // short-circuit.
+                forceNextApply()
             }.onFailure {
                 LogBuffer.w(TAG, "triggerLocalCalibration failed: ${it.message}")
             }
@@ -1845,17 +1915,24 @@ class PlayerRepository(
      *  command). Fires off the live polling loop's queue so it doesn't
      *  wait for the next sleep tick — useful when the tablet is in
      *  Slow mode (5 min between regular polls) and someone wants to
-     *  see their push land right now. */
-    fun refreshNow() {
+     *  see their push land right now.
+     *
+     *  v0.2.26: [skipWait] is for a person asking: downloads start at once,
+     *  without the spread-out wait and even while the server is holding them. */
+    fun refreshNow(skipWait: Boolean = false) {
         LogBuffer.i(TAG, "refreshNow() requested")
+        if (skipWait) {
+            urgentUntilMs = SystemClock.elapsedRealtime() + URGENT_MS
+            retries.clear()
+        }
+        // Treat the response as new even when the server returns the same
+        // revision — useful for the CMS-side "Refresh now" command flow where
+        // the change may already have landed in a previous poll.
+        forceNextApply()
         liveScope.launch {
-            // Reset revision so the response is treated as new even
-            // when the server returns the same one — useful for the
-            // CMS-side "Refresh now" command flow where the change may
-            // already have landed in a previous poll.
-            lastLiveRevision = -1
             runCatching { refreshPlaylist() }
                 .onFailure { LogBuffer.w(TAG, "refreshNow() tick failed: ${it.message}") }
+            kickSync()
         }
     }
 
@@ -1887,15 +1964,17 @@ class PlayerRepository(
      *  the right thing to show while downloads are still in flight. */
     private var reapplyNonce = 0
     private fun forceReapply() {
-        val pl = lastPlaylist ?: return
-        val local = pl.items.mapNotNull { v -> if (cache.has(v.id)) LocalVideo(v, cache.file(v.id)) else null }
-        if (local.isEmpty()) {
-            LogBuffer.i(TAG, "forceReapply — nothing cached yet; leaving the splash up")
-            return
+        synchronized(cache.lock) {
+            val pl = lastPlaylist ?: return
+            val local = localItems(pl)
+            if (local.isEmpty()) {
+                LogBuffer.i(TAG, "forceReapply — nothing cached yet; leaving the splash up")
+                return
+            }
+            reapplyNonce += 1
+            _state.value = State.Playing(local, "${pl.revision}#r$reapplyNonce")
+            LogBuffer.i(TAG, "forceReapply — re-published ${local.size} item(s) (nonce $reapplyNonce)")
         }
-        reapplyNonce += 1
-        _state.value = State.Playing(local, "${pl.revision}#r$reapplyNonce")
-        LogBuffer.i(TAG, "forceReapply — re-published ${local.size} item(s) (nonce $reapplyNonce)")
     }
 
     /** v0.1.76: true when the server has pushed a non-empty playlist AND
@@ -1906,7 +1985,7 @@ class PlayerRepository(
      *  fallback and a reboot would be pointless — and risk a reboot loop). */
     fun hasPlayableContentPending(): Boolean {
         val intended = _intendedPlaylist.value
-        return intended.isNotEmpty() && intended.all { cache.has(it.id) }
+        return intended.isNotEmpty() && intended.all { cache.has(it) }
     }
 
     /** v0.1.66: manual content-library (brands + videos) re-pull, fired
@@ -1921,6 +2000,12 @@ class PlayerRepository(
             runCatching { remoteLibrary.refresh(url) }
                 .onFailure { LogBuffer.w(TAG, "refreshLibraryNow() failed: ${it.message}") }
         }
+    }
+
+    /** v0.2.26: the staff menu opened. Bring the library up to date unless
+     *  it was checked in the last few minutes. */
+    fun refreshLibraryIfOld() {
+        if (remoteLibrary.isOlderThan(LIBRARY_STALE_MS)) refreshLibraryNow()
     }
 
     /** Push a new HDMI mode override to the server. `null` clears
@@ -1953,7 +2038,7 @@ class PlayerRepository(
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setDisplayModeOnServer HTTP ${r.code}")
                     else LogBuffer.i(TAG, "setDisplayModeOnServer OK")
                 }
-                lastLiveRevision = -1
+                forceNextApply()
             }.onFailure {
                 LogBuffer.w(TAG, "setDisplayModeOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
@@ -1987,7 +2072,7 @@ class PlayerRepository(
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setSyncGroupOnServer HTTP ${r.code}")
                     else LogBuffer.i(TAG, "setSyncGroupOnServer OK")
                 }
-                lastLiveRevision = -1
+                forceNextApply()
             }.onFailure {
                 LogBuffer.w(TAG, "setSyncGroupOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
@@ -2025,7 +2110,7 @@ class PlayerRepository(
                     if (!r.isSuccessful) LogBuffer.w(TAG, "setRotationOnServer HTTP ${r.code}")
                     else LogBuffer.i(TAG, "setRotationOnServer OK")
                 }
-                lastLiveRevision = -1
+                forceNextApply()
             }.onFailure {
                 LogBuffer.w(TAG, "setRotationOnServer failed: ${it.javaClass.simpleName}: ${it.message ?: "(no message)"}", it)
             }
@@ -2084,11 +2169,12 @@ class PlayerRepository(
     }
 
     /**
-     * Resolve the per-screen splash. Downloads to `<filesDir>/splash/<hash>.mp4`
-     * when the URL changes. Setting [_remoteSplashFile] to null tells the
-     * player to use the bundled splash instead.
+     * Resolve the per-screen splash, kept at `<filesDir>/splash/<hash>.mp4`.
+     * Setting [_remoteSplashFile] to null tells the player to use the bundled
+     * splash instead. v0.2.26: only decides which one is wanted; [syncLoop]
+     * downloads it, so a slow splash can't hold up the playlist.
      */
-    private suspend fun ensureRemoteSplash(base: String, relativeOrAbsoluteUrl: String?) {
+    private fun updateSplash(base: String, relativeOrAbsoluteUrl: String?) {
         val absUrl = relativeOrAbsoluteUrl?.let { url ->
             when {
                 url.startsWith("http://") || url.startsWith("https://") -> url
@@ -2097,6 +2183,7 @@ class PlayerRepository(
             }
         }
         if (absUrl == null) {
+            splashWanted = null
             if (lastSplashUrl != null) {
                 lastSplashUrl = null
                 _remoteSplashFile.value = null
@@ -2112,84 +2199,130 @@ class PlayerRepository(
         if (absUrl != lastSplashUrl) {
             // New splash URL → reset the retry backoff and point at it.
             lastSplashUrl = absUrl
-            splashFailCount = 0
-            splashRetryAtMs = 0L
-            if (target.exists() && target.length() > 0) {
+            retries.remove(SPLASH_RETRY_KEY)
+        }
+        if (target.length() > 0L) {
+            splashWanted = null
+            if (_remoteSplashFile.value != target) {
+                // First splash of this run: nothing is using an older one.
+                if (_remoteSplashFile.value == null) {
+                    splashRoot.listFiles()?.forEach { if (it != target) it.delete() }
+                }
                 _remoteSplashFile.value = target
                 LogBuffer.i(TAG, "Splash → cached $safeName")
-                return
             }
-            _remoteSplashFile.value = null   // show bundled until it downloads
-        } else {
-            // Same URL as the last tick — don't re-download every poll.
-            if (_remoteSplashFile.value != null) return
-            if (target.exists() && target.length() > 0) {
-                _remoteSplashFile.value = target
-                return
-            }
-            if (splashFailCount >= MAX_SPLASH_ATTEMPTS) return            // gave up until the URL changes
-            if (System.currentTimeMillis() < splashRetryAtMs) return     // still backing off
+            return
         }
-        // Download — resumable: append to the .part on a 206, restart on a 200.
-        kotlinx.coroutines.withContext(Dispatchers.IO) {
-            runCatching {
-                val partial = java.io.File(splashRoot, "$safeName.part")
-                val have = if (partial.exists()) partial.length() else 0L
-                val reqB = Request.Builder().url(absUrl)
-                if (have > 0L) reqB.header("Range", "bytes=$have-")
-                httpClient.newCall(reqB.build()).execute().use { r ->
-                    if (!r.isSuccessful) throw IllegalStateException("HTTP ${r.code}")
-                    val body = r.body ?: throw IllegalStateException("Empty splash body")
-                    val append = have > 0L && r.code == 206
-                    // Bytes the server says are in THIS body (remaining range on
-                    // a 206, whole file on a 200). Used for the premature-EOF
-                    // guard below — a midstream socket close often surfaces as a
-                    // clean read()==-1 with no exception, and without this check
-                    // we'd rename a truncated .part into .mp4 and hand a broken
-                    // splash to the player. Mirrors VideoCache/Updater.
-                    val expectedBodyBytes = body.contentLength()
-                    var bytesFromBody = 0L
-                    java.io.FileOutputStream(partial, append).use { out ->
-                        val buf = ByteArray(64 * 1024)
-                        body.byteStream().use { input ->
-                            while (true) {
-                                val read = input.read(buf)
-                                if (read == -1) break
-                                out.write(buf, 0, read)
-                                bytesFromBody += read
+        if (_remoteSplashFile.value == null) {
+            // v0.2.26: show the last one we had until the new one is here.
+            splashRoot.listFiles { f -> f.isFile && f.name.endsWith(".mp4") && f.length() > 0L }
+                ?.maxByOrNull { it.lastModified() }
+                ?.let { _remoteSplashFile.value = it }
+        }
+        if (splashWanted?.url != absUrl) splashWanted = SplashWanted(absUrl, target)
+    }
+
+    /** v0.2.26: own client for the same reason as VideoCache's: a splash can
+     *  be 70 MB, and the shared client gives up on any call after 60 s. */
+    private val splashHttp: okhttp3.OkHttpClient by lazy {
+        httpClient.newBuilder()
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+
+    /** Download the wanted splash — resumable: append to the .part on a 206,
+     *  restart on a 200. One attempt; [syncLoop] retries for as long as it's
+     *  wanted, and stops it if a playlist video is waiting. */
+    private suspend fun downloadSplash(wanted: SplashWanted) {
+        val target = wanted.file
+        val partial = java.io.File(target.parentFile, target.name + ".part")
+        val before = partial.length()
+        try {
+            val reqB = Request.Builder().url(wanted.url)
+            if (before > 0L) reqB.header("Range", "bytes=$before-")
+            splashHttp.newCall(reqB.build()).execute().use { r ->
+                if (r.code == 416) {
+                    // Our partial is as long as the file, or longer. Exactly as
+                    // long = finished but never renamed.
+                    val real = r.header("Content-Range")?.substringAfterLast('/', "")?.trim()?.toLongOrNull()
+                    if (real == null || real != before) {
+                        partial.delete()
+                        throw IOException("Splash changed on the server")
+                    }
+                    return@use
+                }
+                if (r.code == 404 || r.code == 410) throw DownloadRefusedException("HTTP ${r.code}")
+                if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
+                val body = r.body ?: throw IOException("Empty splash body")
+                val append = before > 0L && r.code == 206
+                // Bytes the server says are in THIS body (remaining range on
+                // a 206, whole file on a 200). Used for the premature-EOF
+                // guard below — a midstream socket close often surfaces as a
+                // clean read()==-1 with no exception, and without this check
+                // we'd rename a truncated .part into .mp4 and hand a broken
+                // splash to the player. Mirrors VideoCache/Updater.
+                val expectedBodyBytes = body.contentLength()
+                var bytesFromBody = 0L
+                var lastCheckNs = System.nanoTime()
+                java.io.FileOutputStream(partial, append).use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    body.byteStream().use { input ->
+                        while (true) {
+                            val read = input.read(buf)
+                            if (read == -1) break
+                            out.write(buf, 0, read)
+                            bytesFromBody += read
+                            val now = System.nanoTime()
+                            if (now - lastCheckNs >= 2_000_000_000L) {
+                                lastCheckNs = now
+                                if (splashWanted?.url != wanted.url || playlistWaiting()) {
+                                    throw DownloadCancelledException()
+                                }
                             }
                         }
                     }
-                    if (expectedBodyBytes > 0 && bytesFromBody < expectedBodyBytes) {
-                        throw IllegalStateException(
-                            "Premature EOF on splash: got $bytesFromBody of $expectedBodyBytes body bytes"
-                        )
-                    }
-                    if (!partial.renameTo(target)) {
-                        partial.delete()
-                        throw IllegalStateException("Could not save splash file")
-                    }
+                    runCatching { out.fd.sync() }
                 }
+                if (expectedBodyBytes > 0 && bytesFromBody < expectedBodyBytes) {
+                    throw IOException("Premature EOF on splash: got $bytesFromBody of $expectedBodyBytes body bytes")
+                }
+                // Over 32 MB the server sends no length, so a cut connection
+                // looks like the end. The address says how long it should be.
+                val size = wanted.url.toHttpUrlOrNull()?.queryParameter("v")?.toLongOrNull() ?: 0L
+                if (expectedBodyBytes < 0 && partial.length() < size) {
+                    throw IOException("Splash cut short: got ${partial.length()} of $size bytes")
+                }
+            }
+            if (!partial.renameTo(target)) {
+                partial.delete()
+                throw IOException("Could not save splash file")
+            }
+            retries.remove(SPLASH_RETRY_KEY)
+            traffic.addDownloaded()
+            if (splashWanted?.url == wanted.url) {
+                splashWanted = null
+                val previous = _remoteSplashFile.value
                 _remoteSplashFile.value = target
-                splashFailCount = 0
-                splashRetryAtMs = 0L
                 // Each splash URL (server appends ?v=<size> so a replaced
                 // splash gets a new hash → a new <hash>.mp4) otherwise leaves
-                // the old file behind forever. Now that the current target is
-                // safely in place, delete every other file in the splash dir
-                // (superseded .mp4s and any stale .part) so it can't grow
-                // unbounded.
-                splashRoot.listFiles()?.forEach { f ->
-                    if (f != target) f.delete()
+                // the old file behind forever. Keep the one that was showing:
+                // a queue with the splash mixed in still points at it.
+                target.parentFile?.listFiles()?.forEach { f ->
+                    if (f != target && f != previous) f.delete()
                 }
-                LogBuffer.i(TAG, "Splash → downloaded $safeName")
-            }.onFailure {
-                splashFailCount++
-                val shift = (splashFailCount - 1).coerceIn(0, 5)
-                val backoff = minOf(SPLASH_MAX_BACKOFF_MS, SPLASH_BASE_BACKOFF_MS shl shift)
-                splashRetryAtMs = System.currentTimeMillis() + backoff
-                LogBuffer.w(TAG, "Splash download failed (attempt $splashFailCount/$MAX_SPLASH_ATTEMPTS): ${it.message}; retry in ${backoff / 1000}s")
+                LogBuffer.i(TAG, "Splash → downloaded ${target.name}")
             }
+        } catch (c: CancellationException) {
+            throw c
+        } catch (c: DownloadCancelledException) {
+            LogBuffer.i(TAG, "Splash download paused")
+            delay(CANCELLED_PAUSE_MS)
+        } catch (t: Throwable) {
+            val wait = noteFailure(SPLASH_RETRY_KEY, t, madeProgress = partial.length() > before)
+            LogBuffer.w(TAG, "Splash download failed: ${t.message}; retry in ${wait / 1000}s")
         }
     }
 
@@ -2213,8 +2346,7 @@ class PlayerRepository(
                 // finishes, ExoPlayer is rebuilt fresh.
             }
             "clearCache" -> {
-                cache.reconcile(keep = emptySet(), capBytes = 0L)
-                lastLiveRevision = -1               // force a re-download next tick
+                clearCache()
                 LogBuffer.i(TAG, "Cache cleared")
             }
             "unregister" -> {
@@ -2230,8 +2362,11 @@ class PlayerRepository(
                 // handles "already up to date" silently — no overlay
                 // flash if the latest release is what we're running.
                 LogBuffer.i(TAG, "Update command received — checking for newer release")
-                updater?.checkAndUpdate(surfaceFailures = true)
-                    ?: LogBuffer.w(TAG, "Updater not wired — ignoring command")
+                // v0.2.26: on its own coroutine, so the polls don't stop while
+                // the app downloads.
+                val u = updater
+                if (u == null) LogBuffer.w(TAG, "Updater not wired — ignoring command")
+                else liveScope.launch { runCatching { u.checkAndUpdate(surfaceFailures = true) } }
             }
             "refresh" -> {
                 // CMS pressed "Refresh now" — the latest /api/state we
@@ -2241,7 +2376,7 @@ class PlayerRepository(
                 // the last-known revision so any change we somehow
                 // missed gets re-applied on the very next tick.
                 LogBuffer.i(TAG, "Refresh command — kicking next poll")
-                refreshNow()
+                refreshNow(skipWait = true)
                 // v0.2.16: in web page mode "Refresh" also reloads the page.
                 if (_webHealth.value.showing) _webReloadRequests.value += 1
             }
@@ -2298,7 +2433,9 @@ class PlayerRepository(
             store.locTable.first(),
             store.locScreenCode.first(),
         ).joinToString(" · ")
-        val cachedIds = cache.cachedIds().joinToString(",") { "\"$it\"" }
+        val cachedIds = cachedItemIds().joinToString(",") { "\"$it\"" }
+        // v0.2.26: the day's network totals; left out until the time is known.
+        val trafficField = traffic.heartbeatJson()?.let { ",\n              \"traffic\": $it" } ?: ""
         val tier = if (info.ramMb >= 3000) "1080p" else "720p"
         // Enumerate supported HDMI modes so the CMS resolution picker
         // has something to render. Returns [] on devices where the
@@ -2353,7 +2490,7 @@ class PlayerRepository(
               "autoConfirmEnabled": ${com.smartech.screens.update.InstallAutoConfirm.isServiceEnabled(appContext)},
               "screenOn": ${power?.isInteractive ?: "null"},
               "keyguardLocked": ${keyguard?.isKeyguardLocked ?: "null"},
-              "awakeHeld": $awakeHeld
+              "awakeHeld": $awakeHeld$trafficField
             }
         """.trimIndent()
         runCatching {
@@ -2413,15 +2550,17 @@ class PlayerRepository(
     /**
      * Continuous polling loop. Started once from [com.smartech.screens.ScreensApp].
      * Sleep cadence reads from [pollMode] on every tick — values are
-     * 10 s (FAST) / 60 s (NORMAL, default) / 600 s (SLOW). Library
-     * refresh cadence scales with the poll interval so wall-clock
-     * cadence stays roughly constant.
+     * 10 s (FAST) / 60 s (NORMAL, default) / 600 s (SLOW). v0.2.26: the
+     * library and downloads run on their own loops ([libraryLoop],
+     * [syncLoop]), started from here.
      *
      * The heartbeat is NOT fired from this loop — see
      * [startHeartbeatLoop] for that, decoupled so a long download
      * doesn't make the CMS think the screen has gone offline.
      */
     fun startLiveSync() {
+        cache.pinned = { pinnedNames() }
+        liveScope.launch { syncLoop() }
         // v0.2.9: keep the cache's cap in sync with the operator's setting so
         // the download-time free-space + cap guard always uses the current
         // value, on every refresh path. Runs for the process lifetime.
@@ -2434,6 +2573,7 @@ class PlayerRepository(
             // catalogue instead of the hardcoded fallback. No-op once a live
             // refresh lands (it only fills an empty in-memory library).
             kotlinx.coroutines.withContext(Dispatchers.IO) { remoteLibrary.loadCache() }
+            liveScope.launch { libraryLoop() }
             // v0.1.41: pre-seed the live server URL BEFORE the polling
             // loop reads it. Without this, a fresh first boot raced the
             // pre-seed coroutine in ScreensApp.onCreate — the polling
@@ -2456,15 +2596,6 @@ class PlayerRepository(
             // additions from the CMS land in the on-tablet picker
             // without needing an APK update. Fire-and-forget.
             store.liveServerUrl.first()?.let { refreshStoresFromServer(it.trimEnd('/')) }
-            // v0.1.66: pull the content library once on every startup —
-            // covers a normal relaunch AND the relaunch after an APK
-            // update, so the brand/video list is current immediately
-            // rather than waiting for the periodic tick (which, before
-            // the fix below, never fired in slow mode). Best-effort.
-            store.liveServerUrl.first()?.let {
-                runCatching { remoteLibrary.refresh(it.trimEnd('/')) }
-                    .onFailure { e -> LogBuffer.w(TAG, "Startup library refresh failed: ${e.message}") }
-            }
             while (true) {
                 val url = store.liveServerUrl.first()
                 if (url.isNullOrBlank()) {
@@ -2476,32 +2607,47 @@ class PlayerRepository(
                 }
                 runCatching { refreshPlaylist() }
                     .onFailure { LogBuffer.w(TAG, "Live tick failed: ${it.message}") }
-
-                // Library refresh once every ~5 minutes of wall-clock,
-                // independent of the polling cadence. With a 10 s tick
-                // that's every 30 ticks; with a 60 s tick every 5;
-                // with a 600 s tick every 1.
-                // v0.1.66: was `% libraryEvery == 1`, which NEVER fired
-                // when libraryEvery == 1 (slow mode) — so slow-poll
-                // tablets never refreshed the library after startup.
-                // `== 0` fires correctly for every libraryEvery, and the
-                // startup pull above already covers the first interval.
-                libraryRefreshTickCounter++
-                val effectiveInterval = _pollMode.value.intervalMs
-                val libraryEvery = (5L * 60_000L / effectiveInterval).coerceAtLeast(1).toInt()
-                if (libraryRefreshTickCounter % libraryEvery == 0) {
-                    runCatching { remoteLibrary.refresh(store.liveServerUrl.first()) }
-                }
-                delay(effectiveInterval)
+                // v0.2.26: a long download can't hold up the "been trying for
+                // half an hour" rule.
+                runCatching { serviceTarget() }
+                    .onFailure { LogBuffer.w(TAG, "Playlist check failed: ${it.message}") }
+                delay(_pollMode.value.intervalMs)
             }
         }
     }
 
     /**
-     * Heartbeat loop — decoupled from [startLiveSync] so a long
-     * download in [refreshLivePlaylist] doesn't block the heartbeat
-     * and flip the screen to "offline" in the CMS. Fires every
-     * [HEARTBEAT_INTERVAL_MS] regardless of poll mode.
+     * v0.2.26: the brand/video library, refreshed every [libraryMin] minutes.
+     * Also pulled on every startup (v0.1.66: covers a normal relaunch AND the
+     * relaunch after an APK update, so the list is current straight away):
+     * after a random wait when there's a saved copy to show meanwhile, so a
+     * store's screens don't all ask at once.
+     */
+    private suspend fun libraryLoop() {
+        // The first answer from the server says how long the wait may be.
+        withTimeoutOrNull(LIBRARY_FIRST_WAIT_MS) { firstServerState.await() }
+        if (remoteLibrary.loadedFromDisk) {
+            delay((Random.nextDouble() * minOf(jitterSec, LIBRARY_MAX_JITTER_SEC) * 1000.0).toLong())
+        }
+        while (true) {
+            val started = SystemClock.elapsedRealtime()
+            val ok = runCatching { remoteLibrary.refresh(store.liveServerUrl.first()) }
+                .onFailure { LogBuffer.w(TAG, "Library refresh failed: ${it.message}") }
+                .getOrDefault(false)
+            // Short steps, so a changed interval counts straight away. After a
+            // failure don't sit out a long one.
+            while (true) {
+                val everyMin = if (ok) libraryMin else minOf(libraryMin, LIBRARY_DEFAULT_MIN)
+                if (SystemClock.elapsedRealtime() - started >= everyMin * 60_000L) break
+                delay(LIBRARY_STEP_MS)
+            }
+        }
+    }
+
+    /**
+     * Heartbeat loop — decoupled from [startLiveSync] so a slow poll
+     * doesn't block the heartbeat and flip the screen to "offline" in the
+     * CMS. Fires every [heartbeatSec] regardless of poll mode.
      */
     fun startHeartbeatLoop() {
         liveScope.launch {
@@ -2511,7 +2657,7 @@ class PlayerRepository(
             while (true) {
                 val base = store.liveServerUrl.first()?.trimEnd('/')
                 if (!base.isNullOrBlank()) {
-                    runCatching { sendHeartbeat(base, lastLiveRevision) }
+                    runCatching { sendHeartbeat(base, reportedRevision) }
                         .onFailure { LogBuffer.w(TAG, "Heartbeat tick failed: ${it.message}") }
                     // v0.1.25: piggyback the log-shipper on the
                     // heartbeat cadence. Sends warnings + errors
@@ -2523,98 +2669,503 @@ class PlayerRepository(
                         runCatching { shipRecentWarningsIfPending(deviceId) }
                     }
                 }
-                delay(HEARTBEAT_INTERVAL_MS)
+                runCatching { traffic.saveIfDue() }
+                delay(heartbeatSec * 1000L)
             }
         }
     }
 
     private val liveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // ── v0.2.26: sync queue ──────────────────────────────────────────────
+    //
+    // Deciding what to play and fetching it are separate. A poll hands over the
+    // playlist the server wants ([setTarget]); [syncLoop] downloads whatever is
+    // missing, one file at a time (playlist, then splash, then upcoming-event
+    // content), and [serviceTarget] puts the playlist up when its files are
+    // here. Until then whatever is on screen keeps playing.
+
+    /** A playlist the server wants on this screen. Guarded by [VideoCache.lock]
+     *  apart from the fields set at construction. */
+    private class SyncTarget(
+        val playlist: PlaylistResponse,
+        val revision: Int,
+        /** File keys of its items, see [VideoCache.key]. */
+        val keys: Set<String>,
+    ) {
+        /** Some or all of it is on screen. */
+        var published = false
+        /** Ids that were on disk when it was last put up. */
+        var shown: Set<String> = emptySet()
+        var appliedAtMs = 0L
+        /** Time spent allowed to download with something still missing. */
+        var triedMs = 0L
+        var tickAtMs = 0L
+        var trying = false
+    }
+
+    @Volatile private var syncTarget: SyncTarget? = null
+    /** Revision of the last target, including one that isn't on screen yet. */
+    private var lastTargetRevision = -1
+    /** Polls can overlap; a late answer must not undo a newer one. */
+    private val pollSeq = AtomicLong(0)
+    private var appliedPoll = 0L
+
+    private class Retry(val failures: Int, val notBeforeMs: Long)
+    /** File key → when a failed download may be tried again. */
+    private val retries = ConcurrentHashMap<String, Retry>()
+    /** File key → how often the player has thrown the file away as bad. */
+    private val purges = ConcurrentHashMap<String, Int>()
+
+    private val syncKick = Channel<Unit>(Channel.CONFLATED)
+    private fun kickSync() {
+        syncKick.trySend(Unit)
+    }
+
+    /** True once /api/state has answered in this run. Nothing is downloaded
+     *  before that: the answer says whether this box should wait. */
+    @Volatile private var haveServerState = false
+    private val firstServerState = CompletableDeferred<Unit>()
+
+    @Volatile private var jitterSec = 0
+    @Volatile private var syncHold = false
+    @Volatile private var heartbeatSec = HEARTBEAT_DEFAULT_SEC
+    @Volatile private var libraryMin = LIBRARY_DEFAULT_MIN
+    /** Until then a person has asked for the content now. 0 = nobody has. */
+    @Volatile private var urgentUntilMs = 0L
+
+    /** When the current spread-out wait began, and what share of the longest
+     *  wait this box drew. */
+    @Volatile private var jitterFromMs = 0L
+    @Volatile private var jitterShare = 0.0
+
+    private fun applySyncConfig(sync: LiveSync?) {
+        jitterSec = (sync?.jitterSec ?: 0).coerceIn(0, JITTER_MAX_SEC)
+        heartbeatSec = (sync?.heartbeatSec ?: HEARTBEAT_DEFAULT_SEC).coerceIn(HEARTBEAT_DEFAULT_SEC, HEARTBEAT_MAX_SEC)
+        libraryMin = (sync?.libraryMin ?: LIBRARY_DEFAULT_MIN).coerceIn(1, LIBRARY_MAX_MIN)
+        val hold = sync?.hold == true
+        if (hold != syncHold) {
+            syncHold = hold
+            LogBuffer.i(TAG, if (hold) "Downloads on hold" else "Downloads may start")
+            if (!hold) startJitter()
+            kickSync()
+        }
+    }
+
+    /** Draw a new random wait before the next download. One already running is
+     *  kept, so frequent pushes can't put downloads off for ever. */
+    private fun startJitter() {
+        if (jitterLeftMs(SystemClock.elapsedRealtime()) > 0L) return
+        jitterShare = Random.nextDouble()
+        jitterFromMs = SystemClock.elapsedRealtime()
+    }
+
+    private fun jitterLeftMs(now: Long): Long {
+        val longest = if (somethingOnScreen()) jitterSec else minOf(jitterSec, JITTER_EMPTY_SEC)
+        if (longest <= 0) return 0L
+        return (jitterFromMs + (longest * 1000.0 * jitterShare).toLong() - now).coerceAtLeast(0L)
+    }
+
+    /** Playlist content is up, from files that still exist. */
+    private fun playlistOnScreen(): Boolean =
+        (_state.value as? State.Playing)?.items?.any { it.file.length() > 0L } == true
+
+    private fun somethingOnScreen(): Boolean = playlistOnScreen() || _webHealth.value.showing
+
+    private fun held(): Boolean = syncHold && somethingOnScreen()
+
+    private fun downloadsAllowed(now: Long): Boolean =
+        haveServerState && (now < urgentUntilMs || (!held() && jitterLeftMs(now) == 0L))
+
+    /** Server time, as best we know it. */
+    private fun serverNowMs(): Long = System.currentTimeMillis() + _serverOffsetMs.value
+
+    private fun filesOnScreen(): Set<java.io.File> =
+        (_state.value as? State.Playing)?.items.orEmpty().map { it.file }.toSet()
+
+    /** Files the cache must keep: on screen, current playlist, the one being
+     *  synced, the staff overlay's, and upcoming events. */
+    private fun pinnedNames(): Set<String> {
+        val names = HashSet<String>()
+        filesOnScreen().forEach { names += it.name }
+        val lists = listOf(
+            lastPlaylist?.items.orEmpty(),
+            syncTarget?.playlist?.items.orEmpty(),
+            _intendedPlaylist.value,
+            preloadWanted.map { it.first },
+        )
+        for (list in lists) for (v in list) names += cache.file(v).name
+        return names
+    }
+
+    /** Ids of the items whose current version is on disk, plus the ids of any
+     *  older files still saved under their id. Reported in the heartbeat. */
+    private fun cachedItemIds(): List<String> {
+        // Newest first: the same id can be in both the playlist on screen and
+        // the one being synced, as different versions.
+        val known = (
+            syncTarget?.playlist?.items.orEmpty() +
+                preloadWanted.map { it.first } +
+                _intendedPlaylist.value +
+                lastPlaylist?.items.orEmpty()
+            ).distinctBy { it.id }
+        val knownIds = known.map { it.id }.toSet()
+        return known.filter { cache.has(it) }.map { it.id } +
+            cache.legacyIds().filter { it !in knownIds }
+    }
+
+    /** A version we've been told for [id] before, for when the server has none. */
+    private fun knownVersion(id: String): VideoItem? {
+        val lists = listOf(
+            syncTarget?.playlist?.items.orEmpty(),
+            lastPlaylist?.items.orEmpty(),
+            preloadWanted.map { it.first },
+        )
+        return lists.firstNotNullOfOrNull { list -> list.firstOrNull { it.id == id && !it.hash.isNullOrBlank() } }
+    }
+
+    /** True when the server names a different version of an item we already
+     *  have on the list: a video was replaced without a new playlist revision,
+     *  or this is the first time it has told us. */
+    private fun versionsChanged(items: List<LiveItem>): Boolean {
+        val known = (syncTarget?.playlist ?: lastPlaylist)?.items?.associateBy { it.id } ?: return false
+        return items.any { li ->
+            val mine = known[li.id]
+            mine != null && !li.hash.isNullOrBlank() && li.hash != mine.hash
+        }
+    }
+
+    /** The server wants [playlist]. Put it up now if its files are here, else
+     *  queue them. */
+    private fun setTarget(playlist: PlaylistResponse, revision: Int, pollNo: Long) {
+        synchronized(cache.lock) {
+            if (pollNo < appliedPoll) return
+            appliedPoll = pollNo
+            // Surface to the staff overlay immediately so the new playlist is
+            // visible before the bytes finish downloading.
+            _intendedPlaylist.value = playlist.items
+            val old = syncTarget
+            // A replaced video gets a fresh chance on this screen.
+            val before = (old?.playlist ?: lastPlaylist)?.items.orEmpty().associateBy { it.id }
+            val replaced = playlist.items.filter { v ->
+                val was = before[v.id]?.hash
+                was != null && v.hash != null && was != v.hash
+            }.map { it.id }.toSet()
+            if (replaced.isNotEmpty()) _playbackFailures.update { m -> m.filterKeys { it !in replaced } }
+
+            cache.adopt(playlist.items, filesOnScreen())
+            val next = SyncTarget(playlist, revision, playlist.items.map { cache.key(it) }.toSet())
+            val onDisk = playlist.items.filter { cache.has(it) }
+            val newRevision = revision != lastTargetRevision
+            if (newRevision) {
+                lastTargetRevision = revision
+                // "Refresh" covers the playlist it was pressed for, not later ones.
+                if (forceSeq.get() == appliedForce.get()) urgentUntilMs = 0L
+                retries.clear()
+                purges.clear()
+                traffic.addFromDisk(onDisk.size)
+            }
+            val sameFiles = old != null && old.keys == next.keys
+            if (old != null && sameFiles) {
+                next.published = old.published
+                next.shown = old.shown
+                next.triedMs = old.triedMs
+                next.tickAtMs = old.tickAtMs
+                next.trying = old.trying
+            }
+            syncTarget = next
+            if (onDisk.size < playlist.items.size && (newRevision || !sameFiles)) startJitter()
+            // Same files, new details (a price, a product card): what's on
+            // screen can take them now, even if an item is still missing.
+            if (next.published && onDisk.isNotEmpty()) {
+                applyTarget(next, onDisk.map { it.id }.toSet())
+            }
+        }
+        serviceTarget()
+    }
+
+    /**
+     * Put the wanted playlist on screen if it's time:
+     *  - everything is on disk: now;
+     *  - nothing is playing: whatever is here, and more as it arrives;
+     *  - otherwise what's on keeps playing, until half an hour of trying has
+     *    gone by and the rest would be better than waiting.
+     */
+    private fun serviceTarget() {
+        synchronized(cache.lock) {
+            val t = syncTarget ?: return
+            val now = SystemClock.elapsedRealtime()
+            val ready = t.playlist.items.filter { cache.has(it) }.map { it.id }.toSet()
+            val complete = t.playlist.items.all { it.id in ready }
+            if (t.trying) t.triedMs += (now - t.tickAtMs).coerceAtLeast(0L)
+            t.tickAtMs = now
+            t.trying = !complete && downloadsAllowed(now)
+
+            if (ready.isEmpty()) return
+            val playing = playlistOnScreen()
+            if (t.published && playing && ready == t.shown) return
+            val due = when {
+                complete -> true
+                !playing -> true
+                t.published -> (ready - t.shown).isNotEmpty() && now - t.appliedAtMs >= PARTIAL_REPUBLISH_MS
+                else -> t.triedMs >= PARTIAL_AFTER_MS
+            }
+            if (due) applyTarget(t, ready)
+        }
+    }
+
+    /** Call with [VideoCache.lock] held and at least one item on disk. */
+    private fun applyTarget(t: SyncTarget, ready: Set<String>) {
+        if (!t.published) {
+            LogBuffer.i(TAG, "Playing revision ${t.revision} — ${ready.size} of ${t.playlist.items.size} items ready")
+        }
+        lastPlaylist = t.playlist
+        publish(t.playlist)
+        t.published = true
+        t.shown = ready
+        t.appliedAtMs = SystemClock.elapsedRealtime()
+        if (t.revision >= 0) {
+            lastLiveRevision = t.revision
+            reportedRevision = t.revision
+        }
+        val files = filesOnScreen()
+        val stampMs = if (clockSync.sampleCount > 0) serverNowMs() else 0L
+        liveScope.launch {
+            runCatching {
+                if (stampMs > 0L) files.forEach { cache.touch(it, stampMs) }
+                cache.trim()
+            }.onFailure { LogBuffer.w(TAG, "Cache tidy failed: ${it.message}") }
+        }
+    }
+
+    /** Clear cache (CMS command or push): delete every saved video and start
+     *  again. The player goes to the splash rather than a queue of files that
+     *  are gone; with nothing on screen the downloads start at once. */
+    suspend fun clearCache() {
+        cache.reconcile(keep = emptySet(), capBytes = 0L)
+        synchronized(cache.lock) {
+            syncTarget?.let { it.shown = emptySet() }
+            retries.clear()
+            republish()
+        }
+        forceNextApply()
+        kickSync()
+    }
+
+    /** Runs for the life of the process; the only thing that downloads. */
+    private suspend fun syncLoop() {
+        while (true) {
+            val waitMs = try {
+                syncStep()
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                LogBuffer.throttledW(TAG, "sync-step", "Sync step failed: ${t.javaClass.simpleName}: ${t.message}")
+                SYNC_IDLE_MS
+            }
+            if (waitMs > 0L) withTimeoutOrNull(waitMs) { syncKick.receive() }
+        }
+    }
+
+    /** Do one thing, or say how long to wait (0 = look again now). */
+    private suspend fun syncStep(): Long {
+        serviceTarget()
+        if (!haveServerState) return SYNC_IDLE_MS
+        val now = SystemClock.elapsedRealtime()
+        val urgent = now < urgentUntilMs
+        val jitterLeft = jitterLeftMs(now)
+        val waiting = held() || jitterLeft > 0L
+        if (waiting && !urgent) {
+            return if (held()) SYNC_IDLE_MS else jitterLeft.coerceAtMost(SYNC_IDLE_MS)
+        }
+        // The wait is over until the next one is drawn: it's measured longer
+        // once something is playing, and mustn't come back half way through.
+        if (!waiting) jitterShare = 0.0
+        val item = duePlaylistItem(now)
+        if (item != null) {
+            downloadPlaylistItem(item)
+            return 0L
+        }
+        val splash = splashWanted
+        if (splash != null && _pollMode.value != PollMode.SLOW && isDue(SPLASH_RETRY_KEY, now)) {
+            downloadSplash(splash)
+            return 0L
+        }
+        if (urgent) {
+            // Got what was asked for? Then the normal rules apply again.
+            val missing = syncTarget?.playlist?.items?.any { !cache.has(it) } == true
+            if (!missing && splashWanted == null) urgentUntilMs = 0L
+            if (waiting) return nextRetryMs(now)
+        }
+        val preload = preloadWanted.firstOrNull { (v, _) -> !cache.has(v) && isDue(cache.key(v), now) }
+        if (preload != null) {
+            downloadPreload(preload.first, preload.second)
+            return 0L
+        }
+        return nextRetryMs(now)
+    }
+
+    private fun isDue(key: String, now: Long): Boolean = now >= (retries[key]?.notBeforeMs ?: 0L)
+
+    private fun duePlaylistItem(now: Long): VideoItem? =
+        syncTarget?.playlist?.items?.firstOrNull { !cache.has(it) && isDue(cache.key(it), now) }
+
+    /** A playlist video could be downloading right now; the splash and preload
+     *  step aside for it. */
+    private fun playlistWaiting(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        return downloadsAllowed(now) && duePlaylistItem(now) != null
+    }
+
+    private fun nextRetryMs(now: Long): Long {
+        val next = retries.values.map { it.notBeforeMs }.filter { it > now }.minOrNull() ?: return SYNC_IDLE_MS
+        return (next - now).coerceIn(1_000L, SYNC_IDLE_MS)
+    }
+
+    /** ±20%, so a store's screens don't all come back at the same moment. */
+    private fun spread(ms: Long): Long = (ms * (0.8 + Random.nextDouble() * 0.4)).toLong()
+
+    /** Remember a failed download and return how long until the next try. One
+     *  that got some of the file starts the waits over: it's getting there. */
+    private fun noteFailure(key: String, t: Throwable, madeProgress: Boolean): Long {
+        traffic.addFailed()
+        val failures = if (madeProgress) 1 else (retries[key]?.failures ?: 0) + 1
+        val wait = spread(
+            if (t is DownloadRefusedException) RETRY_MAX_MS
+            else (RETRY_BASE_MS shl (failures - 1).coerceIn(0, 5)).coerceAtMost(RETRY_MAX_MS)
+        )
+        retries[key] = Retry(failures, SystemClock.elapsedRealtime() + wait)
+        return wait
+    }
+
+    private suspend fun downloadPlaylistItem(v: VideoItem) {
+        val key = cache.key(v)
+        LogBuffer.i(TAG, "Downloading ${v.id}")
+        val before = cache.partialBytes(v)
+        val startNs = System.nanoTime()
+        var lastReportNs = startNs
+        var lastReportBytes = 0L
+        var rollingBps = 0.0
+        try {
+            val file = cache.ensure(
+                v,
+                // Stops when a newer playlist has dropped it.
+                stillWanted = { syncTarget?.keys?.contains(key) == true },
+            ) { bytes, total ->
+                val now = System.nanoTime()
+                val elapsedSec = (now - lastReportNs) / 1e9
+                // Smooth the speed reading — instantaneous values
+                // bounce wildly with chunked reads. Update once a
+                // second and exponentially smooth.
+                if (elapsedSec >= 0.5) {
+                    val instantBps = (bytes - lastReportBytes) / elapsedSec
+                    rollingBps = if (rollingBps == 0.0) instantBps
+                                 else rollingBps * 0.5 + instantBps * 0.5
+                    lastReportNs = now
+                    lastReportBytes = bytes
+                }
+                _downloads.update { map ->
+                    map + (v.id to DownloadProgress(
+                        videoId     = v.id,
+                        bytes       = bytes,
+                        totalBytes  = total,
+                        bytesPerSec = rollingBps,
+                    ))
+                }
+            }
+            if (!cache.has(v)) throw IOException("File missing after download")
+            retries.remove(key)
+            traffic.addDownloaded()
+            cache.touch(file, serverNowMs())
+            // Cleared on success — drop any earlier failure flag.
+            _downloadFailures.update { it - v.id }
+            LogBuffer.i(TAG, "Cached ${v.id}")
+        } catch (c: CancellationException) {
+            throw c
+        } catch (c: DownloadCancelledException) {
+            LogBuffer.i(TAG, "Stopped downloading ${v.id}: no longer on the playlist")
+            delay(CANCELLED_PAUSE_MS)
+        } catch (t: Throwable) {
+            val wait = noteFailure(key, t, madeProgress = cache.partialBytes(v) > before)
+            LogBuffer.w(TAG, "Live download failed for ${v.id}: ${t.message}; retry in ${wait / 1000}s")
+            _downloadFailures.update { it + (v.id to (t.message ?: "Download failed")) }
+        } finally {
+            // Drop progress entry once the file is on disk, or isn't coming.
+            _downloads.update { it - v.id }
+        }
+    }
+
     // ── v0.2.18: upcoming-event preload ──────────────────────────────────
 
-    /** Ids on the server's current preload list. Unioned into every cache
-     *  reconcile (except an explicit Clear cache) so upcoming-event files
-     *  aren't evicted before the event starts. Empty for almost every
-     *  screen almost all the time. */
-    @Volatile private var preloadKeepIds: Set<String> = emptySet()
-    private var preloadJob: Job? = null
+    /** The server's current preload list, with the sizes it gave. Pinned in
+     *  the cache (except by an explicit Clear cache) so upcoming-event files
+     *  aren't evicted before the event starts. Empty for almost every screen
+     *  almost all the time. */
+    @Volatile private var preloadWanted: List<Pair<VideoItem, Double?>> = emptyList()
     private var lastPreloadLogSig: String? = null
-    /** id → wall-clock ms of the last failed preload, so a dead URL isn't
-     *  retried every poll. */
-    private val preloadFailedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
-    private fun keepIds(items: List<VideoItem>): Set<String> =
-        items.map { it.id }.toSet() + preloadKeepIds
-
-    /** Pin the preload list and start a background download of anything not
-     *  cached yet. Cheap when there's nothing to do; at most one preload job
-     *  runs at a time. */
+    /** Pin the preload list; [syncLoop] downloads anything not cached yet.
+     *  Cheap when there's nothing to do. */
     private fun updatePreload(raw: List<LivePreloadItem>, base: String) {
         val wanted = raw.mapNotNull { p ->
             val id = p.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val url = p.url?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            LiveItem(id = id, title = p.title ?: id, type = p.type, url = url, sizeMb = p.sizeMb)
-                .toVideoItem(base) to p.sizeMb
+            LiveItem(
+                id = id, title = p.title ?: id, type = p.type, url = url, sizeMb = p.sizeMb,
+                hash = p.hash, bytes = p.bytes,
+            ).toVideoItem(base) to p.sizeMb
         }.distinctBy { it.first.id }
-        preloadKeepIds = wanted.map { it.first.id }.toSet()
+        preloadWanted = wanted
         if (wanted.isEmpty()) {
             lastPreloadLogSig = null
             return
         }
-        val missing = wanted.filter { !cache.has(it.first.id) }
-        val sig = "${wanted.size - missing.size}/${wanted.size}"
+        val have = wanted.count { cache.has(it.first) }
+        val sig = "$have/${wanted.size}"
         if (sig != lastPreloadLogSig) {
             lastPreloadLogSig = sig
             LogBuffer.i(TAG, "Preload: $sig cached for upcoming event")
         }
-        if (missing.isEmpty() || preloadJob?.isActive == true) return
-        val now = System.currentTimeMillis()
-        val due = missing.filter { (v, _) ->
-            val failed = preloadFailedAt[v.id] ?: 0L
-            now - failed >= PRELOAD_RETRY_AFTER_MS
-        }
-        if (due.isEmpty()) return
-        preloadJob = liveScope.launch { runPreload(due) }
     }
 
-    /** One file at a time, lowest priority: waits while the current playlist
-     *  is downloading, and skips anything that wouldn't fit under the cache
-     *  cap (so preload can never squeeze out what's playing now). */
-    private suspend fun runPreload(queue: List<Pair<VideoItem, Double?>>) {
-        for ((v, sizeMb) in queue) {
-            if (v.id !in preloadKeepIds || cache.has(v.id)) continue
-            // Current-playlist downloads always win.
-            while (_downloads.value.isNotEmpty()) delay(PRELOAD_YIELD_MS)
-            if (v.id !in preloadKeepIds || cache.has(v.id)) continue
+    /** Lowest priority: stops when a playlist video needs the connection, and
+     *  skips anything that wouldn't fit under the cache cap (so preload can
+     *  never squeeze out what's playing now). */
+    private suspend fun downloadPreload(v: VideoItem, sizeMb: Double?) {
+        val key = cache.key(v)
+        fun tryLater() {
+            retries[key] = Retry(1, SystemClock.elapsedRealtime() + PRELOAD_RETRY_AFTER_MS)
+        }
+        try {
             val cap = store.cacheCapBytes.first()
-            val needBytes = ((sizeMb ?: PRELOAD_UNKNOWN_SIZE_MB) * 1_000_000).toLong()
-            if (cache.totalBytes() + needBytes > cap ||
+            val needBytes = v.bytes ?: ((sizeMb ?: PRELOAD_UNKNOWN_SIZE_MB) * 1_000_000).toLong()
+            cache.makeRoom(needBytes)
+            if (cache.completedBytes() + needBytes > cap ||
                 cache.usableSpace() - needBytes <= VideoCache.MIN_FREE_BYTES
             ) {
                 LogBuffer.w(TAG, "Preload: skipping ${v.id} — no room under the cache cap without squeezing the current playlist")
-                preloadFailedAt[v.id] = System.currentTimeMillis()
-                continue
+                tryLater()
+                return
             }
             LogBuffer.i(TAG, "Preload: downloading ${v.id}")
-            runCatching { cache.ensure(v) }
-                .onSuccess {
-                    if (cache.has(v.id)) {
-                        preloadFailedAt.remove(v.id)
-                        LogBuffer.i(TAG, "Preload: cached ${v.id}")
-                    } else {
-                        preloadFailedAt[v.id] = System.currentTimeMillis()
-                    }
-                }
-                .onFailure {
-                    preloadFailedAt[v.id] = System.currentTimeMillis()
-                    LogBuffer.w(TAG, "Preload: ${v.id} failed (${it.message}); retrying later")
-                }
-        }
-        val pinned = preloadKeepIds
-        if (pinned.isNotEmpty()) {
-            val have = pinned.count { cache.has(it) }
-            lastPreloadLogSig = "$have/${pinned.size}"
-            LogBuffer.i(TAG, "Preload: $have/${pinned.size} cached for upcoming event")
+            val file = cache.ensure(
+                v,
+                stillWanted = { preloadWanted.any { cache.key(it.first) == key } && !playlistWaiting() },
+            )
+            if (!cache.has(v)) throw IOException("File missing after download")
+            retries.remove(key)
+            traffic.addDownloaded()
+            cache.touch(file, serverNowMs())
+            LogBuffer.i(TAG, "Preload: cached ${v.id}")
+        } catch (c: CancellationException) {
+            throw c
+        } catch (c: DownloadCancelledException) {
+            LogBuffer.i(TAG, "Preload: ${v.id} paused")
+            delay(CANCELLED_PAUSE_MS)
+        } catch (t: Throwable) {
+            traffic.addFailed()
+            tryLater()
+            LogBuffer.w(TAG, "Preload: ${v.id} failed (${t.message}); retrying later")
         }
     }
 
@@ -2622,9 +3173,14 @@ class PlayerRepository(
         val absoluteUrl = if (url.startsWith("http://") || url.startsWith("https://")) url
         else if (url.startsWith("/")) base + url
         else "$base/$url"
+        // v0.2.26: a server that has lost track of a file's version for a
+        // moment must not make us download it again.
+        val known = if (hash.isNullOrBlank()) knownVersion(id) else null
         return VideoItem(
             id = id, title = title, type = type, brand = brand, product = product,
             url = absoluteUrl, durationSec = durationSec,
+            hash = hash?.takeIf { it.isNotBlank() } ?: known?.hash,
+            bytes = bytes ?: known?.bytes,
             defaultUnmute = defaultUnmute,
             description = description,
             descriptionLong = descriptionLong,
@@ -2661,41 +3217,62 @@ class PlayerRepository(
         lastPlaylist = playlist
         for (video in playlist.items) {
             runCatching {
-                if (!cache.has(video.id)) {
+                if (!cache.has(video)) {
                     LogBuffer.i(TAG, "Downloading ${video.id}")
                     cache.ensure(video)
                     LogBuffer.i(TAG, "Cached ${video.id}")
                 }
             }.onFailure { LogBuffer.w(TAG, "Demo download failed for ${video.id}", it) }
         }
-        val cap = store.cacheCapBytes.first()
-        cache.reconcile(keep = playlist.items.map { it.id }.toSet(), capBytes = cap)
+        cache.trim()
         publish(playlist)
     }
 
     companion object {
         private const val TAG = "PlayerRepository"
 
-        /** v0.2.18 preload tuning: how long to wait between checks while a
-         *  playlist download is running, how long before a failed preload is
+        /** v0.2.18 preload tuning: how long before a failed preload is
          *  retried, and the size assumed when the server didn't send one. */
-        private const val PRELOAD_YIELD_MS = 5_000L
         private const val PRELOAD_RETRY_AFTER_MS = 10 * 60_000L
         private const val PRELOAD_UNKNOWN_SIZE_MB = 150.0
 
         /** Heartbeat fires on its own coroutine independent of the
-         *  playlist-refresh loop, so the CMS can see the screen as
-         *  online even mid-download. 10 s is well under the server's
-         *  15 s "online" window. */
-        private const val HEARTBEAT_INTERVAL_MS = 10_000L
+         *  playlist-refresh loop, so the CMS can see the screen as online
+         *  even mid-download. 10 s is well under the server's 15 s "online"
+         *  window. v0.2.26: the server can ask for less often. */
+        private const val HEARTBEAT_DEFAULT_SEC = 10
+        private const val HEARTBEAT_MAX_SEC = 300
 
-        // v0.1.75: splash-download retry backoff. On failure the splash
-        // fetch waits (exponentially, capped) before trying again instead
-        // of re-downloading every poll tick — the old behaviour spammed a
-        // download storm on screens that couldn't fetch a heavy splash.
-        private const val SPLASH_BASE_BACKOFF_MS = 30_000L
-        private const val SPLASH_MAX_BACKOFF_MS = 1_800_000L   // 30 min
-        private const val MAX_SPLASH_ATTEMPTS = 6
+        // ── v0.2.26: sync queue ──
+        /** A failed download waits this long, doubling to the maximum, for as
+         *  long as it's wanted. */
+        private const val RETRY_BASE_MS = 30_000L
+        private const val RETRY_MAX_MS = 10 * 60_000L
+        /** Wait before fetching a file the player has had to throw away more
+         *  than twice. */
+        private const val PURGE_LONG_MS = 60 * 60_000L
+        private const val SPLASH_RETRY_KEY = "splash:"
+
+        /** Trying for this long with some items still missing → play the rest. */
+        private const val PARTIAL_AFTER_MS = 30 * 60_000L
+        /** Adding items one by one restarts the loop each time, so not more
+         *  often than this. */
+        private const val PARTIAL_REPUBLISH_MS = 30_000L
+
+        private const val JITTER_MAX_SEC = 6 * 60 * 60
+        /** Longest spread-out wait while nothing is playing. */
+        private const val JITTER_EMPTY_SEC = 120
+        /** How long a "Refresh" goes on skipping the waits. */
+        private const val URGENT_MS = 6 * 60 * 60_000L
+        private const val SYNC_IDLE_MS = 60_000L
+        private const val CANCELLED_PAUSE_MS = 500L
+
+        private const val LIBRARY_DEFAULT_MIN = 5
+        private const val LIBRARY_MAX_MIN = 24 * 60
+        private const val LIBRARY_MAX_JITTER_SEC = 300
+        private const val LIBRARY_FIRST_WAIT_MS = 5 * 60_000L
+        private const val LIBRARY_STEP_MS = 15_000L
+        private const val LIBRARY_STALE_MS = 5 * 60_000L
 
         /** v0.2.16: web page mode ships on the modern build only. */
         val WEB_MODE_SUPPORTED = com.smartech.screens.BuildConfig.FLAVOR != "legacy"

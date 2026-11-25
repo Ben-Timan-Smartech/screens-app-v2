@@ -2,9 +2,12 @@ package com.smartech.screens
 
 import android.app.Application
 import android.util.Log
+import coil.ImageLoader
+import coil.ImageLoaderFactory
 import com.smartech.screens.data.ApiClient
 import com.smartech.screens.data.DeviceStore
 import com.smartech.screens.data.PlayerRepository
+import com.smartech.screens.data.TrafficStats
 import com.smartech.screens.data.VideoCache
 import com.smartech.screens.sync.HeartbeatWorker
 import com.smartech.screens.update.Updater
@@ -14,12 +17,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import java.io.File
 
 /**
  * Application-wide singletons. Plain manual DI — we don't need Hilt for six
  * collaborators and it keeps the APK small.
  */
-class ScreensApp : Application() {
+class ScreensApp : Application(), ImageLoaderFactory {
 
     lateinit var store: DeviceStore
         private set
@@ -31,7 +36,19 @@ class ScreensApp : Application() {
     lateinit var experienceCache: com.smartech.screens.data.ExperienceCache
         private set
 
+    /** v0.2.26: daily network totals, sent with the heartbeat. */
+    private val traffic: TrafficStats by lazy { TrafficStats(File(filesDir, "traffic.json")) }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** v0.2.26: Coil's own defaults plus the byte counter, so product and brand
+     *  images are in the totals. Deliberately not the shared client: that one
+     *  adds our device token to every request, and images can come from
+     *  elsewhere. */
+    override fun newImageLoader(): ImageLoader =
+        ImageLoader.Builder(this)
+            .okHttpClient { OkHttpClient.Builder().addNetworkInterceptor(traffic.interceptor).build() }
+            .build()
 
     override fun onCreate() {
         super.onCreate()
@@ -48,10 +65,13 @@ class ScreensApp : Application() {
             deviceIdProvider = { runCatching { store.deviceIdBlocking() }.getOrNull() },
             screenCodeProvider = { runCatching { store.locScreenCodeBlocking() }.getOrNull() },
         )
-        val client = ApiClient(tokenProvider = { store.tokenBlocking() })
+        val client = ApiClient(
+            tokenProvider = { store.tokenBlocking() },
+            trafficInterceptor = traffic.interceptor,
+        )
         val cache = VideoCache(this, client.http)
         experienceCache = com.smartech.screens.data.ExperienceCache(this, client.http)
-        repository = PlayerRepository(this, store, client.api, cache, client.http)
+        repository = PlayerRepository(this, store, client.api, cache, client.http, traffic)
         // Updater shares the OkHttp client (connection pool + interceptors
         // already configured) and asks the store for the live server URL
         // each tick — same source of truth as the playlist refresh.
@@ -124,11 +144,11 @@ class ScreensApp : Application() {
         // refreshPlaylist which falls through to demo mode.
         repository.startLiveSync()
 
-        // Heartbeat fires on its own 10 s coroutine, decoupled from the
-        // playlist refresh — so a long download (or 10-min Slow-mode
-        // polling) doesn't make the CMS think the screen has gone
-        // offline. Started after startLiveSync so registration lands
-        // before the first heartbeat.
+        // Heartbeat fires on its own coroutine (every 10 s unless the server
+        // asks for less), decoupled from the playlist refresh — so a long
+        // download (or 10-min Slow-mode polling) doesn't make the CMS think
+        // the screen has gone offline. Started after startLiveSync so
+        // registration lands before the first heartbeat.
         repository.startHeartbeatLoop()
 
         // Kick off registration + first playlist fetch off the main thread.
