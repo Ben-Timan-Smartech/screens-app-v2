@@ -559,6 +559,8 @@ CUSTOM_STORES_JSON = Path(os.environ.get(
     "SCREENS_CUSTOM_STORES_PATH",
     _state_path_default("custom_stores.json"),
 ))
+# v0.2.26: what the tm:rw index said about each product (see _tmrw_fill).
+TMRW_DETAILS_JSON = Path(os.environ.get("SCREENS_TMRW_DETAILS_PATH", _state_path_default("tmrw_details.json")))
 # v0.2.15: what a location is. "retail" (the default, and what every store
 # saved before this had) or "office" — offices have no in-store concept.
 _STORE_KINDS = ("retail", "office")
@@ -2398,6 +2400,199 @@ def _extract_prices(row: dict) -> dict | None:
 _TMRW_VIDEOS_REFRESH_LOCK = threading.Lock()
 _TMRW_VIDEOS_429_UNTIL = 0.0
 
+# v0.2.26: what the index said about each product, kept between refreshes and
+# restarts. A refresh used to ask about every product again every five minutes.
+# The index rate-limited it part way, every product after that was saved blank
+# over what was known, and the next refresh started from the top again: 75 of
+# 80 single-product videos never got a description. Now a refresh only asks for
+# the list of videos, and one background thread (_tmrw_fill) asks about the
+# products it doesn't know or last asked about long ago, the ones with a video
+# of their own first, waiting when told to. Nothing known is ever blanked by a
+# failed call.
+_tmrw_details: dict[str, dict] = {"sku": {}, "brand": {}}   # persisted
+_TMRW_DETAIL_TTL = 6 * 3600.0
+_TMRW_ERROR_RETRY = 1800.0
+_TMRW_PACE_SEC = 0.3
+_tmrw_wanted: dict[tuple, int] = {}      # ("sku" | "brand", key) -> priority
+_tmrw_rows: list = []                    # the last /videos answer
+_tmrw_build_lock = threading.Lock()
+_tmrw_fill_lock = threading.Lock()
+_EMPTY_DETAIL = {"brand": None, "packshot": None, "descShort": None, "descLong": None, "prices": None}
+
+
+class _TmrwLimited(Exception):
+    def __init__(self, wait: float):
+        super().__init__(f"rate-limited, {wait:.0f}s")
+        self.wait = wait
+
+
+def _tmrw_get(path: str, key: str, timeout: float = 8):
+    """JSON from the index, or None for a 404."""
+    req = urllib.request.Request(f"{BRAND_API_BASE}{path}", headers={"X-API-Key": key, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8") or "null")
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            try:
+                wait = float(e.headers.get("Retry-After") or 0)
+            except (TypeError, ValueError, AttributeError):
+                wait = 0.0
+            raise _TmrwLimited(min(max(wait, 0.0), 600.0))
+        if e.code == 404:
+            return None
+        raise
+
+
+def _desc_text(v) -> str | None:
+    """Plain text of a description that may be HTML."""
+    t = str(v or "")
+    if "<" in t:
+        t = re.sub(r"(?i)<(br|/p|/li|/h[1-6]|/div)[^>]*>", "\n", t)
+        t = re.sub(r"(?i)</?(b|strong|i|em|u|span|a|sup|sub|small)\b[^>]*>", "", t)
+        t = re.sub(r"</?[A-Za-z!][^>]*>", " ", t)
+    t = html.unescape(t)
+    t = "\n".join(re.sub(r"[ \t\u00a0]+", " ", ln).strip() for ln in t.splitlines())
+    return re.sub(r"\n{2,}", "\n", t).strip() or None
+
+
+def _short_desc(long: str | None, limit: int = 180) -> str | None:
+    """The first sentence or two of a long description."""
+    t = re.sub(r"\s+", " ", long or "").strip()
+    if len(t) <= limit:
+        return t or None
+    cut = t[:limit + 1]
+    end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if end >= 40:
+        return cut[:end + 1]
+    return cut[:cut.rfind(" ")].rstrip(" ,;:-") + "…" if " " in cut else cut[:limit] + "…"
+
+
+def _tmrw_fetch_sku(sku: str, key: str) -> dict:
+    q = urllib.parse.quote(sku, safe="")
+    d = dict(_EMPTY_DETAIL)
+    pdata = _tmrw_get(f"/product?sku={q}", key) or {}
+    prod = pdata.get("product") or {}
+    d["brand"] = (prod.get("brand") or "").strip() or None
+    # v0.1.86: per-currency prices may ride on the product record (the caller
+    # also checks the /videos row as a fallback).
+    d["prices"] = _extract_prices(prod)
+    imagery = pdata.get("imagery") or []
+    main = next((im for im in imagery if (im.get("role") or "").lower() == "main"), None) \
+        or (imagery[0] if imagery else None)
+    if main:
+        # Prefer `driveUrl` (the servable Drive link) over `filePath`: for many
+        # products (e.g. TCL Global) filePath is a local CloudStorage *sync
+        # path* and the Drive URL lives in driveUrl; for others (e.g. Foreo)
+        # filePath itself is the Drive URL and driveUrl is null.
+        d["packshot"] = _drive_thumb_url(main.get("driveUrl") or main.get("filePath"))
+    time.sleep(_TMRW_PACE_SEC)
+    # v0.1.86: short/long marketing copy for the product card. v0.2.26: some
+    # products only have an HTML one, and some only a long one.
+    ddata = _tmrw_get(f"/description?sku={q}", key) or {}
+    d["descLong"] = _desc_text(ddata.get("long")) or _desc_text(ddata.get("html"))
+    d["descShort"] = _desc_text(ddata.get("short")) or _short_desc(d["descLong"])
+    return d
+
+
+_TMRW_PRODUCT_KEEP = ("name", "productName", "ivendSku", "sku", "familyId") \
+    + tuple(f for fields in _PRICE_FIELDS.values() for f in fields)
+
+
+def _tmrw_fetch_brand(brand: str, key: str) -> list:
+    got = _tmrw_get(f"/products?brand={urllib.parse.quote(brand, safe='')}", key)
+    return [{k: p[k] for k in _TMRW_PRODUCT_KEEP if p.get(k) not in (None, "")}
+            for p in got or [] if isinstance(p, dict)] if isinstance(got, list) else []
+
+
+def _tmrw_due(now: float) -> list[tuple]:
+    """What to ask about, most useful first."""
+    out = []
+    for k, prio in list(_tmrw_wanted.items()):
+        e = _tmrw_details[k[0]].get(k[1]) or {}
+        if now - (e.get("at") or 0) >= _TMRW_DETAIL_TTL and now >= (e.get("tryAt") or 0):
+            # Never known comes before known but old.
+            out.append((prio + (0 if e.get("at") is None else 10), k))
+    out.sort(key=lambda t: t[0])
+    return [k for _, k in out]
+
+
+def _tmrw_save_details() -> None:
+    try:
+        _atomic_write_json(TMRW_DETAILS_JSON, _tmrw_details)
+    except Exception as e:
+        print(f"[tmrwvideos] saving details failed: {e}", file=sys.stderr)
+
+
+def _tmrw_fill() -> int:
+    """Ask about everything due. Returns how many answers were saved. One at a
+    time, and only ever on its own thread."""
+    global _TMRW_VIDEOS_429_UNTIL
+    done = since_build = 0
+    limited = 0
+    saved_at = time.monotonic()
+    while True:
+        key = ((_secrets.get("brandApiKey") or {}).get("value") or "").strip()
+        due = _tmrw_due(time.time()) if key else []
+        if not due:
+            if since_build:
+                _tmrw_build_videos(_tmrw_rows)      # may want more
+                since_build = 0
+                continue
+            break
+        kind, k = due[0]
+        old = _tmrw_details[kind].get(k) or {}
+        try:
+            if kind == "sku":
+                _tmrw_details["sku"][k] = {**_tmrw_fetch_sku(k, key), "at": time.time()}
+            else:
+                _tmrw_details["brand"][k] = {"rows": _tmrw_fetch_brand(k, key), "at": time.time()}
+            limited = 0
+            done += 1
+            since_build += 1
+        except _TmrwLimited as e:
+            limited += 1
+            wait = e.wait or min(600.0, 30.0 * 2 ** (limited - 1))
+            _TMRW_VIDEOS_429_UNTIL = max(_TMRW_VIDEOS_429_UNTIL, time.time() + wait)
+            print(f"[tmrwvideos] rate-limited with {len(due)} to go; waiting {wait:.0f}s", file=sys.stderr)
+            if since_build:
+                _tmrw_build_videos(_tmrw_rows)
+                since_build = 0
+            if done:
+                _tmrw_save_details()
+                saved_at = time.monotonic()
+            time.sleep(wait)
+            continue
+        except Exception as e:
+            # Keep what's known; look again later.
+            _tmrw_details[kind][k] = {**old, "tryAt": time.time() + _TMRW_ERROR_RETRY}
+            print(f"[tmrwvideos] {kind} {k}: {e}", file=sys.stderr)
+        if since_build >= 25:
+            _tmrw_build_videos(_tmrw_rows)
+            since_build = 0
+        if time.monotonic() - saved_at > 60:
+            _tmrw_save_details()
+            saved_at = time.monotonic()
+        time.sleep(_TMRW_PACE_SEC)
+    if done:
+        _tmrw_save_details()
+        print(f"[tmrwvideos] {done} product details updated", file=sys.stderr)
+    return done
+
+
+def _tmrw_fill_start() -> None:
+    if not _tmrw_due(time.time()) or not _tmrw_fill_lock.acquire(blocking=False):
+        return
+
+    def _worker():
+        try:
+            _tmrw_fill()
+        except Exception as e:
+            print(f"[tmrwvideos] fill crashed: {e}", file=sys.stderr)
+        finally:
+            _tmrw_fill_lock.release()
+    threading.Thread(target=_worker, daemon=True).start()
+
 
 def _tmrw_videos_map() -> dict:
     """Non-blocking entry point. Returns the current (possibly stale)
@@ -2436,10 +2631,10 @@ def _schedule_tmrw_videos_refresh() -> None:
 
 
 def _tmrw_videos_refresh_now() -> None:
-    """Does the actual /videos + per-SKU enrichment fetch. Must only be
-    called with _TMRW_VIDEOS_REFRESH_LOCK held (cold-hydrate or
-    background worker). Writes into _TMRW_VIDEOS_CACHE in place."""
-    global _TMRW_VIDEOS_429_UNTIL
+    """Fetch /videos and rebuild the map. Must only be called with
+    _TMRW_VIDEOS_REFRESH_LOCK held (cold-hydrate or background worker).
+    Writes into _TMRW_VIDEOS_CACHE in place."""
+    global _TMRW_VIDEOS_429_UNTIL, _tmrw_rows
     now = time.time()
     cached = _TMRW_VIDEOS_CACHE["byBrand"]
     # Honour 429 backoff — don't hammer tm:rw while it's rate-limiting us.
@@ -2470,96 +2665,38 @@ def _tmrw_videos_refresh_now() -> None:
         print(f"[tmrwvideos] /videos fetch failed: {e}", file=sys.stderr)
         _TMRW_VIDEOS_CACHE["fetchedAt"] = now
         return
+    _tmrw_rows = rows if isinstance(rows, list) else []
+    _tmrw_build_videos(_tmrw_rows)
+    _tmrw_fill_start()
+
+
+def _tmrw_build_videos(rows: list) -> None:
+    """Rebuild _TMRW_VIDEOS_CACHE from /videos rows and what's known about
+    their products. Makes no calls: what isn't known is put on _tmrw_wanted."""
+    with _tmrw_build_lock:
+        _tmrw_build_videos_locked(rows)
+
+
+def _tmrw_build_videos_locked(rows: list) -> None:
+    global _tmrw_wanted
+    now = time.time()
+    wanted: dict[tuple, int] = {}
+
+    def _want(kind: str, k: str, prio: int) -> None:
+        wanted[(kind, k)] = min(prio, wanted.get((kind, k), prio))
+
     # v0.1.70: brand attribution. Brand-scope rows carry the brand in
     # scopeKey, but product/family-scope rows carry the SKU / familyId
     # there and have NO brand field — so the old "group by scopeKey"
     # filed product-scope videos under the SKU (a TCL product video
     # vanished). Resolve those to the real brand: prefer an explicit
-    # `brand` field, then /product?sku=<sku> (cached per refresh), then
-    # the familyId prefix, and only fall back to scopeKey as a last
-    # resort.
-    # v0.1.77: per-SKU detail (brand + packshot image), fetched once per
-    # refresh via a single /product?sku= call and shared by both brand
-    # resolution AND the Content Library packshot thumbnails.
-    _sku_detail: dict[str, dict] = {}
-    # v0.2.15: fail-fast flag — if tm:rw starts rate-limiting us mid-refresh,
-    # abort instead of grinding through N × (/product + /description) calls
-    # that will all 429 anyway. Caller's 5-min backoff then prevents the
-    # next refresh from piling on top. We use a dict instead of a bare bool
-    # so the closure writes propagate (no `nonlocal` boilerplate).
-    _state = {"ratelimited": False}
-
-    def _tmrw_backoff_now() -> None:
-        """Trigger the shared 429 backoff — one scare is enough to stop
-        the whole refresh. The next scheduled refresh is deferred by
-        _TMRW_RATE_LIMIT_BACKOFF_SEC seconds."""
-        global _TMRW_VIDEOS_429_UNTIL
-        _TMRW_VIDEOS_429_UNTIL = time.time() + _TMRW_RATE_LIMIT_BACKOFF_SEC
-        _state["ratelimited"] = True
-        print(f"[tmrwvideos] 429 observed — aborting this refresh, backing off {_TMRW_RATE_LIMIT_BACKOFF_SEC:.0f}s", file=sys.stderr)
-
-    def _product_detail(sku: str) -> dict:
-        if sku not in _sku_detail:
-            d: dict = {"brand": None, "packshot": None,
-                       "descShort": None, "descLong": None, "prices": None}
-            # Short-circuit — if a prior call this refresh already saw a
-            # 429, don't make more calls. Caller treats the empty dict
-            # as "unresolved".
-            if _state["ratelimited"]:
-                _sku_detail[sku] = d
-                return d
-            try:
-                preq = urllib.request.Request(
-                    f"{BRAND_API_BASE}/product?sku={urllib.parse.quote(sku)}",
-                    headers={"X-API-Key": key, "Accept": "application/json"},
-                )
-                with urllib.request.urlopen(preq, timeout=6) as presp:
-                    pdata = json.loads(presp.read().decode("utf-8") or "{}")
-                prod = pdata.get("product") or {}
-                d["brand"] = (prod.get("brand") or "").strip() or None
-                # v0.1.86: per-currency prices may ride on the product record
-                # (the caller also checks the /videos row as a fallback).
-                d["prices"] = _extract_prices(prod)
-                imagery = pdata.get("imagery") or []
-                main = next((im for im in imagery
-                             if (im.get("role") or "").lower() == "main"), None) \
-                    or (imagery[0] if imagery else None)
-                if main:
-                    # Prefer `driveUrl` (the servable Drive link) over
-                    # `filePath`: for many products (e.g. TCL Global) filePath
-                    # is a local CloudStorage *sync path* and the Drive URL
-                    # lives in driveUrl; for others (e.g. Foreo) filePath itself
-                    # is the Drive URL and driveUrl is null. Try driveUrl first.
-                    d["packshot"] = _drive_thumb_url(main.get("driveUrl") or main.get("filePath"))
-            except urllib.error.HTTPError as e:
-                if e.code == 429:
-                    _tmrw_backoff_now()
-                else:
-                    print(f"[tmrwvideos] product lookup for sku {sku} failed: HTTP {e.code}", file=sys.stderr)
-            except Exception as e:
-                print(f"[tmrwvideos] product lookup for sku {sku} failed: {e}", file=sys.stderr)
-            # v0.1.86: short/long marketing copy for the product card, from the
-            # dedicated /description endpoint. Separate best-effort call so a
-            # description miss never loses the packshot/brand fetched above.
-            if not _state["ratelimited"]:
-                try:
-                    dreq = urllib.request.Request(
-                        f"{BRAND_API_BASE}/description?sku={urllib.parse.quote(sku)}",
-                        headers={"X-API-Key": key, "Accept": "application/json"},
-                    )
-                    with urllib.request.urlopen(dreq, timeout=6) as dresp:
-                        ddata = json.loads(dresp.read().decode("utf-8") or "{}")
-                    d["descShort"] = (ddata.get("short") or "").strip() or None
-                    d["descLong"] = (ddata.get("long") or "").strip() or None
-                except urllib.error.HTTPError as e:
-                    if e.code == 429:
-                        _tmrw_backoff_now()
-                    else:
-                        print(f"[tmrwvideos] description lookup for sku {sku} failed: HTTP {e.code}", file=sys.stderr)
-                except Exception as e:
-                    print(f"[tmrwvideos] description lookup for sku {sku} failed: {e}", file=sys.stderr)
-            _sku_detail[sku] = d
-        return _sku_detail[sku]
+    # `brand` field, then the product's own brand, then the familyId
+    # prefix, and only fall back to scopeKey as a last resort.
+    # v0.1.77: the same per-SKU detail (brand + packshot image) serves both
+    # brand resolution AND the Content Library packshot thumbnails.
+    def _product_detail(sku: str, prio: int = 2) -> dict:
+        _want("sku", sku, prio)
+        return {**_EMPTY_DETAIL, **(_tmrw_details["sku"].get(sku) or {})}
 
     # v0.2.8: expand a family/brand-scope video into the list of products it
     # represents, so the shopper card can cycle through them. A product-scope
@@ -2568,37 +2705,12 @@ def _tmrw_videos_refresh_now() -> None:
     # products, it returns None and the card keeps its single-product
     # behaviour, so there's no regression where tm:rw data is thin or a brand
     # name doesn't match cleanly.
-    _brand_products_cache: dict[str, list] = {}
-
     def _brand_products(brand: str) -> list:
-        bl = (brand or "").strip().lower()
-        if not bl:
+        b = (brand or "").strip()
+        if not b:
             return []
-        if bl not in _brand_products_cache:
-            # v0.2.15: honour the shared 429 abort flag — don't ask tm:rw
-            # for more while it's rate-limiting us.
-            if _state["ratelimited"]:
-                _brand_products_cache[bl] = []
-                return []
-            got: list = []
-            try:
-                preq = urllib.request.Request(
-                    f"{BRAND_API_BASE}/products?brand={urllib.parse.quote(brand)}",
-                    headers={"X-API-Key": key, "Accept": "application/json"},
-                )
-                with urllib.request.urlopen(preq, timeout=8) as presp:
-                    got = json.loads(presp.read().decode("utf-8") or "[]")
-            except urllib.error.HTTPError as e:
-                if e.code == 429:
-                    _tmrw_backoff_now()
-                else:
-                    print(f"[tmrwvideos] products for brand {brand!r} failed: HTTP {e.code}", file=sys.stderr)
-                got = []
-            except Exception as e:
-                print(f"[tmrwvideos] products for brand {brand!r} failed: {e}", file=sys.stderr)
-                got = []
-            _brand_products_cache[bl] = got if isinstance(got, list) else []
-        return _brand_products_cache[bl]
+        _want("brand", b, 1)
+        return (_tmrw_details["brand"].get(b) or {}).get("rows") or []
 
     def _card_from_product(p: dict) -> dict | None:
         """One tm:rw product row → the shopper-card shape, or None if it's too
@@ -2660,13 +2772,15 @@ def _tmrw_videos_refresh_now() -> None:
             return scope_key or None
         # product / family scope — find the real brand.
         sku = (r.get("sku") or (scope_key if scope == "product" else "")).strip()
-        if sku and _product_detail(sku)["brand"]:
-            return _product_detail(sku)["brand"]
+        if sku and _product_detail(sku, 0)["brand"]:
+            return _product_detail(sku, 0)["brand"]
         fam = (r.get("familyId") or "").strip()
         if fam and "|" in fam:
             # familyId is "<brandslug>|pgid:..." — slug, not display,
             # but matches a library brand case-insensitively.
             return fam.split("|", 1)[0] or None
+        if sku and sku not in _tmrw_details["sku"]:
+            return None                  # not asked yet: not a brand called "<sku>"
         return scope_key or None
 
     by_brand: dict[str, dict] = {}
@@ -2698,7 +2812,7 @@ def _tmrw_videos_refresh_now() -> None:
             # Library thumbnail. Only product-scope rows resolve to a SKU →
             # product → main image; brand/family rows stay null and fall
             # back to the generated thumbnail / brand logo.
-            "packshotUrl": (_product_detail(sku_val)["packshot"] if sku_val else None),
+            "packshotUrl": (_product_detail(sku_val, 0)["packshot"] if sku_val else None),
             # v0.1.86: product-card fields — short/long description (tm:rw
             # /description) + per-currency prices (row first, product fallback).
             "description": (_product_detail(sku_val)["descShort"] if sku_val else None),
@@ -2710,6 +2824,7 @@ def _tmrw_videos_refresh_now() -> None:
             # existing single-product behaviour.
             "products": _expand_card_products(r, brand, _row_scope),
         }
+    _tmrw_wanted = wanted
     import hashlib
     # v0.1.77: fold the packshot URL into the hash (not just the file set)
     # so a newly-resolved product image busts the /api/library ETag and
@@ -3032,6 +3147,7 @@ def _load_state_from_disk() -> None:
             (CUSTOM_STORES_JSON, "_custom_stores"),
             (CITY_BRAND_JSON, "_city_brand"),
             (SECRETS_JSON, "_secrets"),
+            (TMRW_DETAILS_JSON, "_tmrw_details"),
         ]:
             if not path.is_file():
                 continue
@@ -3057,6 +3173,10 @@ def _load_state_from_disk() -> None:
                 elif target_name == "_secrets":
                     _secrets.clear()
                     _secrets.update(raw)
+                elif target_name == "_tmrw_details":
+                    for part in ("sku", "brand"):
+                        if isinstance(raw.get(part), dict):
+                            _tmrw_details[part].update(raw[part])
                 else:
                     _sync_groups = raw
                 print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
