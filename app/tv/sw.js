@@ -1,13 +1,13 @@
 /*
  * Screens web player: service worker.
  *
- * Keeps each playlist video on the screen so it plays from local storage,
- * keeps playing when the network drops, and doesn't re-download every loop.
+ * The player stores the videos itself (player.js) and normally plays them
+ * straight from there. This is for a start with no network, and for a screen
+ * that won't play a stored file directly.
  *
- * - Videos (/media/, /uploaded/, /splash/): served from the cache when we
- *   have them, including range requests (video elements ask for byte
- *   ranges). On a miss the request goes to the network as normal, and the
- *   whole file is fetched once in the background for next time.
+ * - Videos (/media/, /uploaded/, /splash/): served from the cache when the
+ *   player has stored them, including range requests (video elements ask for
+ *   byte ranges). Otherwise from the network.
  * - The player's own files (/tv/): network first, cache as the fallback, so
  *   an update arrives on the next load but an offline reload still works.
  * - Everything else (/api/ etc.) is left alone.
@@ -16,10 +16,7 @@
 
 var MEDIA_CACHE = 'screens-media-v1';
 var SHELL_CACHE = 'screens-shell-v1';
-var SHELL_FILES = ['./', './index.html', './player.js'];
-var filling = {};      // url -> true while a background download runs
-var queue = [];        // precache queue, downloaded one at a time
-var queueRunning = false;
+var SHELL_FILES = ['./', './index.html', './mp4.js', './player.js'];
 
 self.addEventListener('install', function (event) {
   self.skipWaiting();
@@ -42,7 +39,7 @@ self.addEventListener('fetch', function (event) {
   var url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   if (isMedia(url)) {
-    event.respondWith(serveMedia(event, req));
+    event.respondWith(serveMedia(req));
   } else if (url.pathname.indexOf('/tv/') === 0) {
     event.respondWith(serveShell(req));
   }
@@ -54,13 +51,18 @@ function cacheKey(url) {
   return u.href;
 }
 
-function serveMedia(event, req) {
+function serveMedia(req) {
   var key = cacheKey(req.url);
   return caches.open(MEDIA_CACHE).then(function (cache) {
     return cache.match(key).then(function (hit) {
-      if (hit) return fromCache(hit, req.headers.get('range'));
-      event.waitUntil(fill(key));
-      return fetch(req);
+      // Tell the player, so it can report whether videos come from here.
+      // (A download by the player itself isn't a video being played.)
+      if (req.destination === 'video') {
+        self.clients.matchAll().then(function (list) {
+          list.forEach(function (c) { c.postMessage({ type: 'media', stored: !!hit }); });
+        });
+      }
+      return hit ? fromCache(hit, req.headers.get('range')) : fetch(req);
     });
   });
 }
@@ -95,54 +97,6 @@ function fromCache(hit, range) {
     });
   });
 }
-
-/** Download the whole file once and keep it. */
-function fill(key) {
-  if (filling[key]) return Promise.resolve();
-  filling[key] = true;
-  return caches.open(MEDIA_CACHE).then(function (cache) {
-    return cache.match(key).then(function (hit) {
-      if (hit) return;
-      return fetch(key, { cache: 'no-store' }).then(function (res) {
-        // Only a complete 200 is worth keeping; a 206 would be a fragment.
-        if (res.status === 200) return cache.put(key, res);
-      });
-    });
-  }).catch(function () { /* try again next time it plays */ })
-    .then(function () { delete filling[key]; });
-}
-
-function runQueue() {
-  if (queueRunning) return Promise.resolve();
-  queueRunning = true;
-  var next = function () {
-    var key = queue.shift();
-    if (!key) { queueRunning = false; return Promise.resolve(); }
-    return fill(key).then(next);
-  };
-  return next();
-}
-
-self.addEventListener('message', function (event) {
-  var data = event.data || {};
-  if (data.type !== 'precache' || !Array.isArray(data.urls)) return;
-  var keep = {};
-  data.urls.forEach(function (u) {
-    var key = cacheKey(u);
-    keep[key] = true;
-    if (queue.indexOf(key) < 0) queue.push(key);
-  });
-  event.waitUntil(
-    caches.open(MEDIA_CACHE).then(function (cache) {
-      // Drop videos that are no longer on this screen's playlist so the
-      // panel's storage doesn't fill up over the months.
-      return cache.keys().then(function (keys) {
-        return Promise.all(keys.filter(function (k) { return !keep[k.url]; })
-          .map(function (k) { return cache.delete(k); }));
-      });
-    }).then(runQueue)
-  );
-});
 
 function serveShell(req) {
   return fetch(req).then(function (res) {

@@ -2,7 +2,10 @@
 
 The web player runs the Screens playlist directly on a Samsung signage screen
 (for example the QM43C), with no media player box. The screen opens a web page
-from our server through its built-in **Custom App** setting.
+from our server in its built-in **Web Browser**.
+
+Custom App isn't used: it only installs signed Samsung apps, and says "Unable to
+connect to the server" when given a web page (tested on a QM43C, 24/11/2026).
 
 ## Each screen's address
 
@@ -12,8 +15,9 @@ The short form is easiest to type on a remote:
 https://screens.smartechworld.com/tv/holt/L1
 ```
 
-At Holt Renfrew Yorkdale, `L1` to `L6` are the left column (top to bottom)
-and `R1` to `R6` the right. Each becomes the screen's name in the CMS
+At Holt Renfrew Yorkdale the addresses are `L1` to `L6` and `R1` to `R6`, six to
+a set. A set is two strips of three: 1 to 3 down the left strip, 4 to 6 down
+the right. Each becomes the screen's name in the CMS
 (`COL.L-1` to `COL.R-6`) and keeps the screen's identity, so use a different
 one on every screen. Capitals don't matter.
 
@@ -33,14 +37,23 @@ https://screens.smartechworld.com/tv/?store=tmrw-holt-yorkdale&code=COL.L-1
 
 ## On the screen
 
-1. Menu → **System → Play via → Custom App**.
-2. Enter the screen's address (above) when asked.
-3. Under **System → Power Control**: **Auto Power On** on, **Auto Power Off** off.
-4. Turn the **screen saver** off.
-5. Switch the screen off at the wall and back on. It should open the player
-   by itself.
+1. In the first set-up, choose **Custom App** as the player, leave its address
+   blank and skip the **RM Server** page.
+2. **Home**, highlight **Web Browser**, press down, **Settings**:
+   - **Home Page**: Custom, then **Enter URL** with this screen's address
+   - **Refresh Interval**: Off
+   - **Zoom**: 100%
+   - **Advanced Settings → General → Hide Tabs and Toolbar automatically**: Use
+3. **System → Auto Source Switching**: off.
+4. **System → Power Control**: **Auto Power On** on, **Auto Power Off** off.
+5. Turn the **screen saver** off.
+6. Open **Web Browser**. Then switch the screen off at the wall and back on: the
+   browser reopens by itself on its Home Page.
 
-The menu names can differ slightly between firmware versions.
+One remote can control several screens at once, so cover or unplug the others
+while typing an address.
+
+The menu names come from the QB43C manual and can differ between models.
 
 ## In the CMS
 
@@ -59,6 +72,23 @@ Restart, Reboot and Update all reload the page, which also picks up a newer
 version of the player. Refresh fetches the playlist straight away. Clear cache
 deletes the stored videos and reloads.
 
+## Stored content
+
+Each video, and the splash, is downloaded once and played from the screen's own
+storage, so a dropped network doesn't stop it. The readout's "Stored" line shows
+how many files are there and whether the one on screen is playing from the
+screen or the server. The screen also sends that to the CMS with each check-in.
+
+Samsung's browser refuses to play a stored file directly, so a single video or
+the splash is cut into pieces on the screen and fed to it as one stream
+(`app/tv/mp4.js`). That works for H.264 files up to 80 MB, without sound. The
+readout's "Stream" line shows it. If it fails four times in ten minutes the
+screen plays the old way and tries again a day later. **Clear cache** deletes
+the stored files and tries again at once.
+
+A stored file that can't be read (one TV, after a night with the power off) is
+read once more, then downloaded again by itself. The video streams until then.
+
 ## Sync
 
 Screens in a group cut between videos on the same moment of the group's clock.
@@ -67,19 +97,48 @@ checked in), keeps playing the current loop meanwhile, then every screen cuts
 to the new first video together. Each screen reports how far it is from the
 group clock, so the CMS can show whether the group is in step.
 
+Each screen learns how long it takes from being told to play to a moving
+picture, and starts the next video that much early. It takes three or four
+changes to settle after a screen is first set up. If one screen still looks
+early or late, use **Later** and **Earlier** next to it on the Sync groups page:
+a delay in the panel itself isn't something the player can measure.
+
+A small faint symbol in the bottom right corner shows while a screen is lining
+up with its group, and goes when it's in step (or after 3 minutes, when the CMS
+shows the problem instead).
+
+### One video in a loop, or the splash
+
+Played as a stored stream, each loop is placed on the group's clock a few
+seconds before it starts: the last picture is held, or the end trimmed, by as
+much as the screen is off. Nothing is skipped and nothing restarts. Screens in a
+group showing the same splash are in step as well.
+
+When the stored stream can't be used:
+
+Samsung screens are slow to skip, so with a single video the player never
+corrects it while it plays. Each time round it goes back to the first frame
+(about half a second before the video's end: once a Samsung video has ended it
+can't be sent back), waits, and starts on the group's moment. Give the video's slot in the CMS a
+second or two more than the video's length, so there's time to get back, and
+make its first and last half second the same still picture, so the wait doesn't
+show. Several videos in a row change with a short blank, so join them into one
+file for a synced set.
+
 ## Known limits (v1)
 
-- **Not yet tested on a real Samsung screen.** Check the debug readout on the
-  first screen: "Cache" should count up to all videos, and "fine speed
-  control" should say yes.
+- **Stored content and sync aren't proven on a Samsung screen yet.** In the
+  readout, "Stored" should count up to all files and say "playing from this
+  screen", and "fine speed control" should say yes.
+- **The splash is synced only as a stored stream**, and only in a sync group.
 - **Seamless changes** need the screen to open the next video while the
   current one plays, so it runs two videos at once for a few seconds. If it
   can't, the player falls back to one by itself and there's a short blank at
   each change. The readout's "Next" line says which. Adding `?gapless=0` to
   the address (or `&gapless=0`) forces one.
-- **Offline play** depends on the screen supporting the browser's offline
-  storage (a service worker). If it doesn't, the screen streams from the
-  server and stops when the network drops.
+- **Starting with no network** depends on the browser supporting a service
+  worker, which keeps the page itself. Without one, a screen that's already
+  playing carries on, but can't start again until the network is back.
 - **Item lengths are whole seconds.** The CMS stores each video's length
   rounded, so a 6.2 s video holds its last frame for the rest of its 7 s slot.
   Every screen in the group does the same, so they stay in step.

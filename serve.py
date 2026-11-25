@@ -2871,26 +2871,41 @@ def _library_with_logos() -> tuple[dict, str]:
     return out, etag
 
 
-# v0.1.86: card data for the shopper-facing product card, keyed by the playing
-# item's library id — the tm:rw-enriched description + per-currency prices +
-# packshot, plus the brand logo (for the image fallback: packshot → brand logo
-# → nothing). Cached by the library ETag so /api/state polls don't rebuild the
-# index each time; only screens with the productCard toggle on ever call this.
-_ENRICHED_CARD_CACHE: dict = {"etag": None, "byId": {}}
+# v0.1.86: card data for the shopper-facing product card — the tm:rw-enriched
+# product name + description + per-currency prices + packshot, plus the brand
+# logo (for the image fallback: packshot → brand logo → nothing). Cached by the
+# library ETag so /api/state polls don't rebuild the index each time; only
+# screens with the productCard toggle on ever call this.
+#
+# Keyed by the video's file, not its library id: a Drive id like "hoverair-4" is
+# the file's position in its brand, so it moves to another video when one is
+# added. Going by id put one product's price on another's video.
+_ENRICHED_CARD_CACHE: dict = {"etag": None, "byPath": {}, "byIdTitle": {}}
 
 
-def _product_card_for(video_id: str) -> dict | None:
-    if not video_id:
-        return None
+def _media_path(url: str | None) -> str:
+    """A media URL's path. The CMS saves playlists with relative URLs, tablets
+    with absolute ones; both name the same file."""
+    try:
+        return urllib.parse.unquote(urllib.parse.urlsplit(url or "").path)
+    except ValueError:
+        return ""
+
+
+def _product_card_for(item: dict) -> dict | None:
     data, etag = _library_with_logos()
     if _ENRICHED_CARD_CACHE["etag"] != etag:
         logos = _brand_logo_map()
-        by_id: dict[str, dict] = {}
+        by_path: dict[str, dict] = {}
+        by_id_title: dict[tuple, dict] = {}
         for v in data.get("videos") or []:
             vid = v.get("id")
             if not vid:
                 continue
             card: dict = {}
+            # The player falls back to the video's title without this.
+            if v.get("productLine"):
+                card["product"] = v["productLine"]
             if v.get("description"):
                 card["description"] = v["description"]
             if v.get("descriptionLong"):
@@ -2904,10 +2919,17 @@ def _product_card_for(video_id: str) -> dict | None:
             blogo = logos.get((v.get("brand") or "").lower())
             if blogo:
                 card["brandLogoUrl"] = blogo
-            if card:
-                by_id[vid] = card
-        _ENRICHED_CARD_CACHE.update({"etag": etag, "byId": by_id})
-    return _ENRICHED_CARD_CACHE["byId"].get(video_id)
+            path = _media_path(v.get("mediaUrl"))
+            if path:
+                by_path[path] = card
+            by_id_title[(vid, v.get("title"))] = card
+        _ENRICHED_CARD_CACHE.update({"etag": etag, "byPath": by_path, "byIdTitle": by_id_title})
+    card = _ENRICHED_CARD_CACHE["byPath"].get(_media_path(item.get("url")))
+    if card is None:
+        # The file was replaced since the push. The id alone isn't enough to say
+        # it's the same video; the id and the title together are.
+        card = _ENRICHED_CARD_CACHE["byIdTitle"].get((item.get("id"), item.get("title")))
+    return card
 
 
 def _test_brand_api_key() -> dict:
@@ -3027,8 +3049,11 @@ def _load_state_from_disk() -> None:
                 elif target_name == "_city_brand":
                     # v0.1.56: don't clobber the _city_brand global —
                     # other code holds references to it. Merge in place.
+                    # A city added to the defaults after the file was saved
+                    # isn't in it, so it keeps its default. A city set to
+                    # "(no splash)" is in it, as "".
                     _city_brand.clear()
-                    _city_brand.update(raw)
+                    _city_brand.update({**DEFAULT_CITY_BRAND, **raw})
                 elif target_name == "_secrets":
                     _secrets.clear()
                     _secrets.update(raw)
@@ -3700,8 +3725,9 @@ def _starts_in_sec(starts_ms) -> float | None:
 
 
 _SYNC_REPORT_INTS = ("anchorMs", "itemIndex", "positionMs", "driftMs", "offsetMs",
-                     "rttMs", "samples", "seeks", "missing", "items")
-_SYNC_REPORT_STRS = ("group", "itemId", "state")
+                     "rttMs", "samples", "seeks", "missing", "items",
+                     "trimMs", "startLeadMs", "startErrMs")
+_SYNC_REPORT_STRS = ("group", "itemId", "state", "measure")
 
 
 def _clean_sync_report(raw) -> dict | None:
@@ -5296,6 +5322,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # Returns the current user (if a valid session cookie is present)
         # or {user: null}. Used by the frontend AuthGate on first paint
         # and after every login/logout to decide what to render.
+        # v0.2.25: just the time, for a synced screen setting its clock.
+        # Nothing else happens here, so the round trip is as short as it gets.
+        if path == "/api/time":
+            self._send_json({"nowMs": round(time.time() * 1000, 1)},
+                            extra_headers=[("Cache-Control", "no-store")])
+            return
+
         if path == "/api/auth/me":
             user = self._current_user()
             self._send_json({
@@ -5455,7 +5488,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # lean and the enriched-library lookup off the hot path
                         # for every other screen.
                         if want_card:
-                            card = _product_card_for(it.get("id") or "")
+                            card = _product_card_for(it)
                             if card:
                                 merged.update(card)
                         enriched_items.append(merged)
@@ -5584,6 +5617,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "mixSplash":   False if sync_group_id else s["mixSplash"],
                         "productCard": bool(s.get("productCard")),   # v0.1.86: on-screen product info card
                         "rotation":    int(s.get("rotation") or 0),  # v0.2.8: physical-mount display rotation (deg)
+                        "syncTrimMs":  int(s.get("syncTrimMs") or 0),  # v0.2.25: web player only
                         "experienceUrl": s.get("experienceUrl"),     # v0.1.92: guided brand experience (kiosk WebView), null = off
                         "experiencePromptPos": s.get("experiencePromptPos") or "top",   # v0.1.95: "top" | "bottom"
                         # v0.1.98: tap-to-skip. Forced OFF for a screen in a
@@ -5735,6 +5769,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "mixSplash":             real_state.get("mixSplash", True),
                         "productCard":           bool(state.get("productCard")),   # v0.1.86
                         "rotation":              int(state.get("rotation") or 0),  # v0.2.8
+                        "syncTrimMs":            int(state.get("syncTrimMs") or 0),
                         "experienceUrl":         state.get("experienceUrl"),       # v0.1.92
                         "experiencePromptPos":   state.get("experiencePromptPos") or "top",   # v0.1.95
                         # Raw stored value (NOT the sync-group-forced one) so the
@@ -6501,6 +6536,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # v0.2.23: is the screen on, is Android's lock screen up,
                     # and is the player holding the box awake right now.
                     "screenOn", "keyguardLocked", "awakeHeld",
+                    # v0.2.25: one line from the web player about what its
+                    # video is doing (stored or streaming, frozen, why).
+                    "videoReport",
                 ):
                     val = body.get(key)
                     if val is None:
@@ -6515,6 +6553,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         val = re.sub(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+", "<url>", val)[:300]
                     if key == "webViewport":
                         val = str(val)[:32]
+                    if key == "videoReport":
+                        val = re.sub(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+", "<url>", str(val))[:420]
                     # v0.1.81: a CMS rename sets nameSetByOperator. The tablet
                     # keeps reporting its *local* name on every heartbeat, so
                     # skip the name merge once an operator has overridden it —
@@ -7118,7 +7158,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "Missing city"); return
             with _STATE_LOCK:
                 if brand is None or brand == "":
-                    _city_brand.pop(city, None)
+                    _city_brand[city] = ""   # "(no splash)", kept over a restart
                 else:
                     _city_brand[city] = brand
                 # v0.1.56: persist to disk. Pre-v0.1.56 this dict lived
@@ -7202,13 +7242,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # POST /api/screens/<deviceId>/poll-mode       { pollMode: "fast"|"normal"|"slow" }
         # POST /api/screens/<deviceId>/low-data-mode   { lowDataMode: bool }   (legacy — writes pollMode)
         # POST /api/screens/<deviceId>/sync-group      { syncGroup: string | null }
+        # POST /api/screens/<deviceId>/sync-trim       { trimMs: -500..500 }   (web player)
         # POST /api/screens/<deviceId>/display-mode    { displayMode: int | null }
         # POST /api/screens/<deviceId>/rotation        { rotation: 0|90|180|270 }
         # POST /api/screens/<deviceId>/name            { name: string }
         # POST /api/screens/<deviceId>/location        { region?, city?, storeId?, concept?, screenCode?, floor?, table? }
         # POST /api/screens/<deviceId>/content-mode    { mode: "playlist"|"web", url?, reloadEveryMin?, pageWidth?,
         #                                                keepAwake?: "always"|"hours"|"off", awakeFrom?, awakeTo? }
-        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|display-mode|rotation|content-mode|name|location)$", path)
+        m = re.match(r"^/api/screens/([^/]+)/(command|playlist|mix-splash|product-card|experience|tap-next|progress-bar|audio|poll-mode|low-data-mode|sync-group|sync-trim|display-mode|rotation|content-mode|name|location)$", path)
         if m:
             device_id = urllib.parse.unquote(m.group(1))
             action = m.group(2)
@@ -7781,6 +7822,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     )
                     self._send_json({"ok": True, "syncGroup": new_group,
                                      "adoptedItems": adopted})
+                    return
+                if action == "sync-trim":
+                    # v0.2.25: line this screen up with its group by eye. + =
+                    # runs earlier. A delay in the panel itself doesn't show
+                    # in anything the player can measure.
+                    raw_trim = body.get("trimMs")
+                    if isinstance(raw_trim, bool) or not isinstance(raw_trim, (int, float)) or not abs(raw_trim) <= 500:
+                        self._send_json({"ok": False, "error": "trimMs must be between -500 and 500"}, status=400)
+                        return
+                    state = _ensure_screen_state(device_id)
+                    state["syncTrimMs"] = int(raw_trim)
+                    _save_per_screen_soon()
+                    self._send_json({"ok": True, "trimMs": state["syncTrimMs"]})
                     return
                 if action == "display-mode":
                     # Pick an HDMI mode for this screen. null = auto

@@ -40,6 +40,28 @@ Rules:
   the group's videos instead of its own. The tablet asks first, lists only
   groups at its location, and says so if joining fails.
 - **The tablet's clock test covers the whole group**, not just that tablet.
+- **Samsung screens in a group keep closer time.** Each one sets its clock with
+  quick time checks, learns how long it takes to start a video and starts it
+  that much early. With one video in a loop they never skip inside it: they
+  start together each time round and are left alone. A small faint symbol in
+  the corner shows while a screen is lining up. Sync groups has Later / Earlier buttons to line a screen up
+  by eye.
+- **Samsung screens keep their content.** A video is stored on the screen once
+  downloaded and plays from there as one unbroken stream, so a dropped network
+  doesn't stop it and the loop has no pause. A screen that can't do this streams
+  it as before.
+- **The splash is in step too**, on Samsung screens in a sync group.
+- **A Samsung screen replaces a stored video it can't read.** One came back from
+  a night without power unable to read its copy, and streamed for the day
+  instead, out of step with its group.
+- **Samsung screens restart a splash that stops.** The web player already did
+  this for playlist videos. Its readout now shows what the video is doing.
+- **Pricing and description shows the product.** It showed the video's file title.
+  It also takes its price from the video that's playing: after a file was added
+  to a brand, a screen could show another product's price.
+- **Toronto screens get the tm:rw splash.** The server's saved list of city
+  splashes was older than Toronto and hid it. "(no splash)" for a city now also
+  survives a restart.
 - **"Check for updates" finds the newest player again.** On players before
   v0.2.22 the button always said "up to date". Press it twice and it installs.
   Where several old players share a network it says where to get the update.
