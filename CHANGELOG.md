@@ -68,6 +68,10 @@ Rules:
 - **Automatic updates wait for approval.** A new release is on the download
   page and behind the buttons straight away, but no screen installs it by
   itself until it's approved.
+- **Wi-Fi saving for a store** (Settings, Locations). Its screens take turns to
+  download, check in less often and can download overnight only, with "Download
+  now" to override. Shows what each screen used per day. Screens need player
+  v0.2.26; a store that hasn't turned it on is unchanged.
 
 ## v0.2.24
 

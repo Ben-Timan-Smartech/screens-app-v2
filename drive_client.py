@@ -403,6 +403,28 @@ def get_metadata(file_id: str) -> dict:
     ).execute()
 
 
+def get_content_version(file_id: str) -> tuple[Optional[str], Optional[int]]:
+    """(md5, size) of a file's content, or (None, None) when Drive has no
+    checksum for it. The checksum changes only when the content does, unlike
+    modifiedTime, which a rename also moves. Talks REST directly like
+    stream_file: the shared httplib2 service isn't safe across threads."""
+    import json
+    import urllib.request
+    req = urllib.request.Request(
+        f"https://www.googleapis.com/drive/v3/files/{file_id}"
+        "?fields=md5Checksum,size&supportsAllDrives=true",
+        headers={"Authorization": f"Bearer {_streaming_token()}",
+                 "User-Agent": "screens-app-v2-drive-client"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        d = json.loads(r.read().decode("utf-8"))
+    try:
+        size = int(d.get("size"))
+    except (TypeError, ValueError):
+        size = None
+    return d.get("md5Checksum") or None, size
+
+
 # Cached service-account credentials for the streaming path. The
 # google-api-python-client Service object holds its own credentials,
 # but we need raw access to the Bearer token for urllib calls — see

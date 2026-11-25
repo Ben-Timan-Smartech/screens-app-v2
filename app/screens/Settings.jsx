@@ -294,6 +294,175 @@ const AddStoreForm = ({ cities, onAdded, onCancel }) => {
   );
 };
 
+// ─────────────────────────────────────────────────────────────
+// Wi-Fi saving — v0.2.26. Per store: spread downloads out, check in less
+// often and, when switched on, only download overnight. Also shows what each
+// screen says it used. Needs player v0.2.26 on the screen.
+// ─────────────────────────────────────────────────────────────
+const trafficTotal = (d) => d ? Object.values(d.rx || {}).reduce((a, b) => a + b, 0) : 0;
+const trafficMb = (n) => n >= 1e8 ? `${Math.round(n / 1e6)} MB` : `${(n / 1e6).toFixed(1)} MB`;
+
+const TrafficTable = ({ storeId }) => {
+  const [rows, setRows] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+  React.useEffect(() => {
+    let live = true;
+    fetch(`/api/traffic?storeId=${encodeURIComponent(storeId)}&days=14`, { credentials: 'include' })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(r.status === 403 ? 'You don\'t have access to this' : `HTTP ${r.status}`)))
+      .then(d => { if (live) setRows(d.screens || []); })
+      .catch(e => { if (live) setErr(e.message); });
+    return () => { live = false; };
+  }, [storeId]);
+  if (err) return <div style={{ fontSize: 12, color: 'var(--ink-4)', padding: '8px 16px 14px' }}>Couldn't load usage: {err}</div>;
+  if (!rows) return <div style={{ fontSize: 12, color: 'var(--ink-4)', padding: '8px 16px 14px' }}>Loading…</div>;
+  if (!rows.length) return (
+    <div style={{ fontSize: 12, color: 'var(--ink-4)', padding: '8px 16px 14px' }}>
+      Nothing reported yet. Screens report once they run player v0.2.26 or later.
+    </div>
+  );
+  const days = [...new Set(rows.flatMap(r => Object.keys(r.days || {})))].sort().slice(-3).reverse();
+  const csv = () => {
+    const kinds = ['media', 'splash', 'library', 'images', 'app', 'api'];
+    const q = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+    const lines = [['Screen', 'Day', ...kinds.map(k => `${k} bytes`), 'Sent bytes', 'Files downloaded', 'Files from disk', 'Failed downloads'].map(q).join(',')];
+    rows.forEach(r => Object.keys(r.days || {}).sort().forEach(day => {
+      const d = r.days[day];
+      lines.push([r.screenCode || r.name, day, ...kinds.map(k => (d.rx || {})[k] || 0), d.tx || 0,
+        (d.files || {}).downloaded || 0, (d.files || {}).fromDisk || 0, (d.files || {}).failed || 0].map(q).join(','));
+    }));
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/csv' }));
+    a.download = `screen-traffic-${storeId}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+  const cell = { padding: '6px 10px', fontSize: 12, textAlign: 'right', whiteSpace: 'nowrap' };
+  return (
+    <div style={{ padding: '0 16px 14px' }}>
+      <div style={{ overflowX: 'auto' }}>
+        <table className="tnum" style={{ borderCollapse: 'collapse', minWidth: 420 }}>
+          <thead>
+            <tr style={{ color: 'var(--ink-4)' }}>
+              <th style={{ ...cell, textAlign: 'left', fontWeight: 500 }}>Screen</th>
+              {days.map(d => <th key={d} style={{ ...cell, fontWeight: 500 }}>{d}</th>)}
+              <th style={{ ...cell, fontWeight: 500 }} title="Of the files its playlists needed, how many were already on the screen">Already stored</th>
+              <th style={{ ...cell, fontWeight: 500 }}>Failed</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style={{ color: 'var(--ink-1)', fontWeight: 500 }}>
+              <td style={{ ...cell, textAlign: 'left' }}>All {rows.length}</td>
+              {days.map(d => <td key={d} style={cell}>{trafficMb(rows.reduce((a, r) => a + trafficTotal((r.days || {})[d]), 0))}</td>)}
+              <td style={cell} /><td style={cell} />
+            </tr>
+            {rows.map(r => {
+              const all = Object.values(r.days || {});
+              const got = all.reduce((a, d) => a + ((d.files || {}).downloaded || 0), 0);
+              const had = all.reduce((a, d) => a + ((d.files || {}).fromDisk || 0), 0);
+              const bad = all.reduce((a, d) => a + ((d.files || {}).failed || 0), 0);
+              return (
+                <tr key={r.deviceId} style={{ borderTop: 'var(--border-faint)', color: 'var(--ink-2)' }}>
+                  <td style={{ ...cell, textAlign: 'left' }}>{r.screenCode || r.name}</td>
+                  {days.map(d => <td key={d} style={cell}>{(r.days || {})[d] ? trafficMb(trafficTotal(r.days[d])) : '–'}</td>)}
+                  <td style={cell}>{got + had ? `${Math.round(100 * had / (got + had))}%` : '–'}</td>
+                  <td style={cell}>{bad || '–'}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ marginTop: 8 }}><Button size="sm" variant="ghost" onClick={csv}>Download CSV (14 days, by type)</Button></div>
+    </div>
+  );
+};
+
+const WifiSavingCard = ({ stores }) => {
+  const [data, setData] = React.useState(null);
+  const [busy, setBusy] = React.useState(null);
+  const [open, setOpen] = React.useState(null);
+  const [adding, setAdding] = React.useState('');
+  const load = () => fetch('/api/store-sync', { credentials: 'include' })
+    .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+    .then(d => setData(d.stores || {}))
+    .catch(() => setData({}));
+  React.useEffect(() => { load(); }, []);
+  const save = async (id, body, done) => {
+    setBusy(id);
+    try {
+      const r = await fetch(`/api/store-sync/${encodeURIComponent(id)}`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.detail || (r.status === 403 ? 'only an owner or super admin can change this' : `HTTP ${r.status}`));
+      showToast(done, 'ok');
+      await load();
+    } catch (e) {
+      showToast(`Couldn't save: ${e.message}`, 'err');
+    } finally {
+      setBusy(null);
+    }
+  };
+  if (!data) return null;
+  const ids = Object.keys(data).sort();
+  const nameOf = (id) => (stores.find(s => s.id === id) || {}).name || id;
+  const addable = stores.filter(s => !data[s.id]);
+  return (
+    <div style={{ border: 'var(--border)', borderRadius: 10, background: 'var(--ink-10)', marginBottom: 12 }}>
+      <div style={{ padding: '12px 16px', borderBottom: 'var(--border-faint)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 240px' }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>Wi-Fi saving</div>
+          <div style={{ fontSize: 12, color: 'var(--ink-4)', marginTop: 2 }}>
+            Screens here take turns to download and check in less often. Needs player v0.2.26.
+          </div>
+        </div>
+        <select value={adding} onChange={(e) => setAdding(e.target.value)} aria-label="Store to add"
+          style={{ height: 28, padding: '0 10px', border: 'var(--border-strong)', borderRadius: 2, fontSize: 12, fontFamily: 'inherit', color: 'var(--ink-1)', background: 'var(--ink-10)' }}>
+          <option value="">Choose a store…</option>
+          {addable.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <Button size="sm" disabled={!adding || !!busy}
+          onClick={() => { const id = adding; setAdding(''); save(id, {}, `Wi-Fi saving is on at ${nameOf(id)}`); }}>Turn on</Button>
+      </div>
+      {!ids.length && <div style={{ padding: '12px 16px', fontSize: 12, color: 'var(--ink-4)' }}>Off everywhere.</div>}
+      {ids.map((id, i) => {
+        const p = data[id];
+        const nowOn = p.nowUntil && p.nowUntil * 1000 > Date.now();
+        return (
+          <div key={id} style={{ borderBottom: i < ids.length - 1 ? 'var(--border-faint)' : 'none' }}>
+            <div style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 240px', minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink-1)' }}>{nameOf(id)}</div>
+                <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>
+                  {p.overnight
+                    ? `Downloads ${p.from}–${p.to} store time · ${nowOn ? 'downloading now, as asked' : p.windowOpen ? 'open now' : 'waiting until ' + p.from}`
+                    : 'Downloads at any time'}
+                  {` · spread over ${p.jitterMin} min · checks in every ${p.heartbeatSec} s`}
+                </div>
+              </div>
+              {p.overnight && (!p.windowOpen || nowOn) && (
+                <Button size="sm" disabled={busy === id}
+                  onClick={() => save(id, { downloadNowHours: nowOn ? 0 : 2 }, nowOn ? 'Back to overnight only' : 'Screens can download for the next 2 hours')}>
+                  {nowOn ? 'Stop downloading now' : 'Download now'}
+                </Button>
+              )}
+              <Button size="sm" variant="ghost" disabled={busy === id}
+                onClick={() => save(id, { overnight: !p.overnight }, p.overnight ? 'Screens download at any time' : `Screens download ${p.from}–${p.to} only`)}>
+                {p.overnight ? 'Allow daytime downloads' : 'Download overnight only'}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setOpen(open === id ? null : id)}>{open === id ? 'Hide usage' : 'Usage'}</Button>
+              <Button size="sm" variant="ghost" disabled={busy === id}
+                onClick={() => save(id, { off: true }, `Wi-Fi saving is off at ${nameOf(id)}`)}>Turn off</Button>
+            </div>
+            {open === id && <TrafficTable storeId={id} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 const LocationsTab = () => {
   const t = LOCATION_TAXONOMY;
   // Bump a counter on `stores-refresh` so React re-renders the list
@@ -410,6 +579,8 @@ const LocationsTab = () => {
           );
         })}
       </div>
+
+      <WifiSavingCard stores={t.stores} />
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 12 }}>
         <TaxonomyList title="Concept" items={t.concepts} render={(c) => <Chip key={c}>{c}</Chip>} />
