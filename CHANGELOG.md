@@ -74,6 +74,9 @@ Rules:
   asked for again every six hours.
 - **Canadian prices reach Toronto screens.** They're read from the index's
   Toronto price, including from products that have a separate Canadian record.
+- **Videos over 32 MB arrive whole on slow Wi-Fi.** A download that was cut off
+  could be taken for the finished file, which then wouldn't play and started
+  again from nothing. It now carries on where it stopped.
 
 ## v0.2.24
 

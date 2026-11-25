@@ -8973,17 +8973,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         STREAM_THRESHOLD = 32 * 1024 * 1024
         stream_no_length = (not partial) and (length > STREAM_THRESHOLD)
 
+        # v0.2.26: in chunks, so a cut-off body is noticed (see the Drive path).
+        chunked = stream_no_length and self._chunks_allowed()
         if partial:
             self.send_response(206)
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         else:
-            self.send_response(200)
+            self._begin_status(200, stream_no_length)
 
         self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
         if stream_no_length:
-            self.send_header("Connection", "close")
-            self.close_connection = True
+            self._send_chunked_header()
         else:
             self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "public, max-age=3600")
@@ -9000,15 +9001,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 while remaining > 0:
                     buf = f.read(min(chunk, remaining))
                     if not buf:
-                        break
+                        self.close_connection = True
+                        return
                     try:
-                        self.wfile.write(buf)
+                        if chunked:
+                            self.wfile.write(b"%x\r\n" % len(buf) + buf + b"\r\n")
+                        else:
+                            self.wfile.write(buf)
                     except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
                         # Browser/tablet cancelled the range — normal during
                         # seek, hover-then-leave, and tablet polling. Don't
                         # spam the log with tracebacks.
                         return
                     remaining -= len(buf)
+                if chunked:
+                    self.wfile.write(b"0\r\n\r\n")
         except FileNotFoundError:
             # Race with file deletion. Already sent headers, nothing else to do.
             pass
@@ -9076,6 +9083,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             return
 
+        # v0.2.26: a body over the ceiling goes out in chunks, and one whose
+        # connection to Drive drops part way carries on from there. It used to
+        # be sent with no length and end early without a sign of it: a box on
+        # slow Wi-Fi (Holt, 25/11/2026) took 15 MB of an 80 MB video for the
+        # whole file, found it broken, and started again from nothing.
+        #
         # GET: stream the body. Headers go out on the first chunk so we
         # echo the actual status (206 vs 200) + the EXACT byte range/total
         # that drive_client parsed from Drive's own response headers.
@@ -9093,49 +9106,83 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # v0.1.73 self-heal covers a rare truncation there.
         CLOUD_RUN_BUFFER_LIMIT = 32 * 1024 * 1024
         headers_sent = False
+        chunked = False
         attempt = 0
+        first = last = -1            # byte range being sent, once Drive has said
+        sent = 0
+        size_known = None
+        quiet = 0                    # reconnects in a row that brought nothing
+        upstream_range = range_header
         while True:
             attempt += 1
+            got = 0
             try:
                 for status, start, end, total, chunk in drive_client.stream_file(
-                    file_id, range_header=range_header
+                    file_id, range_header=upstream_range
                 ):
+                    if headers_sent and not got and (
+                            status != 206 or start != first + sent
+                            or (total and size_known and total != size_known)):
+                        # Not the next bytes of the same file (it was replaced
+                        # while this was being sent).
+                        raise ValueError("the rest of the file isn't what was asked for")
                     if not headers_sent:
+                        first, last, size_known = start, end, total
                         if status == 206:
-                            self.send_response(206)
+                            body_len = (end - start + 1) if end >= start else None
+                            self._begin_status(206, not (body_len and body_len <= CLOUD_RUN_BUFFER_LIMIT))
                             total_s = str(total) if total else "*"
                             self.send_header("Content-Range", f"bytes {start}-{end}/{total_s}")
-                            body_len = (end - start + 1) if end >= start else None
                             if body_len and body_len <= CLOUD_RUN_BUFFER_LIMIT:
                                 self.send_header("Content-Length", str(body_len))
                             else:
-                                self.send_header("Connection", "close")
-                                self.close_connection = True
+                                self._send_chunked_header()
+                                chunked = self._chunks_allowed()
                         else:
-                            self.send_response(200)
+                            self._begin_status(200, not (total and total <= CLOUD_RUN_BUFFER_LIMIT))
                             if total and total <= CLOUD_RUN_BUFFER_LIMIT:
                                 self.send_header("Content-Length", str(total))
                             else:
-                                # Length unknown or too big to buffer:
-                                # stream to EOF. Connection:close tells
-                                # HTTP/1.1 clients to read until the socket
-                                # drops; close_connection makes the Python
-                                # server actually drop it afterwards.
-                                self.send_header("Connection", "close")
-                                self.close_connection = True
+                                # Length unknown or too big to buffer.
+                                self._send_chunked_header()
+                                chunked = self._chunks_allowed()
                         self.send_header("Content-Type", ctype)
                         self.send_header("Accept-Ranges", "bytes")
                         self.send_header("Cache-Control", "public, max-age=3600")
                         self.end_headers()
                         headers_sent = True
                     try:
-                        self.wfile.write(chunk)
+                        if chunked:
+                            self.wfile.write(b"%x\r\n" % len(chunk))
+                            self.wfile.write(chunk)
+                            self.wfile.write(b"\r\n")
+                        else:
+                            self.wfile.write(chunk)
                     except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
                         # Client cancelled (seek, navigation, polling reset).
+                        self.close_connection = True
                         return
-                # Success — drop out of the retry loop.
+                    sent += len(chunk)
+                    got += len(chunk)
+                # Drive hung up before the end: urllib reports that as a
+                # plain end of file.
+                if last >= first >= 0 and sent < last - first + 1:
+                    raise ConnectionError(f"Drive stopped at {sent} of {last - first + 1} bytes")
+                # All of it. Without this last chunk the client knows it isn't.
+                if chunked:
+                    try:
+                        self.wfile.write(b"0\r\n\r\n")
+                    except OSError:
+                        self.close_connection = True
                 break
             except Exception as e:
+                if headers_sent and last >= first >= 0 and not isinstance(e, ValueError):
+                    quiet = 0 if got else quiet + 1
+                    if quiet < 5:
+                        print(f"[/media] {file_id}: {e}; carrying on from byte {first + sent}", file=sys.stderr)
+                        time.sleep(min(8, 2 ** quiet))
+                        upstream_range = f"bytes={first + sent}-{last}"
+                        continue
                 # A Range that starts at/past EOF makes Drive return
                 # 416 Range Not Satisfiable (urllib raises HTTPError
                 # code=416). Forward it AS 416 — NOT 500. A tablet doing a
@@ -9160,7 +9207,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if not headers_sent:
                     print(f"[/media] stream failed for {file_id}: {e}", file=sys.stderr)
                     self.send_error(500, f"Drive stream failed: {e}")
+                else:
+                    print(f"[/media] {file_id}: gave up at byte {first + sent}: {e}", file=sys.stderr)
+                    self.close_connection = True
                 return
+
+    # A body too big for Cloud Run to buffer, sent so that the far end can tell
+    # a finished one from one that was cut off. This server otherwise answers
+    # as HTTP/1.0, which can't.
+    def _chunks_allowed(self) -> bool:
+        return self.request_version == "HTTP/1.1"
+
+    def _begin_status(self, code: int, chunked: bool) -> None:
+        if chunked and self._chunks_allowed():
+            self.protocol_version = "HTTP/1.1"
+            self.send_response(code)
+            del self.protocol_version      # back to the class's for the next one
+        else:
+            self.send_response(code)
+
+    def _send_chunked_header(self) -> None:
+        if self._chunks_allowed():
+            self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
+        self.close_connection = True
 
     # Quieter than the default stdlib log line.
     def log_message(self, fmt: str, *args) -> None:
