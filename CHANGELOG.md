@@ -68,6 +68,9 @@ Rules:
 - **Automatic updates wait for approval.** A new release is on the download
   page and behind the buttons straight away, but no screen installs it by
   itself until it's approved.
+- **Videos over 32 MB arrive whole on slow Wi-Fi.** A download that was cut off
+  could be taken for the finished file, which then wouldn't play and started
+  again from nothing. It now carries on where it stopped.
 
 ## v0.2.24
 
