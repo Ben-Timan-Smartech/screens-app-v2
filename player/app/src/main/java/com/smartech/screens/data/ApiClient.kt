@@ -16,6 +16,9 @@ import java.util.concurrent.TimeUnit
  */
 class ApiClient(
     tokenProvider: () -> String?,
+    // v0.2.26: counts bytes on the wire. A network interceptor, so every client
+    // built from this one with newBuilder() is counted too.
+    trafficInterceptor: Interceptor? = null,
 ) {
     private val authInterceptor = Interceptor { chain ->
         val token = tokenProvider()
@@ -35,6 +38,7 @@ class ApiClient(
                     level = HttpLoggingInterceptor.Level.BASIC
                 })
             }
+            if (trafficInterceptor != null) addNetworkInterceptor(trafficInterceptor)
         }
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)

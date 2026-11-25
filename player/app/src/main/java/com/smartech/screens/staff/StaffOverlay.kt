@@ -87,6 +87,9 @@ fun StaffOverlay(
     // whenever `visible` changes; idempotent if the host doesn't care.
     LaunchedEffect(visible) {
         onVisibilityChange?.invoke(visible)
+        // v0.2.26: the library can now refresh as rarely as the server likes, so
+        // bring it up to date when someone is about to use it.
+        if (visible) repository.refreshLibraryIfOld()
     }
 
     // Both unlock gestures — four-corner taps on touch devices, hold-OK on TVs

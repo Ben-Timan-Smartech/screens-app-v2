@@ -18,6 +18,37 @@ Rules:
 
 ---
 
+## v0.2.26
+
+- **Made for stores with weak Wi-Fi.** Holt Renfrew Yorkdale has over 30
+  screens sharing one busy connection. This version uses as little of it as it
+  can in the day, and copes better when it drops.
+- **The old playlist plays until the new one is ready.** New videos download in
+  the background, one at a time, and the screen changes over when they're all
+  there. If some are still missing after half an hour, it plays the ones it has
+  and adds the rest as they arrive. A screen with nothing on starts with the
+  first video to arrive.
+- **The same video isn't downloaded twice.** Screens now recognise a video by
+  its contents, and keep videos that leave the playlist until the space is
+  needed, so content that comes back plays straight away. Updating to this
+  version keeps the videos already on the screen.
+- **A replaced video is picked up by itself.** When a video file is swapped for
+  a new one, the screen fetches it and plays the old one until it's there.
+- **Downloads don't give up.** A failed download is tried again for as long as
+  the video is on the playlist, carrying on from where it stopped. It used to
+  be left out until the next change.
+- **Downloads can wait for the night.** The CMS can ask a store's screens to
+  hold new downloads while they're playing, and to start at different times
+  after a push or a power cut. "Refresh" always downloads straight away.
+- **A slow splash no longer holds up the playlist.** It downloads after the
+  videos, and the previous splash stays up until it's there.
+- **The content library is only sent when it has changed.** It's checked again
+  when someone opens the staff menu.
+- **Screens report how much data they use each day**, and on what, so a store's
+  connection can be checked from the CMS.
+- **A screen whose saved settings are damaged opens on setup.** A power cut
+  could leave a box closing every time it was opened.
+
 ## v0.2.24
 
 - **Holt Renfrew Yorkdale is now a location.** Toronto has its own city and

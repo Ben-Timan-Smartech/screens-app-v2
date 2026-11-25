@@ -47,8 +47,12 @@ data class VideoItem(
     @SerialName("durationSec") val durationSec: Int? = null,
     /** Pre-signed or public R2 URL for the rendition matching this screen's tier. */
     val url: String,
-    /** Hash / etag used for cache invalidation. Optional. */
+    /** Hash / etag used for cache invalidation. Optional. v0.2.26: changes
+     *  only when the file's content does, and is the same for the same content
+     *  under another id. Null from an older server → cached by id as before. */
     val hash: String? = null,
+    /** v0.2.26: exact file size, when the server knows it. */
+    val bytes: Long? = null,
     val brand: String? = null,
     val product: String? = null,
     /** When true, this video plays with audio even if the screen is muted.

@@ -138,7 +138,7 @@ fun TabletCommandPalette(
                 label = "Refresh playlist now",
                 hint = "refresh · sync · re-poll the server immediately",
                 pinGated = false,
-                run = { repository.refreshNow() },
+                run = { repository.refreshNow(skipWait = true) },
             ),
             Cmd(
                 label = "Update player APK",

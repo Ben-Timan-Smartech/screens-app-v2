@@ -424,7 +424,7 @@ fun PlaylistView(
                         .border(1.dp, Bone, RoundedCornerShape(6.dp))
                         .clickable {
                             LogBuffer.i("PlaylistView", "Refresh now tapped")
-                            repository.refreshNow()
+                            repository.refreshNow(skipWait = true)
                         }
                         .padding(vertical = 12.dp),
                     contentAlignment = Alignment.Center,
@@ -531,8 +531,8 @@ fun PlaylistView(
                         // file state flips), so the badge stays in
                         // sync without polling.
                         val failed = v.id in failures
-                        val cached = remember(downloads, failures) {
-                            repository.cache.has(v.id)
+                        val cached = remember(v, downloads, failures) {
+                            repository.cache.has(v)
                         }
                         PlaylistRow(
                             index = i + 1,

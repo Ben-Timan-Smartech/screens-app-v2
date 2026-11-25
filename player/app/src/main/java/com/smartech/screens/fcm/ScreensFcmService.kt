@@ -51,8 +51,10 @@ class ScreensFcmService : FirebaseMessagingService() {
                     repo.scheduleSelfRestart()
                 }
                 "cache.clear" -> {
-                    repo.cache.reconcile(keep = emptySet(), capBytes = 0L)
-                    repo.refreshPlaylist()
+                    runCatching {
+                        repo.clearCache()
+                        repo.refreshPlaylist()
+                    }.onFailure { Log.w(TAG, "cache.clear failed", it) }
                 }
                 else -> Log.w(TAG, "Unknown push type: $type")
             }

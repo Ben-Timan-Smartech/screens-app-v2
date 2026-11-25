@@ -1,5 +1,6 @@
 package com.smartech.screens.data
 
+import android.os.SystemClock
 import com.smartech.screens.util.LogBuffer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -8,6 +9,7 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Pulls the library (brands + videos) from the live demo server's
@@ -19,6 +21,9 @@ import java.io.File
  * cached in memory AND (v0.2.13) persisted to [cacheFile], so a tablet that
  * boots with no network shows the full last-saved catalogue in the picker
  * instead of the hardcoded fallback set.
+ *
+ * v0.2.26: the library is ~200 KB, so each fetch says which copy we have
+ * (ETag) and the server answers "unchanged" instead of sending it again.
  */
 class RemoteLibrary(
     private val httpClient: OkHttpClient,
@@ -93,12 +98,41 @@ class RemoteLibrary(
     private val _state = MutableStateFlow(Library())
     val state: StateFlow<Library> = _state
 
-    suspend fun refresh(serverUrl: String?) {
-        if (serverUrl.isNullOrBlank()) return
+    /** v0.2.26: the server's tag for the copy in [state], and which server it
+     *  came from. Only ever set alongside that copy. */
+    private data class Tag(val base: String, val etag: String)
+    @Volatile private var tag: Tag? = null
+    private val tagFile: File? = cacheFile?.let { File(it.parentFile, it.name + ".etag") }
+
+    /** True when [loadCache] filled the library from disk. */
+    @Volatile var loadedFromDisk: Boolean = false
+        private set
+
+    /** When the server last confirmed or replaced our copy. 0 = not this run. */
+    @Volatile private var refreshedAtMs = 0L
+    private val refreshing = AtomicBoolean(false)
+
+    fun isOlderThan(ms: Long): Boolean {
+        val at = refreshedAtMs
+        return at == 0L || SystemClock.elapsedRealtime() - at > ms
+    }
+
+    /** True when the server answered: a new copy, or "unchanged". */
+    suspend fun refresh(serverUrl: String?): Boolean {
+        if (serverUrl.isNullOrBlank()) return false
+        // v0.2.26: one fetch at a time (the timer and the staff menu can meet).
+        if (!refreshing.compareAndSet(false, true)) return false
         val base = serverUrl.trimEnd('/')
-        runCatching {
-            val req = Request.Builder().url("$base/api/library").build()
+        val result = runCatching {
+            val known = tag?.takeIf { it.base == base }
+            val req = Request.Builder().url("$base/api/library")
+                .apply { if (known != null) header("If-None-Match", known.etag) }
+                .build()
             httpClient.newCall(req).execute().use { r ->
+                if (r.code == 304) {
+                    refreshedAtMs = SystemClock.elapsedRealtime()
+                    return@use
+                }
                 if (!r.isSuccessful) throw IllegalStateException("HTTP ${r.code}")
                 val raw = r.body?.string() ?: ""
                 val lib = json.decodeFromString<Library>(raw)
@@ -116,19 +150,34 @@ class RemoteLibrary(
                     }
                     v.copy(mediaUrl = url)
                 }
-                _state.value = lib.copy(videos = items)
-                writeCache(_state.value)
+                val next = lib.copy(videos = items)
+                _state.value = next
+                tag = r.header("ETag")?.takeIf { it.isNotBlank() }?.let { Tag(base, it) }
+                refreshedAtMs = SystemClock.elapsedRealtime()
+                writeCache(next)
                 LogBuffer.i("RemoteLibrary", "Fetched ${items.size} videos across ${lib.brands.size} brands")
             }
         }.onFailure { LogBuffer.throttledW("RemoteLibrary", "library-refresh-fail", "Refresh failed: ${it.message}") }
+        refreshing.set(false)
+        return result.isSuccess
     }
 
     /** Persist the current library to disk (best-effort) so it survives a
      *  reboot and is available to the picker before the next network fetch. */
     private fun writeCache(lib: Library) {
         val f = cacheFile ?: return
-        runCatching { f.writeText(json.encodeToString(Library.serializer(), lib)) }
-            .onFailure { LogBuffer.throttledW("RemoteLibrary", "library-cache-write-fail", "Cache write failed: ${it.message}") }
+        runCatching {
+            // The old tag goes first and the new one last, so a power cut can
+            // only leave a library without a tag, never with the wrong one.
+            tagFile?.delete()
+            val part = File(f.parentFile, f.name + ".part")
+            part.writeText(json.encodeToString(Library.serializer(), lib))
+            if (!part.renameTo(f)) {
+                f.delete()
+                part.renameTo(f)
+            }
+            tag?.let { tagFile?.writeText("${it.base}\n${it.etag}") }
+        }.onFailure { LogBuffer.throttledW("RemoteLibrary", "library-cache-write-fail", "Cache write failed: ${it.message}") }
     }
 
     /** Hydrate [state] from the on-disk cache when we have no live data yet.
@@ -144,6 +193,9 @@ class RemoteLibrary(
             val lib = json.decodeFromString<Library>(f.readText())
             if (lib.brands.isNotEmpty() || lib.videos.isNotEmpty()) {
                 _state.value = lib
+                loadedFromDisk = true
+                val saved = tagFile?.takeIf { it.exists() }?.readText()?.split("\n").orEmpty()
+                if (saved.size == 2 && saved[1].isNotBlank()) tag = Tag(saved[0], saved[1])
                 LogBuffer.i("RemoteLibrary", "Loaded cached library: ${lib.videos.size} videos, ${lib.brands.size} brands")
             }
         }.onFailure { LogBuffer.throttledW("RemoteLibrary", "library-cache-read-fail", "Cache read failed: ${it.message}") }
