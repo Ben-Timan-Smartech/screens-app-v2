@@ -2449,7 +2449,8 @@ def _desc_text(v) -> str | None:
     t = str(v or "")
     if "<" in t:
         t = re.sub(r"(?i)<(br|/p|/li|/h[1-6]|/div)[^>]*>", "\n", t)
-        t = re.sub(r"<[^>]+>", " ", t)
+        t = re.sub(r"(?i)</?(b|strong|i|em|u|span|a|sup|sub|small)\b[^>]*>", "", t)
+        t = re.sub(r"</?[A-Za-z!][^>]*>", " ", t)
     t = html.unescape(t)
     t = "\n".join(re.sub(r"[ \t\u00a0]+", " ", ln).strip() for ln in t.splitlines())
     return re.sub(r"\n{2,}", "\n", t).strip() or None
