@@ -25,7 +25,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'web-1.3.0';
+  var VERSION = 'web-1.3.1';
   var FLAVOR = 'web';
 
   // ── Config from the address ─────────────────────────────────────────
@@ -565,14 +565,28 @@
   function keepOne(url, k) {
     return caches.open(MEDIA_CACHE).then(function (c) {
       return c.match(url).then(function (hit) {
-        if (hit) return hit;
+        if (hit && !k.again) return hit;
         return fetch(url, { cache: 'no-store' }).then(function (res) {
           if (res.status !== 200) throw new Error('HTTP ' + res.status);
           return c.put(url, res);        // fails if the download is cut short
-        }).then(function () { return c.match(url); });
+        }).then(function () {
+          if (k.again) k.downloads = (k.downloads || 0) + 1;
+          k.again = false;
+          return c.match(url);
+        }).catch(function (e) {
+          if (!hit) throw e;
+          // It can't be replaced now (no network?): try the one that's here,
+          // less and less often.
+          k.notReplaced = (k.notReplaced || 0) + 1;
+          k.readAt = localNow() + Math.min(1800000, 15000 * Math.pow(2, k.notReplaced));
+          return hit;
+        });
       }).then(function (hit) {
         if (!hit) throw new Error('not stored');
-        return hit.blob().then(function (blob) {
+        return hit.blob().catch(function (e) {
+          k.again = true;                // listed but not readable
+          throw e;
+        }).then(function (blob) {
           var want = Number(hit.headers.get('Content-Length')) || 0;
           if (!blob.size || (want && want !== blob.size)) {
             return c.delete(url).then(function () { throw new Error('incomplete'); });
@@ -1112,7 +1126,7 @@
     if (!calm || msOff || state.audioOn) return false;
     if (msFails.length && localNow() - msFails[msFails.length - 1] < 4000) return false;
     var k = kept[absUrl(url)];
-    return !!k && k.state === 'ready' && k.bytes <= MS_MAX_BYTES && !k.msBad;
+    return !!k && k.state === 'ready' && k.bytes <= MS_MAX_BYTES && !k.msBad && localNow() >= (k.readAt || 0);
   }
 
   function msReset() {
@@ -1143,6 +1157,27 @@
     }
   }
 
+  /** The stored file can't be read. One TV at Holt came back from a night with
+   *  the power off like that (25/11/2026): the file was listed, at the right
+   *  size, and reading it failed every time. Read it once more, then download
+   *  it again. Until that's done the video streams. */
+  function msReadFail(m, why) {
+    var k = kept[m.url];
+    if (!k || k.downloads >= 3) { msFail('cannot read the stored file (' + why + ')'); return; }
+    log('Stored stream: cannot read the stored file (' + why + ')');
+    lastStall = msNote = 'cannot read the stored file (' + why + ')';
+    msReset();
+    k.readFails = (k.readFails || 0) + 1;
+    k.readAt = localNow() + 4000;
+    if (k.readFails < 2) return;
+    k.readFails = 0;
+    if (k.src) { URL.revokeObjectURL(k.src); k.src = null; }
+    k.again = true;
+    k.state = 'failed';
+    k.retryAt = 0;
+    keepContent();
+  }
+
   function msOpen(el, url) {
     msReset();
     if (calmPhase) calmReset();
@@ -1159,6 +1194,7 @@
       return hit.arrayBuffer();
     }).then(function (buf) {
       if (m.dead) return;
+      if (kept[m.url]) { kept[m.url].readFails = kept[m.url].notReplaced = 0; kept[m.url].again = false; }
       try { m.track = ScreensMp4.parse(buf); } catch (e) { msFail('cannot read this file (' + e.message + ')', true); return; }
       if (!MediaSource.isTypeSupported(m.track.mime)) { msFail('cannot play ' + m.track.codec, true); return; }
       m.media = new MediaSource();
@@ -1180,6 +1216,8 @@
       el._mse = m;
       el._openedAt = localNow();
       el.src = m.objectUrl;
+    }, function (e) {
+      if (!m.dead) msReadFail(m, e && e.message || String(e));
     }).catch(function (e) { if (!m.dead) msFail(e.message || String(e)); });
   }
 

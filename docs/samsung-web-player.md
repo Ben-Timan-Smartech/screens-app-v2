@@ -86,6 +86,9 @@ readout's "Stream" line shows it. If it fails four times in ten minutes the
 screen plays the old way and tries again a day later. **Clear cache** deletes
 the stored files and tries again at once.
 
+A stored file that can't be read (one TV, after a night with the power off) is
+read once more, then downloaded again by itself. The video streams until then.
+
 ## Sync
 
 Screens in a group cut between videos on the same moment of the group's clock.
