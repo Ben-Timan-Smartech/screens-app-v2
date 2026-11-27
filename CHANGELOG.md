@@ -85,6 +85,11 @@ Rules:
   It takes over from the index's price; leave it empty to go back to the
   index's. Screens showing that video pick it up at their next check-in, with
   no app update.
+- **Dated promotions.** A brand's promotion prices (say, Black Friday in
+  Toronto) can be loaded once and go live on their own dates, at midnight in the
+  store's city, then go back afterwards. During a promotion the card shows its
+  price, with "Black Friday · Was CA$319.99" above the product name. A struck-
+  through old price needs an app release, which will come later.
 
 ## v0.2.24
 
