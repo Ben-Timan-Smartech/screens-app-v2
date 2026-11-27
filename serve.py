@@ -3281,7 +3281,9 @@ def _push_price_change(path: str) -> list[str]:
 # A promotion wins over a typed price, which wins over the index's.
 _CITY_ZONES = {"TOR": "America/Toronto", "NYC": "America/New_York",
                "LDN": "Europe/London", "BER": "Europe/Berlin", "ROM": "Europe/Rome"}
-_CUR_SYMBOL = {"cad": "CA$", "usd": "US$", "gbp": "£", "eur": "€", "berlinEur": "€", "romeEur": "€"}
+# The same symbols the player puts in front of the price (resolveRegionPrice):
+# plain "$" in Toronto and New York, so the "Was" line matches the price below.
+_CUR_SYMBOL = {"cad": "$", "usd": "$", "gbp": "£", "eur": "€", "berlinEur": "€", "romeEur": "€"}
 _PROMO_INDEX: dict = {"v": None, "by": {}}
 
 
