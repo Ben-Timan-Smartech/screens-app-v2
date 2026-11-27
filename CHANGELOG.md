@@ -88,8 +88,9 @@ Rules:
 - **Dated promotions.** A brand's promotion prices (say, Black Friday in
   Toronto) can be loaded once and go live on their own dates, at midnight in the
   store's city, then go back afterwards. During a promotion the card shows its
-  price, with "Black Friday · Was CA$319.99" above the product name. A struck-
-  through old price needs an app release, which will come later.
+  price, with "Black Friday · Was $319.99" above the product name (the same
+  "$" the price uses). A struck-through old price needs an app release, which
+  will come later.
 - **An uploaded video can borrow a product card.** A video uploaded straight
   to the CMS that isn't in the library has no product card. Open it from the
   screen's playlist and, under "Price on screens", pick the library video
