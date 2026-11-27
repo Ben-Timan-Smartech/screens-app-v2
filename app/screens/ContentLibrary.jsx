@@ -548,6 +548,182 @@ const VideoListHeader = () => (
 );
 
 // ─────────────────────────────────────────────────────────────
+// v0.2.26: PriceEditor — prices typed in by hand for the product card, one
+// city at a time. Saved against the video's file; an empty box shows the
+// tm:rw index's price as before. Screens showing the video's card get it at
+// their next check-in (the server bumps their playlist revision).
+// ─────────────────────────────────────────────────────────────
+const PRICE_CURRENCIES = [
+  { key: 'cad', label: 'Toronto', symbol: 'CA$' },
+  { key: 'gbp', label: 'London', symbol: '£' },
+  { key: 'usd', label: 'New York', symbol: 'US$' },
+  { key: 'berlinEur', label: 'Berlin', symbol: '€' },
+  { key: 'romeEur', label: 'Rome', symbol: '€' },
+];
+
+const fetchPriceSheet = async (mediaUrl) => {
+  const res = await fetch(`/api/library/prices?mediaUrl=${encodeURIComponent(mediaUrl)}`);
+  if (!res.ok) throw new Error(`couldn't load prices (${res.status})`);
+  return res.json();
+};
+
+const saveVideoPrices = async (mediaUrl, prices, products) => {
+  const res = await fetch('/api/library/prices', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mediaUrl, prices, products }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `save failed (${res.status})`);
+  return data;
+};
+
+// rowKey '' is the video's own price; anything else is a product's name.
+const priceDraftFromSheet = (sheet) => {
+  const d = {};
+  for (const row of sheet?.rows || []) {
+    const typed = row.product == null
+      ? (sheet.manual?.prices || {})
+      : ((sheet.manual?.products || {})[row.product] || {});
+    d[row.product == null ? '' : row.product] =
+      Object.fromEntries(Object.entries(typed).map(([k, v]) => [k, String(v)]));
+  }
+  return d;
+};
+
+const PriceEditor = ({ mediaUrl }) => {
+  const auth = useAuth();
+  const canEdit = can(auth.user || { permissions: [] }, 'prices.edit');
+  const [sheet, setSheet] = React.useState(null);
+  const [error, setError] = React.useState(null);
+  const [draft, setDraft] = React.useState({});
+  const [saving, setSaving] = React.useState(false);
+  const [cur, setCur] = React.useState(() => {
+    try { return localStorage.getItem('scr.priceCurrency') || 'cad'; } catch { return 'cad'; }
+  });
+
+  React.useEffect(() => {
+    if (!mediaUrl) return undefined;
+    let live = true;
+    setSheet(null); setError(null);
+    fetchPriceSheet(mediaUrl)
+      .then((s) => { if (live) { setSheet(s); setDraft(priceDraftFromSheet(s)); } })
+      .catch((e) => { if (live) setError(e.message); });
+    return () => { live = false; };
+  }, [mediaUrl]);
+
+  const pickCur = (k) => {
+    setCur(k);
+    try { localStorage.setItem('scr.priceCurrency', k); } catch {}
+  };
+  const symbol = (PRICE_CURRENCIES.find((c) => c.key === cur) || {}).symbol || '';
+  const fmt = (n) => `${symbol}${Number(n) % 1 === 0 ? Number(n) : Number(n).toFixed(2)}`;
+  const dirty = !!sheet && JSON.stringify(draft) !== JSON.stringify(priceDraftFromSheet(sheet));
+
+  const save = async () => {
+    const products = {};
+    for (const row of sheet.rows) {
+      if (row.product != null) products[row.product] = draft[row.product] || {};
+    }
+    setSaving(true);
+    try {
+      const res = await saveVideoPrices(mediaUrl, draft[''] || {}, products);
+      setSheet(res.sheet);
+      setDraft(priceDraftFromSheet(res.sheet));
+      const screens = res.screens || [];
+      showToast(
+        screens.length
+          ? `Price saved. ${screens.join(', ')} will show it at ${screens.length === 1 ? 'its' : 'their'} next check-in`
+          : "Price saved. No screen is showing this video's product card right now",
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Couldn't save the price: ${e.message}`, 'err');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const note = { fontSize: 11, color: 'var(--ink-4)' };
+  return (
+    <div style={{
+      padding: '12px 16px', borderBottom: 'var(--border)',
+      display: 'flex', flexDirection: 'column', gap: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 200px', minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Price on screens</div>
+          <div style={{ ...note, marginTop: 2 }}>
+            Shown on the product card. Leave a box empty to use the price from the index.
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {PRICE_CURRENCIES.map((c) => (
+            <button key={c.key} onClick={() => pickCur(c.key)} style={{
+              padding: '4px 8px', borderRadius: 4, fontSize: 11,
+              background: cur === c.key ? 'var(--ink-0)' : 'var(--ink-8)',
+              color: cur === c.key ? 'var(--on-accent)' : 'var(--ink-2)',
+            }}>{c.label}</button>
+          ))}
+        </div>
+      </div>
+      {error && <div style={{ fontSize: 12, color: 'var(--ink-2)' }}>Couldn't load the prices: {error}</div>}
+      {!sheet && !error && <div style={note}>Loading…</div>}
+      {sheet && !sheet.known && (
+        <div style={note}>This file isn't in the library yet, so it has no product card.</div>
+      )}
+      {sheet && sheet.known && sheet.rows.map((row) => {
+        const k = row.product == null ? '' : row.product;
+        const idx = (row.index || {})[cur];
+        return (
+          <div key={k || '(video)'} style={{
+            display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 130px', gap: 10, alignItems: 'center',
+          }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{
+                fontSize: 13, color: 'var(--ink-1)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{row.name || 'This video'}</div>
+              <div style={note}>{idx != null ? `Index: ${fmt(idx)}` : 'No price in the index'}</div>
+            </div>
+            <Input
+              size="sm"
+              placeholder={idx != null ? String(idx) : 'No price'}
+              value={(draft[k] || {})[cur] ?? ''}
+              leadingIcon={<span style={{ fontSize: 12 }}>{symbol}</span>}
+              onChange={(e) => {
+                const v = e.target.value;
+                setDraft((d) => ({ ...d, [k]: { ...(d[k] || {}), [cur]: v } }));
+              }}
+            />
+          </div>
+        );
+      })}
+      {sheet?.manual?.updatedAt && (
+        <div style={note}>
+          Last set by {sheet.manual.updatedBy || 'someone'}, {new Date(sheet.manual.updatedAt).toLocaleString()}
+        </div>
+      )}
+      {sheet && sheet.known && (canEdit ? (
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Button variant="primary" size="sm" disabled={!dirty || saving} onClick={save}>
+            {saving ? 'Saving…' : 'Save price'}
+          </Button>
+          {dirty && (
+            <Button variant="ghost" size="sm" disabled={saving}
+              onClick={() => setDraft(priceDraftFromSheet(sheet))}>
+              Undo
+            </Button>
+          )}
+        </div>
+      ) : (
+        <div style={note}>Only managers and admins can change prices.</div>
+      ))}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // Preview modal — full-bleed video player with native controls.
 // ESC closes; clicking the dark backdrop closes; close button top-right.
 // ─────────────────────────────────────────────────────────────
@@ -666,6 +842,10 @@ const PreviewModal = ({ video, onClose }) => {
             plus a "Open in Drive" button so the operator can confirm
             the right file is in the library and view it natively in
             Drive if they need to. */}
+        {/* v0.2.26: the price editor goes first, so it's in view without
+            scrolling past the placeholder; the whole body now scrolls. */}
+        <div style={{ overflowY: 'auto', minHeight: 0, flex: '1 1 auto' }}>
+        {video.mediaUrl && !video.pendingSync && <PriceEditor mediaUrl={video.mediaUrl} />}
         {(() => {
           // mediaUrl is "/media/<driveId>" for Drive-synced videos,
           // "/uploaded/<filename>" for direct CMS uploads. Only the
@@ -748,6 +928,7 @@ const PreviewModal = ({ video, onClose }) => {
             </div>
           );
         })()}
+        </div>
         {/* Unmute toggle is video-only — a still has no audio. */}
         {video.type !== 'image' && (
         <div style={{
