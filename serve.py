@@ -565,6 +565,8 @@ TMRW_DETAILS_JSON = Path(os.environ.get("SCREENS_TMRW_DETAILS_PATH", _state_path
 MANUAL_PRICES_JSON = Path(os.environ.get("SCREENS_MANUAL_PRICES_PATH", _state_path_default("manual_prices.json")))
 # v0.2.26: dated promotions (see _promotions).
 PROMOTIONS_JSON = Path(os.environ.get("SCREENS_PROMOTIONS_PATH", _state_path_default("promotions.json")))
+# v0.2.26: videos that show another library video's product card (see _card_links).
+CARD_LINKS_JSON = Path(os.environ.get("SCREENS_CARD_LINKS_PATH", _state_path_default("card_links.json")))
 # v0.2.15: what a location is. "retail" (the default, and what every store
 # saved before this had) or "office" — offices have no in-store concept.
 _STORE_KINDS = ("retail", "office")
@@ -632,6 +634,11 @@ _manual_prices: dict[str, dict] = {}
 # v0.2.26: {"entries": [{id, source, sku, name, city, currency, start, end,
 # price, was}], "lastActive": [ids live at the last check], "v": stamp}
 _promotions: dict = {"entries": [], "lastActive": []}
+# v0.2.26: media path -> {from: a library video's media path, title, updatedAt,
+# updatedBy}. The video shows that library video's product card: its name,
+# description, photo, prices and promotions. For a file with no card of its
+# own, such as a CMS upload a Drive re-scan has dropped from the library.
+_card_links: dict[str, dict] = {}
 # v0.1.96: uploaded guided experiences (the vendored interactive/*.html aren't
 # in here — see _list_experiences). {id, name, brand, filename, sizeBytes,
 # uploadedAt, uploadedBy}
@@ -3196,6 +3203,14 @@ def _with_manual_prices(card: dict, path: str) -> dict:
     return card
 
 
+def _card_source(path: str) -> str:
+    """The media path whose product card a video shows: the library video it's
+    linked to, or its own."""
+    if not path:
+        return path
+    return (_card_links.get(path) or {}).get("from") or path
+
+
 def _library_video_by_path(path: str) -> dict | None:
     data, _ = _library_with_logos()
     for v in data.get("videos") or []:
@@ -3206,8 +3221,10 @@ def _library_video_by_path(path: str) -> dict | None:
 
 def _price_sheet(path: str) -> dict:
     """What the CMS price editor needs for one video: its products, what the
-    index says for each, and what's been typed in."""
-    v = _library_video_by_path(path) or {}
+    index says for each, and what's been typed in. A video linked to another's
+    card shows that video's sheet, plus `cardFrom`."""
+    src = _card_source(path)
+    v = _library_video_by_path(src) or {}
     names = [p.get("product") for p in v.get("products") or [] if (p.get("product") or "").strip()]
     single = len(names) < 2
     rows = ([{"product": None, "name": v.get("productLine") or v.get("title"), "index": v.get("prices") or {}}]
@@ -3227,8 +3244,11 @@ def _price_sheet(path: str) -> dict:
         "brand": v.get("brand"),
         "known": bool(v),
         "rows": rows,
-        "manual": _manual_prices.get(path) or {},
+        "manual": _manual_prices.get(src) or {},
         "promos": promos,
+        "cardFrom": ({"mediaUrl": src, "title": v.get("productLine") or v.get("title") or src,
+                      "updatedBy": (_card_links.get(path) or {}).get("updatedBy")}
+                     if src != path else None),
     }
 
 
@@ -3240,7 +3260,9 @@ def _push_price_change(path: str) -> list[str]:
     for dev, s in _per_screen.items():
         if not s.get("productCard"):
             continue
-        if any(isinstance(it, dict) and _media_path(it.get("url")) == path for it in s.get("items") or []):
+        # The video itself, or one showing its card (see _card_links).
+        if any(isinstance(it, dict) and path in (_media_path(it.get("url")), _card_source(_media_path(it.get("url"))))
+               for it in s.get("items") or []):
             s["revision"] = int(s.get("revision") or 0) + 1
             meta = _screens.get(dev) or {}
             names.append((meta.get("location") or {}).get("screenCode") or meta.get("name") or dev[:8])
@@ -3391,7 +3413,7 @@ def _clean_promotion(raw: dict, source: str) -> dict:
 def _item_skus(item: dict) -> set:
     """The SKUs a playlist item's card is about: its own and its products'."""
     _product_card_for(item)                       # makes sure the cache is built
-    path = _media_path(item.get("url"))
+    path = _card_source(_media_path(item.get("url")))
     sku = _ENRICHED_CARD_CACHE["skuByPath"].get(path) if path in _ENRICHED_CARD_CACHE["byPath"] \
         else _ENRICHED_CARD_CACHE["skuByIdTitle"].get((item.get("id"), item.get("title")))
     card = _ENRICHED_CARD_CACHE["byPath"].get(path) \
@@ -3501,7 +3523,7 @@ def _product_card_for(item: dict, city: str | None = None, now: float | None = N
         _ENRICHED_CARD_CACHE.update({"etag": etag, "byPath": by_path, "byIdTitle": by_id_title,
                                      "skuByPath": sku_by_path, "skuByIdTitle": sku_by_id_title})
         _check_photos_soon()
-    path = _media_path(item.get("url"))
+    path = _card_source(_media_path(item.get("url")))
     card = _ENRICHED_CARD_CACHE["byPath"].get(path)
     sku = _ENRICHED_CARD_CACHE.get("skuByPath", {}).get(path)
     if card is None:
@@ -3618,6 +3640,7 @@ def _load_state_from_disk() -> None:
             (TMRW_DETAILS_JSON, "_tmrw_details"),
             (MANUAL_PRICES_JSON, "_manual_prices"),
             (PROMOTIONS_JSON, "_promotions"),
+            (CARD_LINKS_JSON, "_card_links"),
         ]:
             if not path.is_file():
                 continue
@@ -3653,6 +3676,9 @@ def _load_state_from_disk() -> None:
                 elif target_name == "_promotions":
                     _promotions.clear()
                     _promotions.update({"entries": [], "lastActive": [], **raw})
+                elif target_name == "_card_links":
+                    _card_links.clear()
+                    _card_links.update(raw)
                 else:
                     _sync_groups = raw
                 print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
@@ -7432,6 +7458,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except ValueError as e:
                 self._send_json({"error": "bad_price", "detail": str(e)}, status=400)
                 return
+            # A video showing another's card shares its prices (see _card_links).
+            own, mpath = mpath, _card_source(mpath)
             v = _library_video_by_path(mpath) or {}
             title = v.get("productLine") or v.get("title") or mpath
             with _STATE_LOCK:
@@ -7449,7 +7477,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 text = json.dumps(_manual_prices, indent=2)
                 _ENRICHED_CARD_CACHE["etag"] = None     # rebuild the cards
                 screens = _push_price_change(mpath)
-                sheet = _price_sheet(mpath)
+                sheet = _price_sheet(own)
             _atomic_write_text(MANUAL_PRICES_JSON, text)
             shown = ", ".join(f"{k} {n:g}" for k, n in prices.items())
             if products:
@@ -7458,6 +7486,55 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 kind="settings",
                 text=(f"Price for '{title}' set: {shown}" if shown
                       else f"Price for '{title}' back to the index's"),
+                icon="edit",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"ok": True, "sheet": sheet, "screens": screens})
+            return
+
+        # v0.2.26: POST /api/library/card-link { mediaUrl, from }
+        # Shows a library video's product card (name, description, photo,
+        # prices, promotions) on another video, such as a CMS upload a Drive
+        # re-scan has dropped from the library. An empty `from` removes it.
+        if path == "/api/library/card-link":
+            actor = self._require_perm("prices.edit")
+            if actor is None:
+                return
+            mpath = _media_path(body.get("mediaUrl"))
+            src = _media_path(body.get("from")) if body.get("from") else ""
+            if not mpath.startswith(("/media/", "/uploaded/")):
+                self._send_json({"error": "bad_media", "detail": "Which video? mediaUrl is missing."}, status=400)
+                return
+            v = _library_video_by_path(src) if src else None
+            with _STATE_LOCK:
+                if src and (v is None or src == mpath or src in _card_links
+                            or any(l.get("from") == mpath for l in _card_links.values())):
+                    bad = True
+                else:
+                    bad = False
+                    if src:
+                        _card_links[mpath] = {
+                            "from": src,
+                            "title": v.get("title"),
+                            "updatedAt": _now_utc().isoformat(timespec="seconds"),
+                            "updatedBy": actor.get("display_name"),
+                        }
+                    else:
+                        _card_links.pop(mpath, None)
+                    text = json.dumps(_card_links, indent=2)
+                    screens = _push_price_change(mpath)
+                    sheet = _price_sheet(mpath)
+            if bad:
+                self._send_json({"error": "bad_link",
+                                 "detail": "Pick a video from the library that doesn't use another video's card."},
+                                status=400)
+                return
+            _atomic_write_text(CARD_LINKS_JSON, text)
+            name = (v or {}).get("productLine") or (v or {}).get("title")
+            _log_activity(
+                kind="settings",
+                text=(f"Product card for '{mpath.rsplit('/', 1)[-1]}' now from '{name}'" if src
+                      else f"Product card link removed from '{mpath.rsplit('/', 1)[-1]}'"),
                 icon="edit",
                 who=actor.get("display_name"),
             )

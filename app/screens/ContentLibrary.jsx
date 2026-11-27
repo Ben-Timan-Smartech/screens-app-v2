@@ -578,6 +578,19 @@ const saveVideoPrices = async (mediaUrl, prices, products) => {
   return data;
 };
 
+// v0.2.26: show a library video's product card on this one (an upload a Drive
+// re-scan has dropped has no card of its own). Empty `from` removes the link.
+const linkVideoCard = async (mediaUrl, from) => {
+  const res = await fetch('/api/library/card-link', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mediaUrl, from }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `save failed (${res.status})`);
+  return data;
+};
+
 // rowKey '' is the video's own price; anything else is a product's name.
 const priceDraftFromSheet = (sheet) => {
   const d = {};
@@ -591,13 +604,43 @@ const priceDraftFromSheet = (sheet) => {
   return d;
 };
 
-const PriceEditor = ({ mediaUrl }) => {
+const PriceEditor = ({ mediaUrl, brand }) => {
   const auth = useAuth();
   const canEdit = can(auth.user || { permissions: [] }, 'prices.edit');
   const [sheet, setSheet] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [draft, setDraft] = React.useState({});
   const [saving, setSaving] = React.useState(false);
+  const [linkTo, setLinkTo] = React.useState('');
+  // Library videos this one could take its card from: the same brand's, or
+  // every one if the brand has none.
+  const cardChoices = React.useMemo(() => {
+    const lib = (window.MOCK_VIDEOS || []).filter((v) => (v.mediaUrl || '').startsWith('/media/'));
+    const same = lib.filter((v) => (v.brand || '').toLowerCase() === (brand || '').toLowerCase());
+    return (same.length ? same : lib)
+      .map((v) => ({ mediaUrl: v.mediaUrl, label: v.productLine || v.title || v.mediaUrl }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [brand, sheet]);
+
+  const saveLink = async (from) => {
+    setSaving(true);
+    try {
+      const res = await linkVideoCard(mediaUrl, from);
+      setSheet(res.sheet);
+      setDraft(priceDraftFromSheet(res.sheet));
+      setLinkTo('');
+      const screens = res.screens || [];
+      showToast(
+        (from ? 'Product card linked.' : 'Product card link removed.')
+          + (screens.length ? ` ${screens.join(', ')} will show it at ${screens.length === 1 ? 'its' : 'their'} next check-in` : ''),
+        'ok',
+      );
+    } catch (e) {
+      showToast(`Couldn't change the product card: ${e.message}`, 'err');
+    } finally {
+      setSaving(false);
+    }
+  };
   const [cur, setCur] = React.useState(() => {
     try { return localStorage.getItem('scr.priceCurrency') || 'cad'; } catch { return 'cad'; }
   });
@@ -669,8 +712,46 @@ const PriceEditor = ({ mediaUrl }) => {
       </div>
       {error && <div style={{ fontSize: 12, color: 'var(--ink-2)' }}>Couldn't load the prices: {error}</div>}
       {!sheet && !error && <div style={note}>Loading…</div>}
-      {sheet && !sheet.known && (
-        <div style={note}>This file isn't in the library yet, so it has no product card.</div>
+      {sheet && sheet.cardFrom && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ ...note, flex: '1 1 200px' }}>
+            Shows the product card of “{sheet.cardFrom.title}”. A price typed here is set on that video too.
+          </div>
+          {canEdit && (
+            <Button variant="ghost" size="sm" disabled={saving} onClick={() => saveLink('')}>
+              Unlink
+            </Button>
+          )}
+        </div>
+      )}
+      {sheet && !sheet.known && !sheet.cardFrom && (
+        <>
+          <div style={note}>
+            This file isn't in the library, so it has no product card.
+            {canEdit && cardChoices.length > 0 ? ' You can show the card of a library video instead.' : ''}
+          </div>
+          {canEdit && cardChoices.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <select
+                value={linkTo}
+                onChange={(e) => setLinkTo(e.target.value)}
+                disabled={saving}
+                style={{
+                  flex: '1 1 200px', minWidth: 0, padding: '6px 8px', fontSize: 12,
+                  border: 'var(--border)', borderRadius: 6,
+                  background: 'var(--ink-10)', color: 'var(--ink-1)',
+                }}>
+                <option value="">Pick a library video</option>
+                {cardChoices.map((c) => (
+                  <option key={c.mediaUrl} value={c.mediaUrl}>{c.label}</option>
+                ))}
+              </select>
+              <Button variant="primary" size="sm" disabled={!linkTo || saving} onClick={() => saveLink(linkTo)}>
+                {saving ? 'Saving…' : 'Use its card'}
+              </Button>
+            </div>
+          )}
+        </>
       )}
       {sheet && sheet.known && sheet.rows.map((row) => {
         const k = row.product == null ? '' : row.product;
@@ -862,7 +943,7 @@ const PreviewModal = ({ video, onClose }) => {
         {/* v0.2.26: the price editor goes first, so it's in view without
             scrolling past the placeholder; the whole body now scrolls. */}
         <div style={{ overflowY: 'auto', minHeight: 0, flex: '1 1 auto' }}>
-        {video.mediaUrl && !video.pendingSync && <PriceEditor mediaUrl={video.mediaUrl} />}
+        {video.mediaUrl && !video.pendingSync && <PriceEditor mediaUrl={video.mediaUrl} brand={video.brand} />}
         {(() => {
           // mediaUrl is "/media/<driveId>" for Drive-synced videos,
           // "/uploaded/<filename>" for direct CMS uploads. Only the

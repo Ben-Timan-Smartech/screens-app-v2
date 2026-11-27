@@ -90,6 +90,12 @@ Rules:
   store's city, then go back afterwards. During a promotion the card shows its
   price, with "Black Friday · Was CA$319.99" above the product name. A struck-
   through old price needs an app release, which will come later.
+- **An uploaded video can borrow a product card.** A video uploaded straight
+  to the CMS that isn't in the library has no product card. Open it from the
+  screen's playlist and, under "Price on screens", pick the library video
+  whose card it should show. It then gets that card's name, description,
+  photo, price and promotions. A price typed in for it is set on that library
+  video too. No app update needed.
 
 ## v0.2.24
 
