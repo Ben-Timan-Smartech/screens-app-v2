@@ -699,6 +699,23 @@ const PriceEditor = ({ mediaUrl }) => {
           </div>
         );
       })}
+      {sheet && (sheet.promos || []).length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 4 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-1)' }}>Promotions</div>
+          {sheet.promos.map((p, i) => {
+            const sym = { cad: 'CA$', usd: 'US$', gbp: '£', eur: '€', berlinEur: '€', romeEur: '€' }[p.currency] || '';
+            const money = (n) => `${sym}${Number(n) % 1 === 0 ? Number(n) : Number(n).toFixed(2)}`;
+            const day = (d) => new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+            return (
+              <div key={i} style={{ fontSize: 12, color: p.active ? 'var(--ink-1)' : 'var(--ink-3)' }}>
+                {p.name} · {p.city} · {day(p.start)}{p.end !== p.start ? ` – ${day(p.end)}` : ''} · {money(p.price)}
+                {p.was ? ` (was ${money(p.was)})` : ''}{p.active ? ' · on now' : ''}
+              </div>
+            );
+          })}
+          <div style={note}>During a promotion, its price replaces the one typed here.</div>
+        </div>
+      )}
       {sheet?.manual?.updatedAt && (
         <div style={note}>
           Last set by {sheet.manual.updatedBy || 'someone'}, {new Date(sheet.manual.updatedAt).toLocaleString()}

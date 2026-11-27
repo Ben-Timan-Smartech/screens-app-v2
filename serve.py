@@ -563,6 +563,8 @@ CUSTOM_STORES_JSON = Path(os.environ.get(
 TMRW_DETAILS_JSON = Path(os.environ.get("SCREENS_TMRW_DETAILS_PATH", _state_path_default("tmrw_details.json")))
 # v0.2.26: prices typed in by hand in the CMS (see _manual_prices).
 MANUAL_PRICES_JSON = Path(os.environ.get("SCREENS_MANUAL_PRICES_PATH", _state_path_default("manual_prices.json")))
+# v0.2.26: dated promotions (see _promotions).
+PROMOTIONS_JSON = Path(os.environ.get("SCREENS_PROMOTIONS_PATH", _state_path_default("promotions.json")))
 # v0.2.15: what a location is. "retail" (the default, and what every store
 # saved before this had) or "office" — offices have no in-store concept.
 _STORE_KINDS = ("retail", "office")
@@ -627,6 +629,9 @@ _screens: dict[str, dict] = {}      # deviceId -> registry (last heartbeat, devi
 _custom_stores: dict[str, dict] = {}
 # v0.2.26: media path -> {prices, products, title, brand, updatedAt, updatedBy}
 _manual_prices: dict[str, dict] = {}
+# v0.2.26: {"entries": [{id, source, sku, name, city, currency, start, end,
+# price, was}], "lastActive": [ids live at the last check], "v": stamp}
+_promotions: dict = {"entries": [], "lastActive": []}
 # v0.1.96: uploaded guided experiences (the vendored interactive/*.html aren't
 # in here — see _list_experiences). {id, name, brand, filename, sizeBytes,
 # uploadedAt, uploadedBy}
@@ -2785,6 +2790,7 @@ def _tmrw_build_videos_locked(rows: list) -> None:
         prices = {**(detail.get("prices") or {}), **(_extract_prices(p) or {})} or None
         card = {
             "product": name,
+            "sku": sku,                      # v0.2.26: matches a promotion
             "prices": prices,
             "description": detail.get("descShort"),
             "descriptionLong": detail.get("descLong"),
@@ -3058,7 +3064,7 @@ def _library_with_logos() -> tuple[dict, str]:
 # Keyed by the video's file, not its library id: a Drive id like "hoverair-4" is
 # the file's position in its brand, so it moves to another video when one is
 # added. Going by id put one product's price on another's video.
-_ENRICHED_CARD_CACHE: dict = {"etag": None, "byPath": {}, "byIdTitle": {}}
+_ENRICHED_CARD_CACHE: dict = {"etag": None, "byPath": {}, "byIdTitle": {}, "skuByPath": {}, "skuByIdTitle": {}}
 
 
 def _media_path(url: str | None) -> str:
@@ -3208,6 +3214,13 @@ def _price_sheet(path: str) -> dict:
             if single else
             [{"product": p["product"], "name": p["product"], "index": p.get("prices") or {}}
              for p in v["products"] if (p.get("product") or "").strip()])
+    skus = {str(s).strip().lower() for s in [v.get("sku")] + [p.get("sku") for p in v.get("products") or []] if s}
+    promos = sorted(
+        ({**{k: e.get(k) for k in ("sku", "name", "city", "currency", "start", "end", "price", "was")},
+          "active": _promo_active(e)}
+         for e in _promotions.get("entries") or []
+         if e["sku"].strip().lower() in skus and e["end"] >= _city_today(e["city"])),
+        key=lambda e: (e["start"], e["sku"]))
     return {
         "mediaUrl": path,
         "title": v.get("title"),
@@ -3215,6 +3228,7 @@ def _price_sheet(path: str) -> dict:
         "known": bool(v),
         "rows": rows,
         "manual": _manual_prices.get(path) or {},
+        "promos": promos,
     }
 
 
@@ -3235,12 +3249,219 @@ def _push_price_change(path: str) -> list[str]:
     return sorted(names)
 
 
-def _product_card_for(item: dict) -> dict | None:
+# v0.2.26: dated promotions, e.g. a brand's Black Friday prices for one city,
+# imported from its promotions sheet. During its dates a promotion's price
+# replaces the card's price for that currency, and a line above the product
+# name reads "Black Friday · Was CA$319.99": the player shows one price, so the
+# old one goes in the text until an app release can strike it through. Only
+# screens in the promotion's city see it. A background check refreshes the
+# affected screens when one starts or ends (at midnight in the store's city).
+# A promotion wins over a typed price, which wins over the index's.
+_CITY_ZONES = {"TOR": "America/Toronto", "NYC": "America/New_York",
+               "LDN": "Europe/London", "BER": "Europe/Berlin", "ROM": "Europe/Rome"}
+_CUR_SYMBOL = {"cad": "CA$", "usd": "US$", "gbp": "£", "eur": "€", "berlinEur": "€", "romeEur": "€"}
+_PROMO_INDEX: dict = {"v": None, "by": {}}
+
+
+def _last_sunday(y: int, m: int) -> int:
+    import calendar
+    last = calendar.monthrange(y, m)[1]
+    return last - (calendar.weekday(y, m, last) + 1) % 7
+
+
+def _nth_sunday(y: int, m: int, n: int) -> int:
+    import calendar
+    first = (6 - calendar.weekday(y, m, 1)) % 7 + 1
+    return first + 7 * (n - 1)
+
+
+def _city_today(city: str, now: float | None = None) -> str:
+    """Today's date (YYYY-MM-DD) in a store city."""
+    import datetime as _dt
+    now = time.time() if now is None else now
+    try:
+        from zoneinfo import ZoneInfo
+        return _dt.datetime.fromtimestamp(now, ZoneInfo(_CITY_ZONES[city])).date().isoformat()
+    except Exception:
+        pass
+    # No time zone database: the cities' own summer-time rules.
+    utc = _dt.datetime.fromtimestamp(now, _dt.timezone.utc)
+    y = utc.year
+    if city in ("TOR", "NYC"):
+        off = -5
+        start = _dt.datetime(y, 3, _nth_sunday(y, 3, 2), 7, tzinfo=_dt.timezone.utc)
+        end = _dt.datetime(y, 11, _nth_sunday(y, 11, 1), 6, tzinfo=_dt.timezone.utc)
+    else:
+        off = 0 if city == "LDN" else 1
+        start = _dt.datetime(y, 3, _last_sunday(y, 3), 1, tzinfo=_dt.timezone.utc)
+        end = _dt.datetime(y, 10, _last_sunday(y, 10), 1, tzinfo=_dt.timezone.utc)
+    if start <= utc < end:
+        off += 1
+    return (utc + _dt.timedelta(hours=off)).date().isoformat()
+
+
+def _promo_active(e: dict, now: float | None = None) -> bool:
+    return e["start"] <= _city_today(e["city"], now) <= e["end"]
+
+
+def _promo_for(sku: str | None, city: str | None, now: float | None = None) -> dict | None:
+    """The promotion live now for a product in a city; the latest-starting one
+    if two overlap."""
+    if not sku or not city:
+        return None
+    if _PROMO_INDEX["v"] != _promotions.get("v"):
+        by: dict = {}
+        for e in _promotions.get("entries") or []:
+            by.setdefault((e["city"], e["sku"].strip().lower()), []).append(e)
+        _PROMO_INDEX.update({"v": _promotions.get("v"), "by": by})
+    live = [e for e in _PROMO_INDEX["by"].get((city, str(sku).strip().lower()), []) if _promo_active(e, now)]
+    return max(live, key=lambda e: e["start"]) if live else None
+
+
+def _money(cur: str, n: float) -> str:
+    s = f"{n:,.2f}"
+    return _CUR_SYMBOL.get(cur, "") + (s[:-3] if s.endswith(".00") else s)
+
+
+def _promo_name_line(e: dict, name: str | None) -> str:
+    head = e.get("name") or "Offer"
+    if e.get("was"):
+        head += f" · Was {_money(e['currency'], e['was'])}"
+    return f"{head}\n{name}" if name else head
+
+
+def _with_promos(card: dict, sku: str | None, city: str | None, title: str | None = None,
+                 now: float | None = None) -> dict:
+    if not city or not _promotions.get("entries"):
+        return card
+    out = card
+    e = _promo_for(sku, city, now)
+    if e:
+        out = {**card,
+               "prices": {**(card.get("prices") or {}), e["currency"]: e["price"]},
+               "product": _promo_name_line(e, card.get("product") or title),
+               # For a player that can strike the old price through; today's
+               # players ignore it.
+               "promo": {k: e.get(k) for k in ("name", "currency", "price", "was", "end")}}
+    if card.get("products"):
+        prods, hit = [], False
+        for p in card["products"]:
+            pe = _promo_for(p.get("sku"), city, now)
+            if pe:
+                hit = True
+                p = {**p, "prices": {**(p.get("prices") or {}), pe["currency"]: pe["price"]},
+                     "product": _promo_name_line(pe, p.get("product"))}
+            prods.append(p)
+        if hit:
+            out = {**out, "products": prods}
+    return out
+
+
+def _clean_promotion(raw: dict, source: str) -> dict:
+    """One promotion from the CMS / an import, or ValueError."""
+    import datetime as _dt
+    if not isinstance(raw, dict):
+        raise ValueError("each promotion must be an object")
+    sku = str(raw.get("sku") or "").strip()
+    if not sku:
+        raise ValueError("a promotion has no SKU")
+    city = str(raw.get("city") or "").strip().upper()
+    if city not in _CITY_ZONES:
+        raise ValueError(f"{sku}: unknown city {city!r}")
+    currency = str(raw.get("currency") or "").strip()
+    if currency not in _PRICE_KEYS:
+        raise ValueError(f"{sku}: unknown currency {currency!r}")
+    try:
+        start = _dt.date.fromisoformat(str(raw.get("start"))[:10]).isoformat()
+        end = _dt.date.fromisoformat(str(raw.get("end"))[:10]).isoformat()
+    except ValueError:
+        raise ValueError(f"{sku}: dates must be YYYY-MM-DD") from None
+    if end < start:
+        raise ValueError(f"{sku}: ends before it starts")
+    price = _clean_prices({currency: raw.get("price")}).get(currency)
+    if price is None:
+        raise ValueError(f"{sku}: no price")
+    was = _clean_prices({currency: raw.get("was")}).get(currency) if raw.get("was") not in (None, "") else None
+    name = str(raw.get("name") or "Offer").strip()[:40] or "Offer"
+    pid = f"{source}|{city}|{sku}|{start}|{end}|{name}".lower()
+    return {"id": pid, "source": source, "sku": sku, "name": name, "city": city, "currency": currency,
+            "start": start, "end": end, "price": price, "was": was if was and was > price else None}
+
+
+def _item_skus(item: dict) -> set:
+    """The SKUs a playlist item's card is about: its own and its products'."""
+    _product_card_for(item)                       # makes sure the cache is built
+    path = _media_path(item.get("url"))
+    sku = _ENRICHED_CARD_CACHE["skuByPath"].get(path) if path in _ENRICHED_CARD_CACHE["byPath"] \
+        else _ENRICHED_CARD_CACHE["skuByIdTitle"].get((item.get("id"), item.get("title")))
+    card = _ENRICHED_CARD_CACHE["byPath"].get(path) \
+        or _ENRICHED_CARD_CACHE["byIdTitle"].get((item.get("id"), item.get("title"))) or {}
+    out = {str(s).strip().lower() for s in [sku] + [p.get("sku") for p in card.get("products") or []] if s}
+    return out
+
+
+def _push_promo_change(keys: set) -> list[str]:
+    """Bump every product-card screen in a city whose playlist shows a product
+    in `keys` ({(city, sku)}). Returns their names. Caller holds _STATE_LOCK."""
+    names = []
+    if not keys:
+        return names
+    for dev, s in _per_screen.items():
+        if not s.get("productCard"):
+            continue
+        meta = _screens.get(dev) or {}
+        city = ((meta.get("location") or {}).get("city") or "").upper()
+        if not any(c == city for c, _ in keys):
+            continue
+        if any(isinstance(it, dict) and any((city, k) in keys for k in _item_skus(it))
+               for it in s.get("items") or []):
+            s["revision"] = int(s.get("revision") or 0) + 1
+            names.append((meta.get("location") or {}).get("screenCode") or meta.get("name") or dev[:8])
+    if names:
+        _save_per_screen_soon()
+    return sorted(names)
+
+
+def _promo_tick(now: float | None = None) -> tuple[bool, list[str]]:
+    """Refresh the screens whose price changes because a promotion started or
+    ended since the last check. Returns (anything changed, screens bumped).
+    Caller holds _STATE_LOCK."""
+    entries = _promotions.get("entries") or []
+    active = sorted(e["id"] for e in entries if _promo_active(e, now))
+    last = list(_promotions.get("lastActive") or [])
+    if active == last:
+        return False, []
+    flipped = set(active) ^ set(last)
+    keys = {(e["city"], e["sku"].strip().lower()) for e in entries if e["id"] in flipped}
+    _promotions["lastActive"] = active
+    return True, _push_promo_change(keys)
+
+
+def _promo_loop() -> None:
+    """Background daemon: once a minute, start and end promotions on screen."""
+    while True:
+        time.sleep(60)
+        try:
+            with _STATE_LOCK:
+                changed, screens = _promo_tick()
+                text = json.dumps(_promotions, indent=2) if changed else None
+            if text is not None:
+                _atomic_write_text(PROMOTIONS_JSON, text)
+                if screens:
+                    _log_activity(kind="settings", icon="edit",
+                                  text=f"Promotion prices changed on {', '.join(screens)}")
+        except Exception as e:
+            print(f"[promotions] check failed: {e}", file=sys.stderr)
+
+
+def _product_card_for(item: dict, city: str | None = None, now: float | None = None) -> dict | None:
     data, etag = _library_with_logos()
     if _ENRICHED_CARD_CACHE["etag"] != etag:
         logos = _brand_logo_map()
         by_path: dict[str, dict] = {}
         by_id_title: dict[tuple, dict] = {}
+        sku_by_path: dict[str, str] = {}
+        sku_by_id_title: dict[tuple, str] = {}
         for v in data.get("videos") or []:
             vid = v.get("id")
             if not vid:
@@ -3274,14 +3495,23 @@ def _product_card_for(item: dict) -> dict | None:
             card = _with_manual_prices(card, path)
             if path:
                 by_path[path] = card
+                sku_by_path[path] = v.get("sku")
             by_id_title[(vid, v.get("title"))] = card
-        _ENRICHED_CARD_CACHE.update({"etag": etag, "byPath": by_path, "byIdTitle": by_id_title})
+            sku_by_id_title[(vid, v.get("title"))] = v.get("sku")
+        _ENRICHED_CARD_CACHE.update({"etag": etag, "byPath": by_path, "byIdTitle": by_id_title,
+                                     "skuByPath": sku_by_path, "skuByIdTitle": sku_by_id_title})
         _check_photos_soon()
-    card = _ENRICHED_CARD_CACHE["byPath"].get(_media_path(item.get("url")))
+    path = _media_path(item.get("url"))
+    card = _ENRICHED_CARD_CACHE["byPath"].get(path)
+    sku = _ENRICHED_CARD_CACHE.get("skuByPath", {}).get(path)
     if card is None:
         # The file was replaced since the push. The id alone isn't enough to say
         # it's the same video; the id and the title together are.
-        card = _ENRICHED_CARD_CACHE["byIdTitle"].get((item.get("id"), item.get("title")))
+        key = (item.get("id"), item.get("title"))
+        card = _ENRICHED_CARD_CACHE["byIdTitle"].get(key)
+        sku = _ENRICHED_CARD_CACHE.get("skuByIdTitle", {}).get(key)
+    if card is not None and city:
+        card = _with_promos(card, sku, city, item.get("title"), now)
     return card
 
 
@@ -3387,6 +3617,7 @@ def _load_state_from_disk() -> None:
             (SECRETS_JSON, "_secrets"),
             (TMRW_DETAILS_JSON, "_tmrw_details"),
             (MANUAL_PRICES_JSON, "_manual_prices"),
+            (PROMOTIONS_JSON, "_promotions"),
         ]:
             if not path.is_file():
                 continue
@@ -3419,6 +3650,9 @@ def _load_state_from_disk() -> None:
                 elif target_name == "_manual_prices":
                     _manual_prices.clear()
                     _manual_prices.update(raw)
+                elif target_name == "_promotions":
+                    _promotions.clear()
+                    _promotions.update({"entries": [], "lastActive": [], **raw})
                 else:
                     _sync_groups = raw
                 print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
@@ -5850,7 +6084,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         # lean and the enriched-library lookup off the hot path
                         # for every other screen.
                         if want_card:
-                            card = _product_card_for(it)
+                            card = _product_card_for(it, city=(location.get("city") or "").upper() or None)
                             if card:
                                 merged.update(card)
                         enriched_items.append(merged)
@@ -6273,6 +6507,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             job.pop("createdAt", None)
             self._send_json(job)
+            return
+
+        # v0.2.26: GET /api/promotions -> every promotion, with whether it's on.
+        if path == "/api/promotions":
+            if self._require_perm("library.view") is None:
+                return
+            with _STATE_LOCK:
+                out = [{**e, "active": _promo_active(e)} for e in _promotions.get("entries") or []]
+            out.sort(key=lambda e: (e["start"], e["sku"]))
+            self._send_json({"promotions": out})
             return
 
         # v0.2.26: GET /api/library/prices?mediaUrl=/media/<id> -> one video's
@@ -7112,6 +7356,54 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 icon="sync",
             )
             self._send_json({"ok": True, "queued": True})
+            return
+
+        # v0.2.26: POST /api/promotions { source, promotions: [{sku, name, city,
+        # currency, start, end, price, was}] } replaces every promotion from
+        # that source (an empty list removes them). Screens showing a product
+        # whose price changes right now are refreshed straight away; the rest
+        # change on their dates.
+        if path == "/api/promotions":
+            actor = self._require_perm("prices.edit")
+            if actor is None:
+                return
+            source = str(body.get("source") or "").strip()[:80]
+            if not source:
+                self._send_json({"error": "bad_source", "detail": "Name the promotions sheet (source)."}, status=400)
+                return
+            raw = body.get("promotions")
+            if not isinstance(raw, list) or len(raw) > 5000:
+                self._send_json({"error": "bad_promotions", "detail": "promotions must be a list"}, status=400)
+                return
+            try:
+                new = {}
+                for r in raw:
+                    e = _clean_promotion(r, source)
+                    new[e["id"]] = e
+            except ValueError as e:
+                self._send_json({"error": "bad_promotion", "detail": str(e)}, status=400)
+                return
+            with _STATE_LOCK:
+                old = [e for e in _promotions.get("entries") or [] if e.get("source") == source]
+                keep = [e for e in _promotions.get("entries") or [] if e.get("source") != source]
+                before = {e["id"]: e for e in old}
+                touched = [e for e in old if e["id"] not in new or new[e["id"]] != e] + \
+                          [e for e in new.values() if before.get(e["id"]) != e]
+                keys = {(e["city"], e["sku"].strip().lower()) for e in touched if _promo_active(e)}
+                _promotions["entries"] = keep + sorted(new.values(), key=lambda e: (e["start"], e["sku"]))
+                _promotions["v"] = time.time()
+                _promotions["lastActive"] = sorted(e["id"] for e in _promotions["entries"] if _promo_active(e))
+                screens = _push_promo_change(keys)
+                live = sum(1 for e in new.values() if _promo_active(e))
+                text = json.dumps(_promotions, indent=2)
+            _atomic_write_text(PROMOTIONS_JSON, text)
+            _log_activity(
+                kind="settings", icon="edit", who=actor.get("display_name"),
+                text=(f"Promotions '{source}': {len(new)} saved, {live} on now"
+                      + (f", on {', '.join(screens)}" if screens else "")) if new
+                     else f"Promotions '{source}' removed",
+            )
+            self._send_json({"ok": True, "saved": len(new), "liveNow": live, "screens": screens})
             return
 
         # v0.2.26: POST /api/library/prices
@@ -9552,6 +9844,8 @@ def main() -> None:
     # gcsfuse write can't stall polls or self-edit/toggle POSTs (which is what
     # made rotation changes fail to stick under load).
     threading.Thread(target=_flush_state_loop, daemon=True).start()
+    # v0.2.26: starts and ends dated promotions on screen.
+    threading.Thread(target=_promo_loop, daemon=True).start()
     # Daily re-scan in a background thread. Doesn't run on boot — the
     # existing library.json from the last run is used; Drive Sync UI lets
     # the user trigger an on-demand scan if needed.
