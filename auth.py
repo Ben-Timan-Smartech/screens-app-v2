@@ -100,6 +100,9 @@ PERMISSIONS: dict[str, set[str]] = {
     "library.edit":    {"owner", "super_admin", "admin", "manager", "user", "brand_partner"},
     "library.approve": {"owner", "super_admin", "admin"},
     "library.sync":    {"owner", "super_admin", "admin"},
+    # v0.2.26: typing in the price a screen shows a shopper. Tighter than
+    # library.edit, which brand partners have.
+    "prices.edit":     {"owner", "super_admin", "admin", "manager"},
 
     # v0.1.96: guided brand experiences (interactive HTML run fullscreen on a
     # shop-floor screen). Deliberately TIGHTER than library.edit: an experience

@@ -80,6 +80,11 @@ Rules:
 - **No stand-in logo on the product card.** A product photo a screen can't load
   is left off, and the brand logo no longer takes its place: at Holt it showed
   another company's logo.
+- **Type in a price by hand.** Open a video in the CMS (from the Content Library
+  or a screen's playlist) and set the price its product card shows, per city.
+  It takes over from the index's price; leave it empty to go back to the
+  index's. Screens showing that video pick it up at their next check-in, with
+  no app update.
 
 ## v0.2.24
 

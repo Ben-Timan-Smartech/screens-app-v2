@@ -561,6 +561,8 @@ CUSTOM_STORES_JSON = Path(os.environ.get(
 ))
 # v0.2.26: what the tm:rw index said about each product (see _tmrw_fill).
 TMRW_DETAILS_JSON = Path(os.environ.get("SCREENS_TMRW_DETAILS_PATH", _state_path_default("tmrw_details.json")))
+# v0.2.26: prices typed in by hand in the CMS (see _manual_prices).
+MANUAL_PRICES_JSON = Path(os.environ.get("SCREENS_MANUAL_PRICES_PATH", _state_path_default("manual_prices.json")))
 # v0.2.15: what a location is. "retail" (the default, and what every store
 # saved before this had) or "office" — offices have no in-store concept.
 _STORE_KINDS = ("retail", "office")
@@ -623,6 +625,8 @@ _per_screen: dict[str, dict] = {}   # deviceId -> {revision, items, pushedAt, mi
 _screens: dict[str, dict] = {}      # deviceId -> registry (last heartbeat, device info, etc.)
 # v0.1.38: keyed by slug id. {id, name, address, city}
 _custom_stores: dict[str, dict] = {}
+# v0.2.26: media path -> {prices, products, title, brand, updatedAt, updatedBy}
+_manual_prices: dict[str, dict] = {}
 # v0.1.96: uploaded guided experiences (the vendored interactive/*.html aren't
 # in here — see _list_experiences). {id, name, brand, filename, sizeBytes,
 # uploadedAt, uploadedBy}
@@ -3132,6 +3136,105 @@ def _check_photos_soon() -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
+# v0.2.26: prices typed in by hand, for a product the index has no price for,
+# or the wrong one (Holt Yorkdale's opening, 26/11/2026). Kept by the video's
+# file, like the card cache, so a re-scan that moves library ids can't put one
+# product's price on another's video. A typed price wins over the index's,
+# currency by currency; a currency left blank shows the index's as before.
+# The player already reads every one of these, so no app update is needed.
+_PRICE_KEYS = ("cad", "gbp", "usd", "eur", "berlinEur", "romeEur")
+
+
+def _clean_prices(raw) -> dict:
+    """{currency: amount} from the CMS. Blank amounts are dropped; anything
+    else that isn't a price raises ValueError. Always numbers: the player
+    can't read a price sent as text, and would ignore the whole playlist."""
+    if raw in (None, ""):
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("prices must be an object")
+    out = {}
+    for k, val in raw.items():
+        if k not in _PRICE_KEYS:
+            raise ValueError(f"unknown currency {k!r}")
+        if val is None or (isinstance(val, str) and not val.strip()):
+            continue
+        if isinstance(val, bool):
+            raise ValueError(f"{k}: not a price")
+        if isinstance(val, str):
+            val = re.sub(r"[\s,$£€]|CA|US", "", val)
+        try:
+            n = float(val)
+        except (TypeError, ValueError):
+            raise ValueError(f"{k}: not a price") from None
+        if not (0 < n < 1e7):
+            raise ValueError(f"{k}: must be more than 0")
+        out[k] = round(n, 2)
+    return out
+
+
+def _with_manual_prices(card: dict, path: str) -> dict:
+    mp = _manual_prices.get(path) if path else None
+    if not mp:
+        return card
+    card = dict(card)
+    if mp.get("prices"):
+        card["prices"] = {**(card.get("prices") or {}), **mp["prices"]}
+    by_product = mp.get("products") or {}
+    if by_product and card.get("products"):
+        card["products"] = [
+            {**p, "prices": {**(p.get("prices") or {}), **by_product[p["product"]]}}
+            if p.get("product") in by_product else p
+            for p in card["products"]
+        ]
+    return card
+
+
+def _library_video_by_path(path: str) -> dict | None:
+    data, _ = _library_with_logos()
+    for v in data.get("videos") or []:
+        if path and _media_path(v.get("mediaUrl")) == path:
+            return v
+    return None
+
+
+def _price_sheet(path: str) -> dict:
+    """What the CMS price editor needs for one video: its products, what the
+    index says for each, and what's been typed in."""
+    v = _library_video_by_path(path) or {}
+    names = [p.get("product") for p in v.get("products") or [] if (p.get("product") or "").strip()]
+    single = len(names) < 2
+    rows = ([{"product": None, "name": v.get("productLine") or v.get("title"), "index": v.get("prices") or {}}]
+            if single else
+            [{"product": p["product"], "name": p["product"], "index": p.get("prices") or {}}
+             for p in v["products"] if (p.get("product") or "").strip()])
+    return {
+        "mediaUrl": path,
+        "title": v.get("title"),
+        "brand": v.get("brand"),
+        "known": bool(v),
+        "rows": rows,
+        "manual": _manual_prices.get(path) or {},
+    }
+
+
+def _push_price_change(path: str) -> list[str]:
+    """Bump the revision of every screen showing the product card with this
+    video on it: the player only re-reads its playlist when that changes.
+    Returns the screens' names. Caller holds _STATE_LOCK."""
+    names = []
+    for dev, s in _per_screen.items():
+        if not s.get("productCard"):
+            continue
+        if any(isinstance(it, dict) and _media_path(it.get("url")) == path for it in s.get("items") or []):
+            s["revision"] = int(s.get("revision") or 0) + 1
+            meta = _screens.get(dev) or {}
+            names.append((meta.get("location") or {}).get("screenCode") or meta.get("name") or dev[:8])
+    if names:
+        _save_per_screen_soon()
+    return sorted(names)
+
+
 def _product_card_for(item: dict) -> dict | None:
     data, etag = _library_with_logos()
     if _ENRICHED_CARD_CACHE["etag"] != etag:
@@ -3168,6 +3271,7 @@ def _product_card_for(item: dict) -> dict | None:
             if blogo and not has_photo:
                 card["brandLogoUrl"] = blogo
             path = _media_path(v.get("mediaUrl"))
+            card = _with_manual_prices(card, path)
             if path:
                 by_path[path] = card
             by_id_title[(vid, v.get("title"))] = card
@@ -3282,6 +3386,7 @@ def _load_state_from_disk() -> None:
             (CITY_BRAND_JSON, "_city_brand"),
             (SECRETS_JSON, "_secrets"),
             (TMRW_DETAILS_JSON, "_tmrw_details"),
+            (MANUAL_PRICES_JSON, "_manual_prices"),
         ]:
             if not path.is_file():
                 continue
@@ -3311,6 +3416,9 @@ def _load_state_from_disk() -> None:
                     for part in ("sku", "brand"):
                         if isinstance(raw.get(part), dict):
                             _tmrw_details[part].update(raw[part])
+                elif target_name == "_manual_prices":
+                    _manual_prices.clear()
+                    _manual_prices.update(raw)
                 else:
                     _sync_groups = raw
                 print(f"[state] loaded {len(raw)} entries from {path}", file=sys.stderr)
@@ -6167,6 +6275,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json(job)
             return
 
+        # v0.2.26: GET /api/library/prices?mediaUrl=/media/<id> -> one video's
+        # price sheet (see _price_sheet); with no mediaUrl, every typed price.
+        if path == "/api/library/prices":
+            if self._require_perm("library.view") is None:
+                return
+            want = (params.get("mediaUrl") or [None])[0]
+            with _STATE_LOCK:
+                if want:
+                    out = _price_sheet(_media_path(want))
+                else:
+                    out = {"prices": dict(_manual_prices)}
+            self._send_json(out)
+            return
+
         if path == "/api/library":
             # Library responses are ~450 kB on a typical fleet
             # (1,300+ videos). The CMS polls this every 30 s; without
@@ -6990,6 +7112,64 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 icon="sync",
             )
             self._send_json({"ok": True, "queued": True})
+            return
+
+        # v0.2.26: POST /api/library/prices
+        #   { mediaUrl, prices: {cad: 199, ...}, products: {"<name>": {...}} }
+        # Sets the prices typed in for one video, replacing what was there;
+        # nothing left in either means "use the index's again". Every screen
+        # showing that video's product card gets it on its next poll.
+        if path == "/api/library/prices":
+            actor = self._require_perm("prices.edit")
+            if actor is None:
+                return
+            mpath = _media_path(body.get("mediaUrl"))
+            if not mpath.startswith(("/media/", "/uploaded/")):
+                self._send_json({"error": "bad_media", "detail": "Which video? mediaUrl is missing."}, status=400)
+                return
+            try:
+                prices = _clean_prices(body.get("prices"))
+                raw_products = body.get("products") or {}
+                if not isinstance(raw_products, dict):
+                    raise ValueError("products must be an object")
+                products = {}
+                for name, pr in raw_products.items():
+                    cleaned = _clean_prices(pr)
+                    if str(name).strip() and cleaned:
+                        products[str(name)] = cleaned
+            except ValueError as e:
+                self._send_json({"error": "bad_price", "detail": str(e)}, status=400)
+                return
+            v = _library_video_by_path(mpath) or {}
+            title = v.get("productLine") or v.get("title") or mpath
+            with _STATE_LOCK:
+                if prices or products:
+                    _manual_prices[mpath] = {
+                        "prices": prices,
+                        "products": products,
+                        "title": v.get("title"),
+                        "brand": v.get("brand"),
+                        "updatedAt": _now_utc().isoformat(timespec="seconds"),
+                        "updatedBy": actor.get("display_name"),
+                    }
+                else:
+                    _manual_prices.pop(mpath, None)
+                text = json.dumps(_manual_prices, indent=2)
+                _ENRICHED_CARD_CACHE["etag"] = None     # rebuild the cards
+                screens = _push_price_change(mpath)
+                sheet = _price_sheet(mpath)
+            _atomic_write_text(MANUAL_PRICES_JSON, text)
+            shown = ", ".join(f"{k} {n:g}" for k, n in prices.items())
+            if products:
+                shown = ", ".join(x for x in (shown, f"{len(products)} product(s)") if x)
+            _log_activity(
+                kind="settings",
+                text=(f"Price for '{title}' set: {shown}" if shown
+                      else f"Price for '{title}' back to the index's"),
+                icon="edit",
+                who=actor.get("display_name"),
+            )
+            self._send_json({"ok": True, "sheet": sheet, "screens": screens})
             return
 
         # v0.1.68: refresh a single brand folder. Body: { brand }.
