@@ -234,11 +234,11 @@ const useActivity = () => {
 };
 
 // useLibrary — keeps the in-memory MOCK_VIDEOS / MOCK_BRANDS globals
-// in sync with /api/library. The CMS originally loaded library.json
-// once at page boot via a <script> tag (real-data.jsx), so a Drive
-// sync that wrote a new library.json wouldn't reflect until the user
-// reloaded the tab. This hook polls /api/library every 10s and, when
-// the response shape changes, mutates the existing arrays in place
+// in sync with /api/library. This is the only thing that loads the real
+// library into the CMS: the old boot-time seed (a generated
+// real-data.jsx <script>) is gone, so the placeholders in data.jsx are
+// what shows until the first response lands. This hook polls
+// /api/library and, when the response shape changes, mutates the existing arrays in place
 // AND increments a version counter that subscribers can return as
 // state to trigger re-renders.
 //
